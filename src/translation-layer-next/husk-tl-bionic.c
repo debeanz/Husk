@@ -519,7 +519,11 @@ static void *bionic_dlopen(const char *path, int flags)
     if (!strcmp(base, "libvulkan.so") && !tl_vk_available()) { dl_fail("dlopen failed: library \"%s\" not found", path); return NULL; }
     if (tl_bionic_is_system_lib(base)) {
         for (int i = 0; i < g_nsys; i++) if (!strcmp(g_sys_names[i], base)) return &g_sys_handle[i + 1];
-        if (g_nsys < 15) { snprintf(g_sys_names[g_nsys], 48, "%s", base); g_nsys++; return &g_sys_handle[g_nsys]; }
+        if (g_nsys < 15) {
+            snprintf(g_sys_names[g_nsys], 48, "%s", base); g_nsys++;
+            tl_log_line("dl: the game opened Android's %s (Husk's own)", base);     /* once each: which of Android's APIs it uses */
+            return &g_sys_handle[g_nsys];
+        }
         return &g_sys_handle[0];
     }
     /* A path to a file of its own (a mod's library) loads from there; a bare name, or a path into the app, from the APK. */

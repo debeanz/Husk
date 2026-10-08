@@ -578,6 +578,9 @@ static void *jni_GetMethodID_impl(jo cls, const char *name, const char *sig, boo
     TRACE("jni: Get%sMethodID(%s, %s%s) -> %s", is_static ? "Static" : "", cls->klass.jc->name, name, sig,
           m->fn ? "implemented" : m->exists ? "exists, not implemented" : "NOT FOUND");
     if (!m->exists) {
+        /* Audio engines give up on their output when a method is missing, and say nothing more useful than that. */
+        if (!strncmp(cls->klass.jc->name, "org/fmod/", 9) || !strncmp(cls->klass.jc->name, "android/media/Audio", 19))
+            tl_log_line("jni: no %smethod %s.%s%s", is_static ? "static " : "", cls->klass.jc->name, name, sig);
         char msg[300]; snprintf(msg, sizeof(msg), "no %smethod \"%s\" %s in class L%s;", is_static ? "static " : "", name, sig, cls->klass.jc->name);
         tl_jni_throw("java/lang/NoSuchMethodError", msg);
         return NULL;

@@ -592,6 +592,7 @@ const tl_bionic_entry tl_tab_str[] = {
     TL_DIRECT(pow), TL_DIRECT(powf), TL_DIRECT(scalbn), TL_DIRECT(sin), TL_DIRECT(sinf), TL_DIRECT(sqrtf), TL_DIRECT(tan),
     TL_DIRECT(tanf), TL_WRAP("sincosf", b_sincosf), TL_WRAP("sincos", b_sincos),
     TL_DIRECT(sqrt), TL_DIRECT(fmin), TL_DIRECT(fmax), TL_DIRECT(frexp), TL_DIRECT(asinh), TL_DIRECT(tanh),
+    TL_DIRECT(remainder), TL_DIRECT(remainderf),
     TL_WRAP("__isnanf", b___isnanf), TL_WRAP("__fpclassifyd", b___fpclassifyd),
     /* locale.h */
     TL_WRAP("setlocale", b_setlocale), TL_WRAP("newlocale", b_newlocale), TL_DIRECT(freelocale), TL_DIRECT(uselocale),
