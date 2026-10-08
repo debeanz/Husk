@@ -737,10 +737,9 @@ struct TLClassicAttemptView: View {
 
     var body: some View {
         ZStack {
-            // The band above the game when it keeps clear of the camera: tapping it is tapping the top of the screen.
+            // No SwiftUI gesture here: from iOS 18 one behind the game can take the game's own touches and cancel them.
+            // Taps at the top are seen by the game's view itself (TLScreenUIView.onTopTap), which takes nothing.
             Color.black.ignoresSafeArea()
-                .contentShape(Rectangle())
-                .onTapGesture { toggleChrome() }
 
             ZStack {
                 TLScreenView(onThreeFingerTap: { toggleChrome() }, onTopTap: { toggleChrome() })

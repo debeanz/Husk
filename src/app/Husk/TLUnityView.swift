@@ -119,25 +119,41 @@ final class TLUnityUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     override func layoutSubviews() {
         super.layoutSubviews()
         guard bounds.width > 0, bounds.height > 0 else { return }
+        if let size = launchedSize {
+            // The game was told its size once, at launch, and draws at that size for good. The drawable keeps that size
+            // whatever this view does meanwhile -- the screen turning, the game being shown again -- or the game's picture
+            // covers only part of it and the rest is black. An Unreal game draws with MoltenVK, which sizes this layer
+            // itself to the swapchain it made.
+            if engine != .ue4 { (layer as? CAMetalLayer)?.drawableSize = size }
+            return
+        }
         let w = Int((bounds.width * contentScaleFactor).rounded())
         let h = Int((bounds.height * contentScaleFactor).rounded())
-        // An Unreal game draws with MoltenVK, which sizes this layer itself to the swapchain it made; sizing it back here on every layout would leave the layer and the
-        // swapchain disagreeing from then on.
-        if !(engine == .ue4 && launched) { (layer as? CAMetalLayer)?.drawableSize = CGSize(width: w, height: h) }
+        (layer as? CAMetalLayer)?.drawableSize = CGSize(width: w, height: h)
         // A landscape game is told its size once, when it starts, so it must not start while the screen is still
-        // turning: wait for a surface that is wider than it is tall.
-        // Unity games too: Fruit Ninja is a landscape one. If the screen has not turned after two seconds it is not going to,
-        // and the game starts as it is rather than not at all.
+        // turning: wait for a surface that is wider than it is tall (Unity games too: Fruit Ninja is a landscape one).
         if firstLayout == nil, window != nil {
             firstLayout = Date()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.1) { [weak self] in self?.setNeedsLayout() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.1) { [weak self] in self?.setNeedsLayout() }
         }
-        let waited = firstLayout.map { Date().timeIntervalSince($0) > 2 } ?? false
-        let ready = (portrait ? h > w : w > h) || waited
-        if !launched, window != nil, ready { launch(width: w, height: h) }
+        guard window != nil else { return }
+        let turned = portrait ? h >= w : w >= h
+        let waited = firstLayout.map { Date().timeIntervalSince($0) > 3 } ?? false
+        guard turned || waited else { return }
+        // Still the wrong way up after the wait: start the game the way up it wants anyway. Given the screen's size as it
+        // is now, a landscape game would draw a portrait picture into a corner of the screen once it turns, and its buttons
+        // would not be where they are drawn.
+        let (gw, gh) = turned ? (w, h) : (h, w)
+        if !turned { HuskLog.log("tl", "native: the screen has not turned yet; starting the game \(portrait ? "portrait" : "landscape") at \(gw)x\(gh) anyway") }
+        let size = CGSize(width: gw, height: gh)
+        (layer as? CAMetalLayer)?.drawableSize = size
+        launchedSize = size
+        if !launched { launch(width: gw, height: gh) }
     }
 
     private var firstLayout: Date?
+    /// The size the game was told at launch, in pixels. Its drawable stays this size and touches are mapped onto it.
+    private var launchedSize: CGSize?
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
@@ -330,11 +346,20 @@ final class TLUnityUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         return next
     }
 
+    /// Where a point in this view is in the game's own pixels: scaled onto the size the game was told at launch, which is
+    /// this view's size in pixels once the screen has turned.
+    private func gamePoint(_ p: CGPoint) -> (Float, Float) {
+        guard let size = launchedSize, bounds.width > 0, bounds.height > 0 else {
+            return (Float(p.x * contentScaleFactor), Float(p.y * contentScaleFactor))
+        }
+        return (Float(p.x / bounds.width * size.width), Float(p.y / bounds.height * size.height))
+    }
+
     private func send(_ touches: Set<UITouch>, phase: Int32) {
         for t in touches {
-            let p = t.location(in: self)
+            let (x, y) = gamePoint(t.location(in: self))
             let pid = id(for: t)
-            husk_unity_touch(phase, pid, Float(p.x * contentScaleFactor), Float(p.y * contentScaleFactor))
+            husk_unity_touch(phase, pid, x, y)
             if phase == 2 || phase == 3 { pointers[ObjectIdentifier(t)] = nil }
         }
     }
@@ -523,10 +548,9 @@ struct TLCocosAttemptView: View {
 
     var body: some View {
         ZStack {
-            // The band above the game when it keeps clear of the camera: tapping it is tapping the top of the screen.
+            // No SwiftUI gesture here: from iOS 18 one behind the game can take the game's own touches and cancel them.
+            // Taps at the top are seen by the game's view itself (TLUnityUIView.onTopTap), which takes nothing.
             Color.black.ignoresSafeArea()
-                .contentShape(Rectangle())
-                .onTapGesture { toggleChrome() }
 
             if let other = blockedBy {
                 VStack(spacing: 8) {
