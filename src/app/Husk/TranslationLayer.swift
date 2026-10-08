@@ -707,7 +707,7 @@ struct TLAttemptView: View {
 }
 
 //// A game Husk runs on its own Java interpreter (Flappy Bird): full screen like every other game, with the same toolbar that
-/// comes down from the top of the screen, and the game's own settings.
+/// comes down on a three-finger tap, and the game's own settings.
 struct TLClassicAttemptView: View {
     let app: TLApp
     @StateObject private var runner = TLAttemptRunner()
@@ -718,6 +718,7 @@ struct TLClassicAttemptView: View {
     @State private var settings: TLAppSettings
     /// Whether the toolbar is down.
     @State private var chrome = false
+    @AppStorage(GameEdges.guardTopKey) private var guardTopEdge = false
     /// Laid out over the whole screen, the area around the camera included (the game's Full Screen setting).
     private let fullBleed: Bool
 
@@ -735,19 +736,15 @@ struct TLClassicAttemptView: View {
         withAnimation(.snappy(duration: 0.25)) { chrome.toggle() }
     }
 
-    private func showChrome() {
-        withAnimation(.snappy(duration: 0.25)) { chrome = true }
-    }
 
     var body: some View {
         ZStack {
             // No SwiftUI gesture here: from iOS 18 one behind the game can take the game's own touches and cancel them.
-            // A pull down from the top is seen by the game's view itself (TLScreenUIView.onPullDown) and, above a game that keeps
-            // clear of the camera, by this view behind it; both are UIKit and take nothing from the game.
-            PullDownArea { showChrome() }.ignoresSafeArea()
+            // A tap with three fingers is seen by the game's own view (TLScreenUIView.onThreeFingerTap), which takes nothing.
+            Color.black.ignoresSafeArea()
 
             ZStack {
-                TLScreenView(scaling: GameDisplay.scaling(for: settings), onThreeFingerTap: { toggleChrome() }, onPullDown: { showChrome() })
+                TLScreenView(scaling: GameDisplay.scaling(for: settings), onThreeFingerTap: { toggleChrome() })
                 if !runner.isRunning, runner.frameCount == 0 {
                     VStack(spacing: 12) {
                         if runner.isDone {
@@ -755,7 +752,7 @@ struct TLClassicAttemptView: View {
                             Text("The game stopped").font(.headline).foregroundStyle(.white)
                             Button { runner.start(apks: app.apks) } label: { Label("Run Again", systemImage: "play.fill") }
                                 .buttonStyle(.borderedProminent)
-                            Label("Swipe down from the top to close or see the log", systemImage: "hand.draw")
+                            Label("Tap with three fingers to close or see the log", systemImage: "hand.tap")
                                 .font(.system(size: 13, weight: .medium)).foregroundStyle(.white.opacity(0.55))
                         } else {
                             ProgressView().tint(.white)
@@ -786,7 +783,7 @@ struct TLClassicAttemptView: View {
         }
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
-        .defersSystemGestures(on: .all)
+        .defersSystemGestures(on: GameEdges.deferred(guardTop: guardTopEdge))
         .onAppear {
             HuskOrientation.set(portrait ? .portrait : .landscape)
             UIApplication.shared.isIdleTimerDisabled = settings.keepAwake

@@ -211,7 +211,7 @@ struct TLAppSettingsView: View {
             } footer: {
                 Text("Automatic offers the controller for games that cannot be played without one (Unreal Engine games), when no real "
                    + "controller is connected. Always offers it for any game that understands one. A paired controller is always "
-                   + "used. In the game, swipe down from the top edge to show, hide or rearrange it.")
+                   + "used. In the game, tap with three fingers to show, hide or rearrange it.")
             }
 
             Section {

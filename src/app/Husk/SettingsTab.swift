@@ -11,6 +11,7 @@ struct SettingsTab: View {
     @AppStorage(GameDisplay.resolutionKey) private var resolution = GameDisplay.automatic
     @AppStorage(GameDisplay.scalingKey) private var scaling = GameScaling.fit.rawValue
     @AppStorage(TranslationLayer.devInfoKey) private var devInfo = false
+    @AppStorage(GameEdges.guardTopKey) private var guardTopEdge = false
     @State private var showLogs = false
 
     var body: some View {
@@ -43,6 +44,7 @@ struct SettingsTab: View {
                 }
 
                 Section {
+                    Toggle(isOn: $guardTopEdge) { row("rectangle.topthird.inset.filled", .teal, "Guard the Top Edge") }
                     Toggle(isOn: $perfOn) { row("speedometer", .orange, "Performance Overlay") }
                     if perfOn {
                         Picker(selection: $perfPosition) {
@@ -53,11 +55,16 @@ struct SettingsTab: View {
                 } header: {
                     Text("In Game")
                 } footer: {
-                    Text(perfOn
-                         ? "Shows the frame rate over every game\(perfDetailed ? ", with the time a frame takes, the memory Husk uses and a warning when the iPhone runs hot" : "")."
-                           + " Swipe down from the top edge in a game to bring up its controls."
-                         : "Swipe down from the top edge in a game to bring up its controls: close the game, the on-screen "
-                           + "controller, this overlay and the game's log.")
+                    Text((perfOn
+                          ? "Shows the frame rate over every game\(perfDetailed ? ", with the time a frame takes, the memory Husk uses and a warning when the iPhone runs hot" : "")."
+                            + " Tap with three fingers in a game to bring up its controls."
+                          : "Tap with three fingers in a game to bring up its controls: close the game, the on-screen "
+                            + "controller, this overlay and the game's log.")
+                         + (guardTopEdge
+                            ? " With the top edge guarded, a swipe down from it shows iOS's pill first and opens Notification Center "
+                              + "only on a second swipe, so a game's swipes near the top are never taken."
+                            : " A swipe down from the top edge opens Notification Center or Control Center straight away; guard "
+                              + "the top edge if a game's own swipes start up there."))
                 }
 
                 Section {

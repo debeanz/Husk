@@ -43,15 +43,9 @@ final class TLUnityUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     /// Active touches by UITouch identity, each given a small stable id like Android's pointer ids.
     private var pointers: [ObjectIdentifier: Int32] = [:]
 
-    /// Called when three fingers tap at once: another way to bring the game's toolbar up or put it away.
+    /// Called when three fingers tap at once: the way to bring the game's toolbar up and put it away. One and two fingers
+    /// are the game's alone.
     var onThreeFingerTap: (() -> Void)?
-    /// Called when a finger pulls down from the top edge: the way to bring the game's toolbar down. A tap at the top is the
-    /// game's alone -- games put buttons there.
-    var onPullDown: (() -> Void)?
-    /// How close to the top edge the pull has to start, in points.
-    var pullEdge: CGFloat = 24
-    private var topPull: UIPanGestureRecognizer?
-    private var pullFired = false
 
     /// A fixed size to draw at (landscape; turned for a portrait game), or nil to draw at the view's own size.
     private let fixedSize: CGSize?
@@ -89,17 +83,6 @@ final class TLUnityUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         threeFingers.delaysTouchesBegan = false
         threeFingers.delaysTouchesEnded = false
         addGestureRecognizer(threeFingers)
-
-        // A pull down from the top edge brings the toolbar down. It watches without taking anything: the game still gets
-        // every touch, exactly as it would with no recognizer there.
-        let pull = UIPanGestureRecognizer(target: self, action: #selector(pulled(_:)))
-        pull.maximumNumberOfTouches = 1
-        pull.cancelsTouchesInView = false
-        pull.delaysTouchesBegan = false
-        pull.delaysTouchesEnded = false
-        pull.delegate = self
-        addGestureRecognizer(pull)
-        topPull = pull
         if engine == .cocos {
             TLUnityUIView.cocosView = self
             TLUnityUIView.installKeyboardHandler()
@@ -120,25 +103,6 @@ final class TLUnityUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     }
 
     @objc private func threeFingerTapped() { onThreeFingerTap?() }
-    /// Down far enough, and more down than sideways: the toolbar, once per pull.
-    @objc private func pulled(_ g: UIPanGestureRecognizer) {
-        switch g.state {
-        case .changed:
-            let t = g.translation(in: self)
-            if !pullFired, t.y > 36, t.y > abs(t.x) * 1.5 {
-                pullFired = true
-                onPullDown?()
-            }
-        default:
-            pullFired = false
-        }
-    }
-
-    func gestureRecognizer(_ g: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        guard g === topPull else { return true }
-        return touch.location(in: self).y <= pullEdge
-    }
-
     func gestureRecognizer(_ g: UIGestureRecognizer,
                            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
 
@@ -450,7 +414,6 @@ struct TLUnityScreen: UIViewRepresentable {
     var fixedSize: CGSize? = nil
     var scaling: GameScaling = .fit
     var onThreeFingerTap: (() -> Void)? = nil
-    var onPullDown: (() -> Void)? = nil
     /// One view per game for the life of the process. The engine's GPU surface belongs to this view's layer and an
     /// engine cannot be started twice, so coming back to the game must show the same layer, not a new one.
     private static var shared: [String: TLUnityUIView] = [:]
@@ -466,7 +429,6 @@ struct TLUnityScreen: UIViewRepresentable {
 
     func updateUIView(_ view: TLUnityUIView, context: Context) {
         view.onThreeFingerTap = onThreeFingerTap
-        view.onPullDown = onPullDown
     }
 }
 
@@ -528,7 +490,7 @@ final class TLUnityModel: ObservableObject {
 }
 
 /// A game the native runtime drives -- Unity, cocos2d-x, GameActivity, SDL, Rockstar, Unreal, Godot, NativeActivity --
-/// full screen, with nothing over it. A pull down from the top edge brings a toolbar down: the way out, what is running, and
+/// full screen, with nothing over it. A tap with three fingers brings a toolbar down: the way out, what is running, and
 /// the game's own controls. It goes again a few seconds later. Three fingers tapped together do the same.
 struct TLCocosAttemptView: View {
     let app: TLApp
@@ -547,6 +509,7 @@ struct TLCocosAttemptView: View {
     @State private var settings: TLAppSettings
     /// Whether the toolbar is down.
     @State private var chrome = false
+    @AppStorage(GameEdges.guardTopKey) private var guardTopEdge = false
     /// Whether the game was laid out over the whole screen, the area around the camera included (the game's Full Screen
     /// setting). The game's surface is sized once at launch, so this cannot change while it runs.
     private let fullBleed: Bool
@@ -616,16 +579,12 @@ struct TLCocosAttemptView: View {
         withAnimation(.snappy(duration: 0.25)) { chrome.toggle() }
     }
 
-    private func showChrome() {
-        withAnimation(.snappy(duration: 0.25)) { chrome = true }
-    }
 
     var body: some View {
         ZStack {
             // No SwiftUI gesture here: from iOS 18 one behind the game can take the game's own touches and cancel them.
-            // A pull down from the top is seen by the game's view itself (TLUnityUIView.onPullDown) and, above a game that keeps
-            // clear of the camera, by this view behind it; both are UIKit and take nothing from the game.
-            PullDownArea { showChrome() }.ignoresSafeArea()
+            // A tap with three fingers is seen by the game's own view (TLUnityUIView.onThreeFingerTap), which takes nothing.
+            Color.black.ignoresSafeArea()
 
             if let other = blockedBy {
                 VStack(spacing: 8) {
@@ -637,7 +596,7 @@ struct TLCocosAttemptView: View {
                     Text("\(other) was started in this session, and a game cannot be unloaded once it has started. Close Husk completely and open it again to run \(app.label).")
                         .font(.system(size: 14)).foregroundStyle(.white.opacity(0.7))
                         .multilineTextAlignment(.center).frame(maxWidth: 440)
-                    Label("Swipe down from the top to close", systemImage: "hand.draw")
+                    Label("Tap with three fingers to close", systemImage: "hand.tap")
                         .font(.system(size: 13, weight: .medium)).foregroundStyle(.white.opacity(0.55))
                         .padding(.top, 6)
                 }
@@ -648,7 +607,7 @@ struct TLCocosAttemptView: View {
                               scale: GameDisplay.pointScale(for: GameDisplay.resolution(for: settings)),
                               fixedSize: GameDisplay.size(GameDisplay.resolution(for: settings)),
                               scaling: GameDisplay.scaling(for: settings),
-                              onThreeFingerTap: { toggleChrome() }, onPullDown: { showChrome() })
+                              onThreeFingerTap: { toggleChrome() })
                     .background(Color.black)
                     .overlay {
                         // A game whose menus answer only a controller: with none paired, one on the glass.
@@ -669,7 +628,7 @@ struct TLCocosAttemptView: View {
                         .font(.system(size: 28, weight: .medium)).foregroundStyle(.white.opacity(0.7))
                     Text(model.state == Int32(HUSK_UNITY_FAILED) ? "\(app.label) could not start" : "\(app.label) exited")
                         .font(.system(size: 17, weight: .semibold)).foregroundStyle(.white)
-                    Label("Swipe down from the top to close or see the log", systemImage: "hand.draw")
+                    Label("Tap with three fingers to close or see the log", systemImage: "hand.tap")
                         .font(.system(size: 13, weight: .medium)).foregroundStyle(.white.opacity(0.55))
                 }
                 .multilineTextAlignment(.center)
@@ -709,7 +668,7 @@ struct TLCocosAttemptView: View {
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
         // Swipes near the edges are the game's.
-        .defersSystemGestures(on: .all)
+        .defersSystemGestures(on: GameEdges.deferred(guardTop: guardTopEdge))
         .onAppear {
             HuskOrientation.set(portrait ? .portrait : .landscape)
             UIApplication.shared.isIdleTimerDisabled = settings.keepAwake

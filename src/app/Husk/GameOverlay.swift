@@ -6,6 +6,14 @@ import UIKit
 
 /// The frame-rate readout over a running game: off unless turned on in Settings (or from a game's toolbar), and drawn in the
 /// corner the person picks. It is the same for every game.
+/// Which screen edges a game keeps for itself. The bottom always is (a swipe up there would leave the game for the home screen).
+/// The top is only when asked: guarding it means iOS shows its pill with an arrow on the first swipe down and opens Notification
+/// Center or Control Center only on a second one, and apps cannot show one without the other.
+enum GameEdges {
+    static let guardTopKey = "husk.game.guardTopEdge"
+    static func deferred(guardTop: Bool) -> Edge.Set { guardTop ? .all : [.bottom, .leading, .trailing] }
+}
+
 enum PerfOverlay {
     static let enabledKey = "husk.perfOverlay"
     static let positionKey = "husk.perfOverlay.position"
@@ -158,7 +166,7 @@ struct PerformanceHUD: View {
 
 // MARK: - the toolbar
 
-/// The bar that comes down over a game when a finger pulls down from the top edge: the way out, what is running, and the game's
+/// The bar that comes down over a game on a three-finger tap: the way out, what is running, and the game's
 /// own controls. It hides itself a few seconds later.
 struct GameToolbar<Actions: View>: View {
     let title: String
@@ -193,7 +201,7 @@ struct GameToolbar<Actions: View>: View {
     }
 }
 
-/// Everything drawn over a running game, in one layer: the toolbar (shown only once pulled down from the top edge, and
+/// Everything drawn over a running game, in one layer: the toolbar (shown only after a three-finger tap, and
 /// hidden again after a few seconds unless `pinned`), the performance readout, and for the first few games a line saying how
 /// to bring the toolbar up.
 struct GameOverlay<Actions: View>: View {
@@ -212,7 +220,7 @@ struct GameOverlay<Actions: View>: View {
     @AppStorage(PerfOverlay.detailedKey) private var detailed = true
     @State private var hint = false
     /// How many games have shown the hint. It is only for learning the gesture, so it stops after a few.
-    @AppStorage("husk.game.hintCount") private var hintCount = 0
+    @AppStorage("husk.game.threeFingerHintCount") private var hintCount = 0
     /// Changes whenever the toolbar is shown, which restarts the wait before it hides.
     @State private var revealed = 0
 
@@ -236,7 +244,7 @@ struct GameOverlay<Actions: View>: View {
                 }
                 Spacer(minLength: 0)
                 if hint {
-                    Label("Swipe down from the top for controls", systemImage: "hand.draw")
+                    Label("Tap with three fingers for controls", systemImage: "hand.tap")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 14).frame(height: 34)
@@ -339,53 +347,3 @@ struct GameLogPanel: View {
     }
 }
 
-// MARK: - the pull down outside the game
-
-/// What is behind a game: black, and the place a pull down from the top edge starts when the game keeps clear of the camera
-/// (the band at the top of a portrait screen is this view, not the game's). UIKit, like the game's own view, so it never
-/// takes part in the game's touches the way a SwiftUI gesture behind it can.
-struct PullDownArea: UIViewRepresentable {
-    var onPullDown: () -> Void
-
-    func makeUIView(context: Context) -> PullDownView {
-        let view = PullDownView()
-        view.onPullDown = onPullDown
-        return view
-    }
-
-    func updateUIView(_ view: PullDownView, context: Context) { view.onPullDown = onPullDown }
-}
-
-final class PullDownView: UIView, UIGestureRecognizerDelegate {
-    var onPullDown: (() -> Void)?
-    private var fired = false
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        backgroundColor = .black
-        let pull = UIPanGestureRecognizer(target: self, action: #selector(pulled(_:)))
-        pull.maximumNumberOfTouches = 1
-        pull.delegate = self
-        addGestureRecognizer(pull)
-    }
-
-    required init?(coder: NSCoder) { fatalError("not used") }
-
-    @objc private func pulled(_ g: UIPanGestureRecognizer) {
-        switch g.state {
-        case .changed:
-            let t = g.translation(in: self)
-            if !fired, t.y > 36, t.y > abs(t.x) * 1.5 {
-                fired = true
-                onPullDown?()
-            }
-        default:
-            fired = false
-        }
-    }
-
-    /// Only a pull that starts at the top: within the band above the game, or just below it.
-    func gestureRecognizer(_ g: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        touch.location(in: self).y <= safeAreaInsets.top + 24
-    }
-}

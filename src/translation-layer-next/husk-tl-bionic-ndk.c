@@ -391,8 +391,8 @@ static int b_AAudioStream_write(aa_stream *s, const void *buf, int frames, int64
     int16_t *tmp = s->format == AA_FORMAT_I16 ? NULL : malloc((size_t)frames * AA_CHANNELS * sizeof(int16_t));
     const int16_t *pcm = tmp ? aa_to_i16(s->format, buf, frames * AA_CHANNELS, tmp) : buf;
     if (tl_cocos_audio_hook) tl_cocos_audio_hook(pcm, frames, AA_CHANNELS, AA_RATE);
-    free(tmp);
     else { struct timespec ts = { 0, (long)((double)frames * 1e9 / AA_RATE) }; nanosleep(&ts, NULL); }
+    free(tmp);
     atomic_fetch_add(&s->frames, frames);
     return frames;
 }
