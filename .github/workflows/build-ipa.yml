@@ -41,7 +41,7 @@ jobs:
 
       - name: Install build tools
         run: |
-          brew install meson ninja pkg-config xcodegen qemu
+          brew install meson ninja pkg-config xcodegen qemu cmake
           rustup target add aarch64-apple-ios
           # virglrenderer's meson setup generates its format tables from YAML.
           python3 -m pip install --break-system-packages pyyaml
