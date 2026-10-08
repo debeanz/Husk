@@ -55,6 +55,16 @@ static void *native_of(const char *cls, const char *name, const char *sig)
             tl_log_line("unity: native %s%s is registered on %s, not %s; using it", name, sig, owner, cls);
         }
     }
+    if (!fn) {
+        /* ...or with other parameters (Unity 6's initJni). It is called with the arguments this driver has; one it
+         * does not have arrives as null or zero. */
+        const char *owner = tl_jni_native(cls, name, NULL) ? cls : tl_jni_native_owner(name, NULL);
+        if (owner) {
+            fn = tl_jni_native(owner, name, NULL);
+            tl_log_line("unity: native %s is registered on %s as %s, not %s; calling it with what this driver has",
+                        name, owner, tl_jni_native_sig(owner, name), sig);
+        }
+    }
     if (!fn) tl_log_line("unity: native %s.%s%s was not registered", cls, name, sig);
     return fn;
 }

@@ -111,6 +111,8 @@ void tl_jni_clear(void);
 void *tl_jni_native(const char *cls, const char *name, const char *sig);
 /* The class a native of this name (and signature, if not NULL) was registered on, or NULL. */
 const char *tl_jni_native_owner(const char *name, const char *sig);
+/* The signature a native of this name was registered with on this class, or NULL. */
+const char *tl_jni_native_sig(const char *cls, const char *name);
 
 /*
  * java.lang.reflect objects for methods and fields, as Unity's ReflectionHelper hands

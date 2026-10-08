@@ -905,6 +905,16 @@ void *tl_jni_native(const char *cls, const char *name, const char *sig)
     return r;
 }
 
+const char *tl_jni_native_sig(const char *cls, const char *name)
+{
+    tl_jclass *c = tl_jni_class(cls);
+    const char *r = NULL;
+    pthread_mutex_lock(&g_lock);
+    for (int i = 0; i < c->nnatives && !r; i++) if (!strcmp(c->natives[i].name, name)) r = c->natives[i].sig;
+    pthread_mutex_unlock(&g_lock);
+    return r;
+}
+
 static int32_t jni_MonitorEnter(void *env, jo o) { (void)env; (void)o; return 0; }
 static int32_t jni_MonitorExit(void *env, jo o) { (void)env; (void)o; return 0; }
 
