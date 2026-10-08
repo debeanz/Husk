@@ -25,16 +25,24 @@ concurrency:
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
+
+      # Husk is developed against the latest iOS SDK, and the WebKit ANGLE tree
+      # it builds tracks the latest compiler, so use the newest stable Xcode.
+      - name: Select newest Xcode
+        run: |
+          XC=$(ls -d /Applications/Xcode_*.app | grep -E '/Xcode_[0-9.]+\.app$' | sort -V | tail -1)
+          sudo xcode-select -s "$XC"
+          xcodebuild -version
+          echo "XCODE_ID=$(xcodebuild -version | awk '/Build version/{print $3}')" >> "$GITHUB_ENV"
 
       - name: Install build tools
         run: |
           brew install meson ninja pkg-config xcodegen qemu
           rustup target add aarch64-apple-ios
-          xcodebuild -version
 
       - name: Restore build cache
         id: cache
@@ -43,8 +51,8 @@ jobs:
           path: |
             build
             third_party
-          key: husk-build-${{ github.run_id }}
-          restore-keys: husk-build-
+          key: husk-build-${{ env.XCODE_ID }}-${{ github.run_id }}
+          restore-keys: husk-build-${{ env.XCODE_ID }}-
 
       - name: Build
         timeout-minutes: 320
@@ -58,7 +66,7 @@ jobs:
           path: |
             build
             third_party
-          key: husk-build-${{ github.run_id }}
+          key: husk-build-${{ env.XCODE_ID }}-${{ github.run_id }}
 
       - name: Upload build logs
         if: failure()
