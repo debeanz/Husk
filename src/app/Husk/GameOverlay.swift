@@ -193,8 +193,9 @@ struct GameToolbar<Actions: View>: View {
     }
 }
 
-/// Everything drawn over a running game, in one layer: the toolbar (shown while `shown` is true, and hidden again after a few
-/// seconds unless `pinned`), the performance readout, and once per game a line saying how to bring the toolbar up.
+/// Everything drawn over a running game, in one layer: the toolbar (shown only once the top of the screen is tapped, and
+/// hidden again after a few seconds unless `pinned`), the performance readout, and for the first few games a line saying how
+/// to bring the toolbar up.
 struct GameOverlay<Actions: View>: View {
     let title: String
     let status: String
@@ -210,6 +211,8 @@ struct GameOverlay<Actions: View>: View {
     @AppStorage(PerfOverlay.positionKey) private var position: PerfOverlay.Position = .topLeading
     @AppStorage(PerfOverlay.detailedKey) private var detailed = true
     @State private var hint = false
+    /// How many games have shown the hint. It is only for learning the gesture, so it stops after a few.
+    @AppStorage("husk.game.hintCount") private var hintCount = 0
     /// Changes whenever the toolbar is shown, which restarts the wait before it hides.
     @State private var revealed = 0
 
@@ -257,6 +260,8 @@ struct GameOverlay<Actions: View>: View {
             if !stillPinned, shown { revealed += 1 }
         }
         .onAppear {
+            guard hintCount < 3 else { return }
+            hintCount += 1
             withAnimation(.easeOut(duration: 0.3)) { hint = true }
             DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
                 withAnimation(.easeOut(duration: 0.4)) { hint = false }

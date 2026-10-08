@@ -538,8 +538,12 @@ struct TLCocosAttemptView: View {
                     Text("\(other) was started in this session, and a game cannot be unloaded once it has started. Close Husk completely and open it again to run \(app.label).")
                         .font(.system(size: 14)).foregroundStyle(.white.opacity(0.7))
                         .multilineTextAlignment(.center).frame(maxWidth: 440)
+                    Label("Tap the top of the screen to close", systemImage: "hand.tap")
+                        .font(.system(size: 13, weight: .medium)).foregroundStyle(.white.opacity(0.55))
+                        .padding(.top, 6)
                 }
                 .padding(24)
+                .allowsHitTesting(false)
             } else if let apk = app.apks.first {
                 TLUnityScreen(apk: apk, extraApks: Array(app.apks.dropFirst()), dataDir: dataDir, engine: engine, portrait: portrait,
                               scale: settings.resolution.scale,
@@ -555,6 +559,21 @@ struct TLCocosAttemptView: View {
                         }
                     }
                     .ignoresSafeArea(.container, edges: fullBleed ? .all : [.horizontal, .bottom])
+            }
+
+            // A game that did not start, or that quit: say so, rather than leave a black screen.
+            if blockedBy == nil, model.state == Int32(HUSK_UNITY_FAILED) || model.state == Int32(HUSK_UNITY_ENDED) {
+                VStack(spacing: 8) {
+                    Image(systemName: model.state == Int32(HUSK_UNITY_FAILED) ? "exclamationmark.triangle" : "stop.circle")
+                        .font(.system(size: 28, weight: .medium)).foregroundStyle(.white.opacity(0.7))
+                    Text(model.state == Int32(HUSK_UNITY_FAILED) ? "\(app.label) could not start" : "\(app.label) exited")
+                        .font(.system(size: 17, weight: .semibold)).foregroundStyle(.white)
+                    Label("Tap the top of the screen to close or see the log", systemImage: "hand.tap")
+                        .font(.system(size: 13, weight: .medium)).foregroundStyle(.white.opacity(0.55))
+                }
+                .multilineTextAlignment(.center)
+                .padding(24)
+                .allowsHitTesting(false)
             }
 
             if showLog {
@@ -597,7 +616,6 @@ struct TLCocosAttemptView: View {
             padLayout = PadLayout.load(app.id)
             model.start()
             monitor.start(.native)
-            if blockedBy != nil { chrome = true }
         }
         // What happened, for the library: ten seconds of frames is a game that plays; a refusal is one that did not start.
         .onChange(of: model.frames) { f in
@@ -605,8 +623,6 @@ struct TLCocosAttemptView: View {
         }
         .onChange(of: model.state) { st in
             if st == Int32(HUSK_UNITY_FAILED) { GameStatusStore.shared.record(app.id, .failed) }
-            // Stopped for good: the way out stays on screen.
-            if st == Int32(HUSK_UNITY_FAILED) || st == Int32(HUSK_UNITY_ENDED) { withAnimation { chrome = true } }
         }
         .onDisappear {
             CrashReport.gameEnded()

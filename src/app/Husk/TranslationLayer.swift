@@ -751,6 +751,8 @@ struct TLClassicAttemptView: View {
                             Text("The game stopped").font(.headline).foregroundStyle(.white)
                             Button { runner.start(apks: app.apks) } label: { Label("Run Again", systemImage: "play.fill") }
                                 .buttonStyle(.borderedProminent)
+                            Label("Tap the top of the screen to close or see the log", systemImage: "hand.tap")
+                                .font(.system(size: 13, weight: .medium)).foregroundStyle(.white.opacity(0.55))
                         } else {
                             ProgressView().tint(.white)
                             Text("Starting \(app.label)…").font(.subheadline).foregroundStyle(.white.opacity(0.7))
@@ -788,7 +790,6 @@ struct TLClassicAttemptView: View {
             runner.start(apks: app.apks)
             monitor.start(.classic)
         }
-        .onChange(of: runner.isDone) { done in if done { withAnimation { chrome = true } } }
         .onDisappear {
             CrashReport.gameEnded()
             runner.stop()
