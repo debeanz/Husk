@@ -144,13 +144,16 @@ bool tl_unity_start(const tl_unity_config *cfg)
 /*
  * Call a registered UnityPlayer native: (env, player, a, b). Fixed arity on purpose: a
  * variadic pointer type would put the arguments on the stack, where guest code (compiled
- * for AAPCS64) does not look for them.
+ * for AAPCS64) does not look for them. Four more zeros fill the rest of the argument
+ * registers, so a native that takes more parameters than the driver knows of (a newer
+ * Unity's) finds null and zero there rather than whatever the registers last held.
  */
-typedef void (*native_call_fn)(void *env, void *self, uintptr_t a, uintptr_t b);
+typedef void (*native_call_fn)(void *env, void *self, uintptr_t a, uintptr_t b,
+                               uintptr_t c, uintptr_t d, uintptr_t e, uintptr_t f);
 static void call_native_on(const char *cls, jobj *self, const char *name, const char *sig, uintptr_t a, uintptr_t b)
 {
     void *fn = native_of(cls, name, sig);
-    if (fn) ((native_call_fn)fn)(tl_jni_env(), self, a, b);
+    if (fn) ((native_call_fn)fn)(tl_jni_env(), self, a, b, 0, 0, 0, 0);
 }
 static void call_native(const char *name, const char *sig, uintptr_t a, uintptr_t b)
 {
@@ -211,7 +214,20 @@ static void *unity_main(void *arg)
 bool tl_unity_run(void)
 {
     /* The UnityPlayer constructor's last native step before it starts the thread. */
-    NATIVE_VOID("initJni", "(Landroid/content/Context;)V", U.activity, 0);
+    /* initJni(Context) in older Unity. Unity 6 has initJni(Context, int, String): which kind of player this is (0, for
+     * an Activity or a Service -- "Context Type: ActivityOrService" in its log) and the name of the player's class, which
+     * it then looks up with Class.forName. */
+    const char *init_sig = tl_jni_native_sig("com/unity3d/player/UnityPlayer", "initJni");
+    if (init_sig && !strcmp(init_sig, "(Landroid/content/Context;ILjava/lang/String;)V")) {
+        char dotted[200];
+        snprintf(dotted, sizeof(dotted), "%s", U.player_class);
+        for (char *p = dotted; *p; p++) if (*p == '/') *p = '.';
+        void *fn = tl_jni_native("com/unity3d/player/UnityPlayer", "initJni", init_sig);
+        tl_log_line("unity: initJni(context, 0, \"%s\")", dotted);
+        ((native_call_fn)fn)(tl_jni_env(), U.player, (uintptr_t)U.activity, 0, (uintptr_t)tl_jni_new_string(dotted), 0, 0, 0);
+    } else {
+        NATIVE_VOID("initJni", "(Landroid/content/Context;)V", U.activity, 0);
+    }
     tl_log_line("unity: initJni done");
     /* The rest of the UnityPlayer constructor: the helpers it builds, whose constructors each call a
      * native that gives the engine its reference to the helper's Java class. Without these the engine
