@@ -56,6 +56,18 @@ static void Long_value(tl_jcall *c)   { c->ret = tl_jni_get_field(c->self, "valu
 static void Int_init(tl_jcall *c)     { tl_jni_set_field(c->self, "value", "I", c->args[0]); }
 static void Int_valueOf(tl_jcall *c)  { c->ret = vl(box("java/lang/Integer", "I", c->args[0])); }
 static void Int_value(tl_jcall *c)    { c->ret = tl_jni_get_field(c->self, "value", "I"); }
+/* Integer.parseInt(s[, radix]): what Unity reads AudioManager's numbers with. Not a number is 0 here, not NumberFormatException. */
+static void Int_parse(tl_jcall *c)
+{
+    const char *s = tl_jni_string(c->args[0].l);
+    c->ret = vi(s ? (int)strtol(s, NULL, 10) : 0);
+}
+static void Int_parseRadix(tl_jcall *c)
+{
+    const char *s = tl_jni_string(c->args[0].l);
+    int radix = c->args[1].i >= 2 && c->args[1].i <= 36 ? c->args[1].i : 10;
+    c->ret = vi(s ? (int)strtol(s, NULL, radix) : 0);
+}
 static void Bool_init(tl_jcall *c)    { tl_jni_set_field(c->self, "value", "Z", c->args[0]); }
 static void Bool_valueOf(tl_jcall *c) { c->ret = vl(box("java/lang/Boolean", "Z", c->args[0])); }
 static void Bool_value(tl_jcall *c)   { c->ret = tl_jni_get_field(c->self, "value", "Z"); }
@@ -559,6 +571,7 @@ static const tl_jhle k_loop_hle[] = {
     M("java/lang/Long", "<init>", "(J)V", Long_init), M("java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", Long_valueOf),
     M("java/lang/Long", "longValue", "()J", Long_value), M("java/lang/Integer", "<init>", "(I)V", Int_init),
     M("java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", Int_valueOf), M("java/lang/Integer", "intValue", "()I", Int_value),
+    M("java/lang/Integer", "parseInt", "(Ljava/lang/String;)I", Int_parse), M("java/lang/Integer", "parseInt", "(Ljava/lang/String;I)I", Int_parseRadix),
     M("java/lang/Boolean", "<init>", "(Z)V", Bool_init), M("java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", Bool_valueOf),
     M("java/lang/Boolean", "booleanValue", "()Z", Bool_value), M("java/lang/Float", "<init>", "(F)V", Float_init),
     M("java/lang/Float", "valueOf", "(F)Ljava/lang/Float;", Float_valueOf), M("java/lang/Float", "floatValue", "()F", Float_value),

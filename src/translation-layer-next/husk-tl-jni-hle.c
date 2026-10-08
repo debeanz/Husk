@@ -398,6 +398,16 @@ static void install_build(void)
     v.l = STR("input"); tl_jni_set_static("android/content/Context", "INPUT_SERVICE", "Ljava/lang/String;", v);
     v.l = STR("phone"); tl_jni_set_static("android/content/Context", "TELEPHONY_SERVICE", "Ljava/lang/String;", v);
     v.l = STR("clipboard"); tl_jni_set_static("android/content/Context", "CLIPBOARD_SERVICE", "Ljava/lang/String;", v);
+    /* The keys AudioManager.getProperty answers. Unity reads them from these fields rather than spelling them out; unset, they were null, the answers
+     * were null, and Unity told FMOD the speakers run at 0 Hz in bursts of 0 frames -- which FMOD's OpenSL output will not start with (Hollow Knight:
+     * "FMOD failed to initialize the output device"). */
+    #define AM(n, s) do { v.l = STR(s); tl_jni_set_static("android/media/AudioManager", n, "Ljava/lang/String;", v); } while (0)
+    AM("PROPERTY_OUTPUT_SAMPLE_RATE", "android.media.property.OUTPUT_SAMPLE_RATE");
+    AM("PROPERTY_OUTPUT_FRAMES_PER_BUFFER", "android.media.property.OUTPUT_FRAMES_PER_BUFFER");
+    AM("PROPERTY_SUPPORT_MIC_NEAR_ULTRASOUND", "android.media.property.SUPPORT_MIC_NEAR_ULTRASOUND");
+    AM("PROPERTY_SUPPORT_SPEAKER_NEAR_ULTRASOUND", "android.media.property.SUPPORT_SPEAKER_NEAR_ULTRASOUND");
+    AM("PROPERTY_SUPPORT_AUDIO_SOURCE_UNPROCESSED", "android.media.property.SUPPORT_AUDIO_SOURCE_UNPROCESSED");
+    #undef AM
 }
 
 /* --------------------------------------------------------- misc statics */

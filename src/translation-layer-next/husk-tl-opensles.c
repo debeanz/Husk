@@ -57,7 +57,9 @@ static bool iid_is(const sl_iid *a, const sl_iid *want)
     return a == want || (a && a->time_low == want->time_low && a->time_mid == want->time_mid);
 }
 
-#define MAX_QUEUE 16
+/* FMOD queues (its buffer length x its buffer count) / Android's burst before it starts: 16 with Unity's 1024 x 4 and a burst of 256, and more with larger
+ * buffers. A refused buffer fails FMOD's whole setup, so there is room for plenty. */
+#define MAX_QUEUE 64
 enum { K_ENGINE = 1, K_MIX, K_PLAYER };
 
 typedef struct sl_object {
@@ -237,7 +239,11 @@ static uint32_t q_Enqueue(const void *self, const void *buf, uint32_t size)
 {
     sl_object *o = OBJ_FROM(self, vt_bq);
     pthread_mutex_lock(&o->mu);
-    if (o->qcount >= MAX_QUEUE) { pthread_mutex_unlock(&o->mu); return SL_BUFFER_INSUFFICIENT; }
+    if (o->qcount >= MAX_QUEUE) {
+        pthread_mutex_unlock(&o->mu);
+        static bool said; if (!said) { said = true; tl_log_line("opensl: the game queued more than %d buffers; refused", MAX_QUEUE); }
+        return SL_BUFFER_INSUFFICIENT;
+    }
     int tail = (o->qhead + o->qcount) % MAX_QUEUE;
     o->q[tail].data = buf; o->q[tail].size = size;
     o->qcount++;
