@@ -8,6 +8,8 @@ struct SettingsTab: View {
     @AppStorage(PerfOverlay.enabledKey) private var perfOn = false
     @AppStorage(PerfOverlay.positionKey) private var perfPosition: PerfOverlay.Position = .topLeading
     @AppStorage(PerfOverlay.detailedKey) private var perfDetailed = true
+    @AppStorage(GameDisplay.resolutionKey) private var resolution = GameDisplay.automatic
+    @AppStorage(GameDisplay.scalingKey) private var scaling = GameScaling.fit.rawValue
     @AppStorage(TranslationLayer.devInfoKey) private var devInfo = false
     @State private var showLogs = false
 
@@ -24,6 +26,20 @@ struct SettingsTab: View {
                     }
                 } footer: {
                     Text("Games need JIT to run. StikJIT, built into Husk, turns it on without a computer.")
+                }
+
+                Section {
+                    Picker(selection: $resolution) {
+                        ForEach(GameDisplay.resolutions, id: \.self) { Text(GameDisplay.title($0)).tag($0) }
+                    } label: { row("square.resize", .blue, "Resolution") }
+                    Picker(selection: $scaling) {
+                        ForEach(GameScaling.allCases) { Text($0.title).tag($0.rawValue) }
+                    } label: { row("arrow.up.left.and.down.right.magnifyingglass", .purple, "Screen Scaling") }
+                } header: {
+                    Text("Display")
+                } footer: {
+                    Text("\(GameDisplay.detail(resolution)) \((GameScaling(rawValue: scaling) ?? .fit).detail) "
+                       + "These are the defaults; each game can have its own in its settings.")
                 }
 
                 Section {

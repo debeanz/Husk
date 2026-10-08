@@ -53,7 +53,15 @@ final class TLUnityUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     private var topPull: UIPanGestureRecognizer?
     private var pullFired = false
 
-    init(apk: String, extraApks: [String] = [], dataDir: String, engine: TLNativeEngine, portrait: Bool = false, scale: CGFloat = 2) {
+    /// A fixed size to draw at (landscape; turned for a portrait game), or nil to draw at the view's own size.
+    private let fixedSize: CGSize?
+    /// How the game's picture fills the view.
+    private let scaling: GameScaling
+
+    init(apk: String, extraApks: [String] = [], dataDir: String, engine: TLNativeEngine, portrait: Bool = false, scale: CGFloat = 2,
+         fixedSize: CGSize? = nil, scaling: GameScaling = .fit) {
+        self.fixedSize = fixedSize
+        self.scaling = scaling
         self.apk = apk
         self.portrait = portrait
         self.dataDir = dataDir
@@ -61,6 +69,8 @@ final class TLUnityUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         self.extraApks = extraApks
         super.init(frame: .zero)
         backgroundColor = .black
+        // Fill puts part of the game outside the view.
+        clipsToBounds = true
         isMultipleTouchEnabled = true
         // Two pixels per point unless the game's settings say otherwise: sharp enough, and a third of the pixels a 3x phone would
         // ask the game for -- a 3D game is limited by fill rate, and ANGLE's translation costs on top.
@@ -145,10 +155,11 @@ final class TLUnityUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         if let size = launchedSize {
             // The game was told its size once, at launch, and draws at that size for good. Its layer keeps that shape and
             // that many pixels whatever this view does meanwhile -- the screen turning, or not turning, or the game being
-            // shown again -- fitted into the view with black around it when the shapes differ.
-            fit(size)
+            // shown again -- and is scaled onto the view as the game's scaling says.
+            place(size)
             return
         }
+        metal.setAffineTransform(.identity)
         metal.frame = bounds
         metal.contentsScale = contentScaleFactor
         let w = Int((bounds.width * contentScaleFactor).rounded())
@@ -167,29 +178,39 @@ final class TLUnityUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         // Still the wrong way up after the wait: start the game the way up it wants anyway. Given the screen's size as it
         // is now, a landscape game would draw a portrait picture into a corner of the screen once it turns, and its buttons
         // would not be where they are drawn.
-        let (gw, gh) = turned ? (w, h) : (h, w)
+        var (gw, gh) = turned ? (w, h) : (h, w)
         if !turned { HuskLog.log("tl", "native: the screen has not turned yet; starting the game \(portrait ? "portrait" : "landscape") at \(gw)x\(gh) anyway") }
+        // A fixed resolution: that size, the long side the way the game is.
+        if let fixed = fixedSize {
+            (gw, gh) = portrait ? (Int(fixed.height), Int(fixed.width)) : (Int(fixed.width), Int(fixed.height))
+            HuskLog.log("tl", "native: drawing at the fixed resolution \(gw)x\(gh), \(scaling.rawValue)")
+        }
         let size = CGSize(width: gw, height: gh)
         launchedSize = size
-        fit(size)
+        place(size)
         if !launched { launch(width: gw, height: gh) }
     }
 
-    /// The largest rectangle with the game's shape that fits in this view, centred: all of the game, with black around it
-    /// when the view is another shape.
-    private func gameRect(for size: CGSize) -> CGRect {
-        let aspect = size.width / max(size.height, 1)
-        var w = bounds.width, h = bounds.height
-        if w / max(h, 1) > aspect { w = h * aspect } else { h = w / aspect }
-        return CGRect(x: (bounds.width - w) / 2, y: (bounds.height - h) / 2, width: w, height: h)
+    /// How much the game's picture is scaled across and down to sit in this view, as its scaling says.
+    private func scales(for size: CGSize) -> (x: CGFloat, y: CGFloat) {
+        let fx = bounds.width / max(size.width, 1), fy = bounds.height / max(size.height, 1)
+        switch scaling {
+        case .fit: let s = min(fx, fy); return (s, s)
+        case .fill: let s = max(fx, fy); return (s, s)
+        case .stretch: return (fx, fy)
+        }
     }
 
-    /// Put the game's layer in its rectangle, with exactly the pixels the game was told it has. An Unreal game draws with
-    /// MoltenVK, which sets the drawable's size itself from the swapchain it made.
-    private func fit(_ size: CGSize) {
-        let r = gameRect(for: size)
-        metal.frame = r
-        metal.contentsScale = size.width / max(r.width, 1)
+    /// Put the game's layer in the view: exactly the game's pixels (one point each, so ANGLE and MoltenVK, which size the
+    /// surface from the layer's bounds, see the size the game was told), centred, and scaled onto the view by a transform --
+    /// which, unlike a frame, can stretch one way more than the other.
+    private func place(_ size: CGSize) {
+        metal.setAffineTransform(.identity)
+        metal.contentsScale = 1
+        metal.bounds = CGRect(origin: .zero, size: size)
+        metal.position = CGPoint(x: bounds.midX, y: bounds.midY)
+        let s = scales(for: size)
+        metal.setAffineTransform(CGAffineTransform(scaleX: s.x, y: s.y))
         if engine != .ue4 { metal.drawableSize = size }
     }
 
@@ -394,10 +415,11 @@ final class TLUnityUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         guard let size = launchedSize, bounds.width > 0, bounds.height > 0 else {
             return (Float(p.x * contentScaleFactor), Float(p.y * contentScaleFactor))
         }
-        let r = gameRect(for: size)
-        let x = max(0, min(1, (p.x - r.minX) / max(r.width, 1)))
-        let y = max(0, min(1, (p.y - r.minY) / max(r.height, 1)))
-        return (Float(x * size.width), Float(y * size.height))
+        // The inverse of place(): from the view's centre, undo the scale, and measure from the game's centre.
+        let s = scales(for: size)
+        let x = max(0, min(size.width, (p.x - bounds.midX) / max(s.x, 0.0001) + size.width / 2))
+        let y = max(0, min(size.height, (p.y - bounds.midY) / max(s.y, 0.0001) + size.height / 2))
+        return (Float(x), Float(y))
     }
 
     private func send(_ touches: Set<UITouch>, phase: Int32) {
@@ -425,6 +447,8 @@ struct TLUnityScreen: UIViewRepresentable {
     var engine: TLNativeEngine = .unity
     var portrait = false
     var scale: CGFloat = 2
+    var fixedSize: CGSize? = nil
+    var scaling: GameScaling = .fit
     var onThreeFingerTap: (() -> Void)? = nil
     var onPullDown: (() -> Void)? = nil
     /// One view per game for the life of the process. The engine's GPU surface belongs to this view's layer and an
@@ -433,7 +457,8 @@ struct TLUnityScreen: UIViewRepresentable {
 
     func makeUIView(context: Context) -> TLUnityUIView {
         let view = Self.shared[apk]
-            ?? TLUnityUIView(apk: apk, extraApks: extraApks, dataDir: dataDir, engine: engine, portrait: portrait, scale: scale)
+            ?? TLUnityUIView(apk: apk, extraApks: extraApks, dataDir: dataDir, engine: engine, portrait: portrait, scale: scale,
+                             fixedSize: fixedSize, scaling: scaling)
         Self.shared[apk] = view
         updateUIView(view, context: context)
         return view
@@ -620,7 +645,9 @@ struct TLCocosAttemptView: View {
                 .allowsHitTesting(false)
             } else if let apk = app.apks.first {
                 TLUnityScreen(apk: apk, extraApks: Array(app.apks.dropFirst()), dataDir: dataDir, engine: engine, portrait: portrait,
-                              scale: settings.resolution.scale,
+                              scale: GameDisplay.pointScale(for: GameDisplay.resolution(for: settings)),
+                              fixedSize: GameDisplay.size(GameDisplay.resolution(for: settings)),
+                              scaling: GameDisplay.scaling(for: settings),
                               onThreeFingerTap: { toggleChrome() }, onPullDown: { showChrome() })
                     .background(Color.black)
                     .overlay {

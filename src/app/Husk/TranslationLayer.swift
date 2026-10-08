@@ -747,7 +747,7 @@ struct TLClassicAttemptView: View {
             PullDownArea { showChrome() }.ignoresSafeArea()
 
             ZStack {
-                TLScreenView(onThreeFingerTap: { toggleChrome() }, onPullDown: { showChrome() })
+                TLScreenView(scaling: GameDisplay.scaling(for: settings), onThreeFingerTap: { toggleChrome() }, onPullDown: { showChrome() })
                 if !runner.isRunning, runner.frameCount == 0 {
                     VStack(spacing: 12) {
                         if runner.isDone {

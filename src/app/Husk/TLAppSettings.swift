@@ -19,36 +19,6 @@ struct TLAppSettings: Codable, Equatable {
         }
     }
 
-    /// How many pixels the game draws for each point of the screen. Fewer pixels run faster and take less memory.
-    enum Resolution: String, Codable, CaseIterable, Identifiable {
-        case low, medium, high, native
-        var id: String { rawValue }
-        var title: String {
-            switch self {
-            case .low: return "Low"
-            case .medium: return "Medium"
-            case .high: return "High"
-            case .native: return "Native"
-            }
-        }
-        var detail: String {
-            switch self {
-            case .low: return "1 pixel per point. Fastest."
-            case .medium: return "1.5 pixels per point."
-            case .high: return "2 pixels per point. The default."
-            case .native: return "Every pixel the screen has. Sharpest, and heaviest."
-            }
-        }
-        @MainActor var scale: CGFloat {
-            switch self {
-            case .low: return 1
-            case .medium: return 1.5
-            case .high: return 2
-            case .native: return UIScreen.main.scale
-            }
-        }
-    }
-
     /// When the on-screen controller is offered.
     enum PadMode: String, Codable, CaseIterable, Identifiable {
         /// For the games that cannot be played without a controller (Unreal), when none is connected.
@@ -64,7 +34,10 @@ struct TLAppSettings: Codable, Equatable {
     }
 
     var orientation: Orientation = .auto
-    var resolution: Resolution = .high
+    /// The size the game draws at: "default" (Settings'), "auto", "screen", or a fixed "1920x1080" (GameDisplay).
+    var resolution: String = GameDisplay.followDefault
+    /// How the game's picture fills the screen: "default" (Settings'), or a GameScaling.
+    var scaling: String = GameDisplay.followDefault
     /// Full screen: the game draws over the whole display, the area around the camera included. Off, it keeps clear of the
     /// camera. (Stored under its old name, from when it was "Hide the interface", so the choice carries over.)
     var cleanView = false
@@ -84,7 +57,14 @@ struct TLAppSettings: Codable, Equatable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         orientation = try c.decodeIfPresent(Orientation.self, forKey: .orientation) ?? .auto
-        resolution = try c.decodeIfPresent(Resolution.self, forKey: .resolution) ?? .high
+        // Older settings stored a density: low, medium, high (the default) or native. Native is the screen's own pixels;
+        // the others follow the new default, Automatic, which is what high was.
+        switch try c.decodeIfPresent(String.self, forKey: .resolution) {
+        case "native"?: resolution = GameDisplay.screen
+        case let r? where GameDisplay.resolutions.contains(r): resolution = r
+        default: resolution = GameDisplay.followDefault
+        }
+        scaling = try c.decodeIfPresent(String.self, forKey: .scaling) ?? GameDisplay.followDefault
         cleanView = try c.decodeIfPresent(Bool.self, forKey: .cleanView) ?? false
         keepAwake = try c.decodeIfPresent(Bool.self, forKey: .keepAwake) ?? true
         pad = try c.decodeIfPresent(PadMode.self, forKey: .pad) ?? .auto
@@ -169,15 +149,21 @@ struct TLAppSettingsView: View {
                     ForEach(TLAppSettings.Orientation.allCases) { Text($0.title).tag($0) }
                 }
                 Picker("Resolution", selection: $settings.resolution) {
-                    ForEach(TLAppSettings.Resolution.allCases) { Text($0.title).tag($0) }
+                    Text("Default (\(GameDisplay.title(GameDisplay.savedResolution)))").tag(GameDisplay.followDefault)
+                    ForEach(GameDisplay.resolutions, id: \.self) { Text(GameDisplay.title($0)).tag($0) }
+                }
+                Picker("Screen Scaling", selection: $settings.scaling) {
+                    Text("Default (\(GameDisplay.savedScaling.title))").tag(GameDisplay.followDefault)
+                    ForEach(GameScaling.allCases) { Text($0.title).tag($0.rawValue) }
                 }
                 Toggle("Full Screen", isOn: $settings.cleanView)
                 Toggle("Keep the Screen On", isOn: $settings.keepAwake)
             } header: {
                 Text("Display")
             } footer: {
-                Text("\(settings.resolution.detail) Full Screen draws the game around the camera too. These apply the next time "
-                   + "the game starts; a game already running in this session needs Husk closed and opened again.")
+                Text("\(GameDisplay.detail(GameDisplay.resolution(for: settings))) \(GameDisplay.scaling(for: settings).detail) "
+                   + "Full Screen draws the game around the camera too. These apply the next time the game starts; a game "
+                   + "already running in this session needs Husk closed and opened again.")
             }
 
             if app.packageName == GeodeSupport.gamePackage {

@@ -23,6 +23,8 @@ final class TLScreenUIView: UIView, UIGestureRecognizerDelegate {
 
     /// What the guest's frame is, so a touch can be mapped back into it.
     private let guestSize = CGSize(width: 540, height: 960)
+    /// How the frame fills the view.
+    var scaling: GameScaling = .fit { didSet { if scaling != oldValue { setNeedsLayout() } } }
 
     /// Three fingers tapped at once: another way to bring the game's toolbar up or put it away.
     var onThreeFingerTap: (() -> Void)?
@@ -39,6 +41,8 @@ final class TLScreenUIView: UIView, UIGestureRecognizerDelegate {
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .black
+        // Fill puts part of the frame outside the view.
+        clipsToBounds = true
         // Several fingers reach the view so a three-finger tap can be seen; the game itself only ever gets the first.
         isMultipleTouchEnabled = true
         let three = UITapGestureRecognizer(target: self, action: #selector(threeFingers))
@@ -75,11 +79,14 @@ final class TLScreenUIView: UIView, UIGestureRecognizerDelegate {
 
     // MARK: layout
 
-    /// The largest rectangle with the guest's shape that fits, centred.
+    /// Where the frame goes, centred: the largest rectangle of its shape that fits (Fit), the smallest that covers the view
+    /// (Fill), or the view itself (Stretch).
     private var fitted: CGRect {
+        if scaling == .stretch { return bounds }
         let a = guestSize.width / guestSize.height
         var w = bounds.width, h = bounds.height
-        if w / max(h, 1) > a { w = h * a } else { h = w / a }
+        let wider = w / max(h, 1) > a
+        if wider == (scaling == .fit) { w = h * a } else { h = w / a }
         return CGRect(x: (bounds.width - w) / 2, y: (bounds.height - h) / 2, width: w, height: h)
     }
 
@@ -206,6 +213,7 @@ final class TLScreenUIView: UIView, UIGestureRecognizerDelegate {
 }
 
 struct TLScreenView: UIViewRepresentable {
+    var scaling: GameScaling = .fit
     var onThreeFingerTap: (() -> Void)? = nil
     var onPullDown: (() -> Void)? = nil
 
@@ -215,6 +223,7 @@ struct TLScreenView: UIViewRepresentable {
         return view
     }
     func updateUIView(_ view: TLScreenUIView, context: Context) {
+        view.scaling = scaling
         view.onThreeFingerTap = onThreeFingerTap
         view.onPullDown = onPullDown
     }
