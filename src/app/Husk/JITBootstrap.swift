@@ -40,34 +40,20 @@ enum JITBootstrap {
                          + "return 0 instead of killing the process")
     }
 
-    /// Size QEMU will ask for. Must match tb-size in the phase 1 command line:
-    /// a smaller region here means QEMU allocates a second one, at a point where
-    /// StikDebug may be long gone.
-    // Back to 256 MiB. Raising this to 512 was one of three changes made at
-    // once in v15, and v15 was the first build to die inside qemu_init(). The
-    // guest RAM -- the other suspect -- has since been shown to map and write
-    // cleanly at 6144 MiB, which leaves this. The region itself allocates and
-    // passes its selftest at 512; whatever objects is further in, where TCG
-    // carves the buffer into per-vCPU regions.
-    //
-    // 512 MiB since the native runtime runs Minecraft: its main library alone is a 354 MiB image that has to sit in this
-    // region, with the stubs the loader places beside it. A larger prewarm is safe for QEMU, which is handed the
-    // prewarmed region whenever it is at least what tb-size asks for.
+    /// The size of the JIT region. There is only ever one -- a second cannot be had once the debugger has gone -- so it
+    /// has to hold the largest game: Minecraft's main library alone is a 354 MiB image that sits in this region, with the
+    /// stubs the loader places beside it.
     static let jitBytes = 512 * 1024 * 1024
 
-    /// True once the region is held. The memory budget needs this: after a
-    /// prewarm the JIT is already counted in the footprint, so subtracting it
-    /// again charges for it twice and cost the guest 256 MiB.
+    /// True once the region is held.
     nonisolated(unsafe) static var prewarmed = false
 
     /// Take the JIT region now, while StikDebug is definitely still attached.
     ///
-    /// StikDebug lets go after a while, and a first run spends a minute
-    /// downloading 1.1 GB of guest image before QEMU starts. By the time
-    /// qemu_init() asked for memory the debugger had detached, and there is no
-    /// recovering from that in-process -- without a debugger there is no
-    /// executable memory at all, and asking again later is precisely what does
-    /// not work. So claim it first and hold it.
+    /// StikDebug lets go after a while, and once it has detached there is no
+    /// recovering in-process -- without a debugger there is no executable memory
+    /// at all, and asking again later is precisely what does not work. So claim
+    /// it as soon as the debugger attaches, and hold it for every game.
     @discardableResult
     static func prewarm() -> Bool {
         guard isDebuggerAttached else {
@@ -75,7 +61,7 @@ enum JITBootstrap {
             return false
         }
         HuskLog.log("jit", "claiming \(jitBytes / (1024 * 1024)) MiB of JIT memory now, "
-                         + "before the guest download -- StikDebug does not stay attached")
+                         + "while the debugger is attached -- StikDebug does not stay attached")
         let ok = husk_ios_jit_prewarm(jitBytes)
         if ok {
             prewarmed = true
@@ -84,11 +70,11 @@ enum JITBootstrap {
         }
         else if mapJITWorks {
             // Not a failure worth reporting: this is the ordinary shape of an
-            // iOS that does not need a trap servicer. QEMU maps its own buffer
-            // with MAP_JIT a moment later and runs exactly as well.
+            // iOS that does not need a trap servicer. The runtime maps its own
+            // memory with MAP_JIT when a game starts, and runs exactly as well.
             lastFailure = nil
             HuskLog.log("jit", "no trap servicer, but MAP_JIT executes here -- "
-                             + "QEMU will map its own buffer")
+                             + "games will map their own executable memory")
         } else {
             lastFailure = "The debugger is attached but is not answering trap "
                         + "requests, and this device will not execute a MAP_JIT "
@@ -96,7 +82,7 @@ enum JITBootstrap {
                         + "claimed. This is what happens when Husk runs inside "
                         + "another container app rather than sideloaded on its own."
         }
-        HuskLog.log("jit", ok ? "JIT region secured; it will be handed to QEMU later"
+        HuskLog.log("jit", ok ? "JIT region secured; games' code will be placed in it"
                               : "JIT prewarm FAILED -- StikDebug is not servicing traps")
         return ok
     }
@@ -137,10 +123,8 @@ enum JITBootstrap {
     ///
     /// CS_DEBUGGED being set is not the same as the debugger servicing traps.
     /// A build running inside LiveContainer reports itself debugged, answers no
-    /// brk, and gets no executable memory -- and Husk started QEMU anyway,
-    /// which segfaulted inside qemu_init() with a perfectly healthy 4 GB of
-    /// headroom. The crash looked like memory pressure and was nothing of the
-    /// kind.
+    /// brk, and gets no executable memory; this says so instead of letting a game
+    /// fail to start with no explanation.
     nonisolated(unsafe) static var lastFailure: String?
 
     /// Whether a plain MAP_JIT mapping executes in this process.
@@ -168,12 +152,11 @@ enum JITBootstrap {
     nonisolated(unsafe) static private(set) var mapJITResult: Bool?
 
     /// True only after a JIT region has been allocated AND passed the execute
-    /// self-test — which happens inside `qemu_init`. It is therefore always false
-    /// before the guest starts, and must NOT be used to decide whether to start it.
-    /// Use `isDebuggerAttached` for that, and this afterwards to confirm it worked.
+    /// self-test. Use `isDebuggerAttached` to decide whether JIT can be had, and
+    /// this afterwards to confirm it worked.
     static var isLive: Bool { husk_ios_jit_is_available() }
 
-    /// The actual precondition for starting the guest: StikDebug has attached.
+    /// The actual precondition for running a game: a debugger has attached.
     ///
     /// Checked with csops/CS_DEBUGGED rather than the `brk #0x69` probe, because
     /// this costs nothing and is safe to call repeatedly — the brk probe traps

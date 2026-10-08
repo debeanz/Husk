@@ -21,18 +21,6 @@ DD="${DD:-/tmp/husk_ipa}"
 OUT="${1:-$HOME/Desktop/Husk.ipa}"
 mkdir -p "$DD"
 
-# The .app is not the only thing that can be stale. The Xcode target links the
-# dylib staged in build/ios-arm64/lib, which is filled in by build_ios.sh's qemu
-# stage -- so rebuilding QEMU with plain ninja produces a new dylib that never
-# reaches the app, and the IPA ships the previous one with no warning at all.
-# That happened once and looked exactly like a fix that did not work.
-BUILT="$HUSK_ROOT/third_party/build/qemu-10.0.12-utm/_husk_build/libqemu-aarch64-softmmu.dylib"
-STAGED="$HUSK_ROOT/build/ios-arm64/lib/libqemu-aarch64-softmmu.dylib"
-if [ -f "$BUILT" ] && [ "$BUILT" -nt "$STAGED" ]; then
-    echo "==> staged dylib is older than the built one; restaging"
-    cp "$BUILT" "$STAGED"
-fi
-
 # Regenerate the project first.
 #
 # project.yml globs src/app/Husk, so adding a source file there is meant to be
@@ -57,9 +45,12 @@ xcodebuild -project "$HUSK_ROOT/src/app/Husk.xcodeproj" -scheme Husk \
 # DerivedData, so validation and packaging both succeed and produce an IPA of
 # the LAST build. Shipping a stale binary silently is the worst outcome here --
 # it looks exactly like a fix that did not work.
+# The whole log is kept with the other build logs, which CI uploads on failure.
+mkdir -p "$HUSK_ROOT/build/logs"
+cp "$DD/build.log" "$HUSK_ROOT/build/logs/xcodebuild.log"
 if ! grep -q "BUILD SUCCEEDED" "$DD/build.log"; then
     echo "build failed; refusing to package a stale app" >&2
-    grep -E "error:" "$DD/build.log" | head -10 >&2
+    grep -E "error:" "$DD/build.log" | sort -u | head -80 >&2
     exit 1
 fi
 
@@ -102,31 +93,26 @@ elif [ -n "$EXE" ]; then
     printf "  ok       %-28s %s\n" "executable present" "$EXE"
 fi
 
-# Both dylibs must be embedded, or the app dies at launch with a dyld error.
-#
-# ANGLE is checked here because it was not, and an IPA shipped without it: the
-# app reached qemu_egl_init_dpy_cocoa and aborted with "Couldn't open
-# @rpath/libANGLE-shared.dylib". Everything else in this validation passed. A
-# check that covers one of two required libraries is a check that reports
-# success on a bundle that cannot launch.
-for lib in libqemu-aarch64-softmmu.dylib libANGLE-shared.dylib; do
+# ANGLE must be embedded: every game's OpenGL ES runs on it, and without it the
+# runtime cannot open its EGL. MoltenVK is what Unreal Engine games draw with.
+for lib in libANGLE-shared.dylib MoltenVK.framework/MoltenVK; do
     if [ ! -f "$APP/Frameworks/$lib" ]; then
         echo "  MISSING  Frameworks/$lib" >&2
         rc=1
     else
-        printf "  ok       %-28s %s\n" "${lib%%-*} dylib embedded" \
-            "$(du -h "$APP/Frameworks/$lib" | cut -f1)"
+        printf "  ok       %-28s %s
+" "${lib%%[-/]*} embedded"             "$(du -h "$APP/Frameworks/$lib" | cut -f1)"
     fi
 done
 
-# Guest images, firmware, and blank disk seeds required by first launch.
-for f in vmlinuz-virt initramfs-virt husk-jit.js \
-         edk2-aarch64-code.fd lineage-efi-vars-seed.fd lineage-vdb-seed.qcow2; do
+# The JIT script StikDebug and the built-in helper run.
+for f in husk-jit.js cacert.pem; do
     if [ ! -f "$APP/$f" ]; then
         echo "  MISSING  $f" >&2
         rc=1
     else
-        printf "  ok       %-28s %s\n" "$f" "$(du -h "$APP/$f" | cut -f1)"
+        printf "  ok       %-28s %s
+" "$f" "$(du -h "$APP/$f" | cut -f1)"
     fi
 done
 

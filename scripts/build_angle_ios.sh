@@ -1,11 +1,9 @@
 #!/bin/bash
 # Build ANGLE (EGL + GLES over Metal) for iOS arm64.
 #
-# This is the host-side GPU stack Husk needs. virglrenderer turns the guest's
-# GL calls into real draw calls, but it needs an EGL/GLES implementation to make
-# them against -- and iOS has no EGL at all. ANGLE supplies one on top of Metal.
-# UTM does the same thing, which is what makes GPU acceleration inside a QEMU
-# guest on iOS a solved problem rather than a hope.
+# Android games draw with OpenGL ES through EGL, and iOS has neither. ANGLE
+# supplies both on top of Metal: the translation layer opens this dylib and hands
+# each game an EGL window over a CAMetalLayer.
 #
 # ANGLE is taken from WebKit rather than upstream because WebKit carries an
 # Xcode project for it, which avoids needing depot_tools and gn. A blob-filtered
@@ -78,14 +76,14 @@ angle_build () {
 #
 # WebKit builds ANGLE with its entry points renamed -- the dylib exports
 # EGL_ChooseConfig, not eglChooseConfig -- since WebCore reaches them through
-# ANGLE's own loader. libepoxy and virglrenderer expect the standard names.
+# ANGLE's own loader. The translation layer looks up the standard names.
 # Rather than hand-write ~115 forwarding functions, the second pass relinks with
 # ld's -alias_list, which adds the standard name as an alias of each renamed
 # symbol. No wrappers, no extra indirection at call time.
 #
 # EGL only, deliberately. Aliasing the 828 GL_* exports the same way fails with
 # "ld: 828 duplicate symbols" -- ANGLE already carries internal gl* symbols that
-# the aliases collide with. It is also unnecessary: epoxy resolves GL entry
+# the aliases collide with. It is also unnecessary: games resolve GL entry
 # points through eglGetProcAddress, so EGL is the only surface that must be
 # reachable by its standard name.
 echo "==> building ANGLE for iOS arm64, pass 1 (log: $LOG)"

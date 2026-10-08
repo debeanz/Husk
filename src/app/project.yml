@@ -41,8 +41,8 @@ targets:
       # so the script would be present but unfindable at runtime.
       - path: Husk/Resources
         buildPhase: resources
-      # The experimental translation layer's C side. Compiled into the app,
-      # not into the QEMU library -- see docs/04-translation-layer.md.
+      # The translation layer's C side: APK reading, the first loader and the
+      # Java interpreter. See docs/04-translation-layer.md.
       - path: ../translation-layer
       # The native runtime: a real linker for Android's libraries, a bionic shim, JNI with a
       # Java world written in C, and the Unity and cocos2d-x drivers. Runs Unity games such as Subway Surfers
@@ -70,14 +70,14 @@ targets:
         INFOPLIST_FILE: Husk/Info.plist
         CODE_SIGN_ENTITLEMENTS: "$(HUSK_ENTITLEMENTS)"
         SWIFT_OBJC_BRIDGING_HEADER: Husk/HuskBridge.h
-        # libqemu-aarch64-softmmu.dylib has install_name @rpath/...
+        # The embedded dylibs have install names under @rpath.
         LD_RUNPATH_SEARCH_PATHS:
           - "$(inherited)"
           - "@executable_path/Frameworks"
-        # Husk targets recent iPhones only; a real Android guest needs the RAM.
+        # Husk targets recent iPhones only.
         TARGETED_DEVICE_FAMILY: "1"
-        # XcodeGen links the dylib by -l, so the linker needs a library search
-        # path (not just the framework search path it infers from the file).
+        # libhusk_rppairing.a is linked by -l, so the linker needs a library
+        # search path.
         LIBRARY_SEARCH_PATHS:
           - "$(inherited)"
           - "$(SRCROOT)/../../build/ios-arm64/lib"
@@ -103,23 +103,14 @@ targets:
     dependencies:
       # Built-in StikJIT's debugger process. Embedded into PlugIns/.
       - target: HuskJITHelper
-      # Built by scripts/build_ios.sh. Embedded and signed into the bundle.
-      - framework: ../../build/ios-arm64/lib/libqemu-aarch64-softmmu.dylib
-        embed: true
-        codeSign: true
       # The file picker's Open button does nothing on certificate-signed installs; this tweak (from issue #60) hooks
       # UIDocumentPickerViewController so the picker hands over copies. Linked so it loads at launch.
       - framework: Frameworks/libFilePickerFix.dylib
         embed: true
         codeSign: true
-      # ANGLE, which the QEMU dylib dlopens by @rpath at GL start-up. Embedded
-      # but NOT linked: nothing in the app references its symbols directly, and
-      # the only thing that would notice its absence is the dynamic loader.
-      #
-      # This was in the checked-in .pbxproj and missing here, which nobody could
-      # see while the project was never regenerated. The first regeneration
-      # dropped it, and the app died at qemu_egl_init_dpy_cocoa with
-      # "Couldn't open @rpath/libANGLE-shared.dylib".
+      # ANGLE: EGL and OpenGL ES over Metal, which the translation layer opens by
+      # path when a game starts (Frameworks/libANGLE-shared.dylib). Embedded but
+      # NOT linked: nothing in the app references its symbols directly.
       - framework: ../../build/ios-arm64/sysroot/lib/libANGLE-shared.dylib
         embed: true
         codeSign: true
@@ -131,59 +122,6 @@ targets:
         embed: true
         codeSign: true
         link: false
-    preBuildScripts:
-      - name: Stage guest image
-        # The Phase 0 guest is far too large for git, so it is fetched rather than
-        # vendored, and copied into the bundle at build time.
-        script: |
-          set -e
-          GUEST="$SRCROOT/../../guests/phase0"
-          if [ ! -f "$GUEST/vmlinuz-virt" ]; then
-            echo "error: guest missing. Run ./scripts/fetch_phase0_guest.sh" >&2
-            exit 1
-          fi
-          mkdir -p "$BUILT_PRODUCTS_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH"
-          cp "$GUEST/vmlinuz-virt" "$GUEST/initramfs-virt" \
-             "$BUILT_PRODUCTS_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/"
-
-          # QEMU loads option ROMs by name from its data directory (-L). The full
-          # pc-bios tree is 24 MB and almost entirely firmware for architectures
-          # we will never boot (sparc64, riscv, loongarch, x86, ppc), so ship only
-          # the network boot ROMs -- 1.6 MB, and the only ones -M virt asks for.
-          BIOS="$SRCROOT/../../third_party/build/qemu-10.0.12-utm/pc-bios"
-          DEST="$BUILT_PRODUCTS_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/pc-bios"
-          mkdir -p "$DEST"
-          cp "$BIOS"/efi-*.rom "$BIOS"/pxe-*.rom "$DEST/" 2>/dev/null || true
-
-          # UEFI firmware for the Phase 1 guest: Debian's cloud image boots through
-          # GRUB under UEFI, so this is required. It is 64 MiB but almost all zeros,
-          # so the IPA's own zip squeezes it to about a megabyte -- cheaper than
-          # carrying a decompressor to unpack it at runtime.
-          FW="$BUILT_PRODUCTS_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/edk2-aarch64-code.fd"
-          if [ ! -f "$FW" ]; then
-            bunzip2 -c "$BIOS/edk2-aarch64-code.fd.bz2" > "$FW"
-          fi
-
-          # These two qcow2 files are tiny sparse seeds (64 MiB and 16 GiB
-          # virtual). The app copies them into Documents on first launch; the
-          # pre-booted snapshot later replaces the userdata seed in place.
-          QEMU_IMG="$(command -v qemu-img || true)"
-          if [ -z "$QEMU_IMG" ]; then
-            echo "error: qemu-img is required to generate the firmware and userdata seeds" >&2
-            exit 1
-          fi
-          VARS_SEED="$BUILT_PRODUCTS_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/lineage-efi-vars-seed.fd"
-          VDB_SEED="$BUILT_PRODUCTS_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/lineage-vdb-seed.qcow2"
-          rm -f "$VARS_SEED" "$VDB_SEED"
-          "$QEMU_IMG" create -f qcow2 "$VARS_SEED" 64M
-          "$QEMU_IMG" create -f qcow2 "$VDB_SEED" 16G
-        outputFiles:
-          - "$(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/vmlinuz-virt"
-          - "$(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/initramfs-virt"
-          - "$(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/edk2-aarch64-code.fd"
-          - "$(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/lineage-efi-vars-seed.fd"
-          - "$(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/lineage-vdb-seed.qcow2"
-
     postBuildScripts:
       - name: Embed StikJIT
         # The helper links StikJIT; it lives here, in the app's Frameworks,

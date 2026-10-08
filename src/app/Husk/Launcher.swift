@@ -1,133 +1,52 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import SwiftUI
 
-// MARK: - one library
+// MARK: - what the library knows about a game
 
-/// Anything Husk can open: a game run on the translation layer, an app installed in Android, or Android itself.
-///
-/// The person never has to know which way something runs -- Husk does -- so the launcher sorts by what a thing is (a game,
-/// an app), not by how it is run. The only trace of the second is a small badge on what opens inside Android, because that
-/// needs Android started first.
-enum LibraryItem: Identifiable, Hashable {
-    case game(TLApp)
-    case app(AndroidHost.Package)
-    case android
-
-    var id: String {
-        switch self {
-        case .game(let g): return "tl:" + g.id
-        case .app(let p): return "android:" + p.name
-        case .android: return "android-system"
-        }
-    }
-
-    static func == (a: LibraryItem, b: LibraryItem) -> Bool { a.id == b.id }
-    func hash(into h: inout Hasher) { h.combine(id) }
-
-    var title: String {
-        switch self {
-        case .game(let g): return g.label
-        case .app(let p): return p.label
-        case .android: return "Android"
-        }
-    }
-
-    var iconPath: String? {
-        switch self {
-        case .game(let g): return g.iconPath
-        case .app(let p): return p.iconPath
-        case .android: return nil
-        }
-    }
-
-    /// Games on the translation layer, and what Android itself files as a game.
-    var isGame: Bool {
-        switch self {
-        case .game: return true
-        case .app(let p): return p.category == "Game"
-        case .android: return false
-        }
-    }
-
-    var packageName: String? {
-        switch self {
-        case .game(let g): return g.packageName
-        case .app(let p): return p.name
-        case .android: return nil
-        }
-    }
-
-    /// A gameplay picture, for apps that have been run on an iPhone (fetched from GitHub; see ShowcaseStore).
-    @MainActor var artworkPath: String? { ShowcaseStore.shared.pictures(for: packageName).first }
-
-    var runsInAndroid: Bool {
-        if case .app = self { return true }
-        return false
-    }
-
-    var lastUsed: Date? {
-        switch self {
-        case .game(let g): return g.lastPlayed
-        case .app(let p): return p.lastUsed
-        case .android: return UserDefaults.standard.object(forKey: "husk.android.lastOpened") as? Date
-        }
-    }
-
-    var route: LibraryRoute {
-        switch self {
-        case .game(let g): return .game(g.id)
-        case .app(let p): return .android(p)
-        case .android: return .androidSystem
-        }
-    }
-
-    /// "Played 2 hours ago", or nothing for what was never opened from Husk.
-    var usedText: String? {
-        guard let date = lastUsed else { return nil }
+extension TLApp {
+    /// "Played 2 hours ago", or nothing for a game never started from Husk.
+    var playedText: String? {
+        guard let date = lastPlayed else { return nil }
+        if date.timeIntervalSinceNow > -60 { return "Played just now" }
         let rel = RelativeDateTimeFormatter()
         rel.unitsStyle = .full
-        let ago = date.timeIntervalSinceNow > -60 ? "just now" : rel.localizedString(for: date, relativeTo: Date())
-        return (isGame ? "Played " : "Opened ") + ago
+        return "Played " + rel.localizedString(for: date, relativeTo: Date())
     }
-}
 
-/// Which side Home shows: games run on the iPhone itself, or Android and its apps.
-enum HomeMode: String, CaseIterable, Identifiable {
-    case translation, android
-    var id: String { rawValue }
-    var title: String { self == .translation ? "Translation Layer" : "Android" }
-    var detail: String { self == .translation ? "Games running directly on iPhone" : "Apps inside the emulated Android" }
-    var systemImage: String { self == .translation ? "bolt.fill" : "apps.iphone" }
-}
-
-/// Which items a library page shows.
-enum LibraryFilter: String, CaseIterable, Identifiable {
-    case all, games, apps
-    var id: String { rawValue }
-    var title: String {
-        switch self {
-        case .all: return "All"
-        case .games: return "Games"
-        case .apps: return "Apps"
-        }
+    /// What runs it, in a word or two: the engine, Husk's Java interpreter, or nothing.
+    var engineLabel: String {
+        guard let report else { return "Not scanned" }
+        if report.runsOnNativeRuntime { return report.nativeEngineName }
+        return report.canRun ? "Java" : "Unsupported"
     }
+
+    /// Whether Husk expects it to start at all.
+    var runs: Bool { report?.canRun == true }
+
+    /// Geode's Android launcher, added as if it were a game: on Husk it only lends Geometry Dash a library.
+    var isGeodeLauncher: Bool { packageName == GeodeSupport.launcherPackage }
+
+    /// A gameplay picture, for games that have been run on an iPhone (fetched from GitHub; see ShowcaseStore).
+    @MainActor var artworkPath: String? { ShowcaseStore.shared.pictures(for: packageName).first }
 }
 
-/// Everything, from both stores, in one list.
+/// How the library is ordered.
+enum LibrarySort: String, CaseIterable, Identifiable {
+    case recent, name
+    var id: String { rawValue }
+    var title: String { self == .recent ? "Recently Played" : "Name" }
+}
+
 @MainActor
 enum Launcher {
-    static func items(store: TranslationLayerStore, host: AndroidHost) -> [LibraryItem] {
-        store.apps.map(LibraryItem.game) + host.packages.map(LibraryItem.app)
-    }
-
-    /// Most recently used first; never-used ones after, by name.
-    static func byRecent(_ items: [LibraryItem]) -> [LibraryItem] {
-        items.sorted { a, b in
-            switch (a.lastUsed, b.lastUsed) {
+    /// Most recently played first; never-played ones after, by name.
+    static func byRecent(_ apps: [TLApp]) -> [TLApp] {
+        apps.sorted { a, b in
+            switch (a.lastPlayed, b.lastPlayed) {
             case let (x?, y?): return x > y
             case (_?, nil): return true
             case (nil, _?): return false
-            default: return a.title.localizedCaseInsensitiveCompare(b.title) == .orderedAscending
+            default: return a.label.localizedCaseInsensitiveCompare(b.label) == .orderedAscending
             }
         }
     }
@@ -135,516 +54,356 @@ enum Launcher {
     static var jitOn: Bool { JITBootstrap.isDebuggerAttached || JITBootstrap.debuggedFlag }
 }
 
-// MARK: - Home
+// MARK: - the Library
 
-/// What you used last, then your games, then your apps.
-struct HomeView: View {
-    @ObservedObject private var router = Router.shared
-    @ObservedObject private var store = TranslationLayerStore.shared
-    @ObservedObject private var host = AndroidHost.shared
-    @ObservedObject private var jit = JITCoordinator.shared
-    @ObservedObject private var incoming = IncomingFiles.shared
-    @AppStorage("husk.home.mode") private var mode: HomeMode = .translation
-
-    /// This side's items, most recent first. On the Android side Android itself leads until an app has been opened.
-    private var all: [LibraryItem] {
-        switch mode {
-        case .translation: return Launcher.byRecent(store.apps.map(LibraryItem.game))
-        case .android: return Launcher.byRecent(host.packages.map(LibraryItem.app)) + [.android]
-        }
-    }
-
-    var body: some View {
-        NavigationStack(path: $router.home) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    HStack(spacing: 10) {
-                        Text("Husk")
-                            .font(.system(size: 34, weight: .heavy, design: .rounded))
-                        ModeMenu(mode: $mode)
-                        Spacer()
-                        HeaderButton(systemImage: "plus") { router.addSomething() }
-                            .accessibilityLabel("Add a Game or App")
-                    }
-                    if !Launcher.jitOn { JITCard(compact: true) }
-                    if let busy = incoming.preparing { BusyStrip(text: busy) }
-                    if let busy = store.busy { BusyStrip(text: busy) }
-                    if let busy = host.busy { BusyStrip(text: busy) }
-                    if jit.busy, !jit.showSetup { BusyStrip(text: jit.status ?? "Turning on JIT…") }
-
-                    let items = all
-                    if items.isEmpty {
-                        WelcomeCard()
-                    } else {
-                        let lead = items.first { $0.lastUsed != nil } ?? (mode == .android ? .android : items[0])
-                        HeroCard(item: lead)
-
-                        let games = items.filter { $0.isGame && $0 != lead }
-                        if !games.isEmpty {
-                            ShelfHeader(title: "Games") { router.showLibrary(.games) }
-                            ScrollView(.horizontal) {
-                                LazyHStack(alignment: .top, spacing: 12) {
-                                    ForEach(games) { item in
-                                        NavigationLink(value: item.route) { CoverTile(item: item) }
-                                            .buttonStyle(CardButtonStyle())
-                                    }
-                                }
-                                .padding(.horizontal, 20)
-                            }
-                            .scrollIndicators(.hidden)
-                            .padding(.horizontal, -20)
-                        }
-
-                        let apps = items.filter { !$0.isGame && $0 != lead }
-                        if !apps.isEmpty {
-                            ShelfHeader(title: "Apps") { router.showLibrary(.apps) }
-                            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8, alignment: .top), count: 4),
-                                      spacing: 14) {
-                                ForEach(apps.prefix(8)) { item in
-                                    NavigationLink(value: item.route) {
-                                        LauncherTile(title: item.title, iconPath: item.iconPath, size: 50)
-                                    }
-                                    .buttonStyle(CardButtonStyle())
-                                }
-                            }
-                            .padding(14)
-                            .background(Color(uiColor: .secondarySystemBackground),
-                                        in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-                        }
-                    }
-                }
-                .padding(.horizontal, 20)
-                .padding(.top, 8)
-                .padding(.bottom, 32)
-                .id(jit.attachGeneration)
-            }
-            .scrollIndicators(.hidden)
-            .background(Color(uiColor: .systemBackground).ignoresSafeArea())
-            .toolbar(.hidden, for: .navigationBar)
-            .libraryDestinations()
-        }
-    }
-}
-
-/// The first time: nothing added yet, and the two ways to start.
-private struct WelcomeCard: View {
-    @ObservedObject private var router = Router.shared
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Image(systemName: "gamecontroller.fill")
-                .font(.system(size: 28, weight: .semibold))
-                .foregroundStyle(Color.accentColor)
-                .frame(width: 60, height: 60)
-                .background(Color.accentColor.opacity(0.15), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Add your first game")
-                    .font(.system(.title2, design: .rounded).weight(.bold))
-                Text("Pick an APK or a bundle (.xapk, .apkm, .apks), or share one to Husk from Files or Safari. Games run "
-                   + "straight on your iPhone. Other apps run inside Android.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Button { router.addSomething() } label: {
-                Text("Add a Game or App").frame(maxWidth: .infinity)
-            }
-            .buttonStyle(PrimaryButtonStyle())
-        }
-        .padding(20)
-        .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-    }
-}
-
-/// The side Home shows, as a pull-down beside the title: the current one, and a tap away the other, each saying what it is.
-private struct ModeMenu: View {
-    @Binding var mode: HomeMode
-
-    var body: some View {
-        Menu {
-            Picker("Show", selection: $mode) {
-                ForEach(HomeMode.allCases) { m in
-                    Label { Text(m.title); Text(m.detail) } icon: { Image(systemName: m.systemImage) }
-                        .tag(m)
-                }
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Text(mode == .translation ? "Translated" : "Android")
-                    .font(.subheadline.weight(.semibold))
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 10, weight: .bold))
-            }
-            .foregroundStyle(Color.accentColor)
-            .padding(.horizontal, 10)
-            .frame(height: 28)
-            .background(Color.accentColor.opacity(0.14), in: Capsule())
-        }
-        .padding(.top, 4)
-    }
-}
-
-private struct ShelfHeader: View {
-    let title: String
-    let seeAll: () -> Void
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(title).font(.system(.title3, design: .rounded).weight(.bold))
-            Spacer()
-            Button("See All", action: seeAll).font(.subheadline.weight(.semibold))
-        }
-        .padding(.bottom, -10)
-    }
-}
-
-// MARK: - artwork
-
-/// A picture to stand in for artwork, made from the icon: the icon itself, enlarged and blurred to fill the space,
-/// under a dark fade so text on it reads. Android icons are all most apps carry, and this is what makes them big.
-struct IconBackdrop: View {
-    let path: String?
-    var fallback: Color = Color(uiColor: .secondarySystemBackground)
-
-    var body: some View {
-        ZStack {
-            fallback
-            if path != nil {
-                AppIcon(path: path, size: 120)
-                    .scaleEffect(3.2)
-                    .blur(radius: 28)
-                    .saturation(1.3)
-                    .opacity(0.9)
-            }
-        }
-        .clipped()
-        // Scaled up, the icon reaches far past the card; clipping hides that but does not stop it taking touches, and a
-        // tap on one cover used to land on its neighbour's backdrop.
-        .allowsHitTesting(false)
-    }
-}
-
-/// What sits behind an item's name: its gameplay picture when Husk ships one, its blurred icon otherwise.
-struct ItemBackdrop: View {
-    let item: LibraryItem
-    var pixels: Int = 1200
-    var fallback: Color = Color(uiColor: .secondarySystemBackground)
-    @ObservedObject private var showcase = ShowcaseStore.shared
-
-    var body: some View {
-        Group {
-            if let art = item.artworkPath {
-                Color.clear.overlay { PictureView(path: art, pixels: pixels) }.clipped()
-            } else {
-                IconBackdrop(path: item.iconPath, fallback: item == .android ? AndroidMark.green.opacity(0.55) : fallback)
-            }
-        }
-        .allowsHitTesting(false)
-    }
-}
-
-/// The big card on Home: the thing you used last, ready to go again.
-private struct HeroCard: View {
-    let item: LibraryItem
-    @ObservedObject private var router = Router.shared
-
-    var body: some View {
-        NavigationLink(value: item.route) {
-            ZStack(alignment: .bottomLeading) {
-                ItemBackdrop(item: item)
-                LinearGradient(colors: [.clear, .black.opacity(0.75)], startPoint: .top, endPoint: .bottom)
-                HStack(alignment: .bottom, spacing: 14) {
-                    ItemIcon(item: item, size: 64)
-                        .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(item.title)
-                            .font(.system(.title3, design: .rounded).weight(.heavy))
-                            .lineLimit(2)
-                        Text(item.usedText ?? (item.isGame ? "Ready to play" : "Ready to open"))
-                            .font(.caption)
-                            .foregroundStyle(.white.opacity(0.75))
-                    }
-                    .foregroundStyle(.white)
-                    Spacer(minLength: 8)
-                    Text(item.isGame ? "Play" : "Open")
-                        .font(.subheadline.weight(.bold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 18)
-                        .frame(height: 36)
-                        .background(Color.accentColor, in: Capsule())
-                }
-                .padding(16)
-            }
-            .frame(height: 200)
-            .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
-            .contentShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
-        }
-        .buttonStyle(CardButtonStyle())
-    }
-}
-
-/// A game on Home's shelf: a tall card with the game's own colours behind its icon.
-private struct CoverTile: View {
-    let item: LibraryItem
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ZStack {
-                ItemBackdrop(item: item, pixels: 420)
-                LinearGradient(colors: [.clear, .black.opacity(0.35)], startPoint: .center, endPoint: .bottom)
-                ItemIcon(item: item, size: 58)
-                    .shadow(color: .black.opacity(0.3), radius: 8, y: 3)
-            }
-            .frame(width: 104, height: 136)
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay(alignment: .topTrailing) { if item.runsInAndroid { AndroidBadge().padding(7) } }
-            Text(item.title)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-            Text(item.usedText ?? " ")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-        }
-        .frame(width: 104)
-    }
-}
-
-/// An item's icon: the app's own, or Android's mark for Android itself.
-struct ItemIcon: View {
-    let item: LibraryItem
-    let size: CGFloat
-
-    var body: some View {
-        if item == .android {
-            AndroidMark(size: size)
-        } else {
-            AppIcon(path: item.iconPath, size: size)
-                .overlay {
-                    RoundedRectangle(cornerRadius: size * 0.225, style: .continuous)
-                        .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
-                }
-        }
-    }
-}
-
-/// Android itself, as an icon.
-struct AndroidMark: View {
-    static let green = Color(red: 0.24, green: 0.86, blue: 0.52)
-    var size: CGFloat = 64
-
-    var body: some View {
-        Image(systemName: "apps.iphone")
-            .font(.system(size: size * 0.46, weight: .semibold))
-            .foregroundStyle(.white)
-            .frame(width: size, height: size)
-            .background(Self.green.gradient, in: RoundedRectangle(cornerRadius: size * 0.225, style: .continuous))
-    }
-}
-
-/// "Opens inside Android".
-struct AndroidBadge: View {
-    var body: some View {
-        Text("ANDROID")
-            .font(.system(size: 8, weight: .heavy, design: .rounded))
-            .tracking(0.4)
-            .foregroundStyle(Color(red: 0.03, green: 0.13, blue: 0.06))
-            .padding(.horizontal, 5).padding(.vertical, 2)
-            .background(AndroidMark.green, in: Capsule())
-    }
-}
-
-// MARK: - Library
-
-/// Every game and app, in one grid: search, and All / Games / Apps.
+/// Every game, as artwork: the one you played last up top, then all of them in a grid.
 struct LibraryScreen: View {
     @ObservedObject private var router = Router.shared
     @ObservedObject private var store = TranslationLayerStore.shared
-    @ObservedObject private var host = AndroidHost.shared
-    @ObservedObject private var guest = GuestImage.shared
+    @ObservedObject private var jit = JITCoordinator.shared
+    @ObservedObject private var incoming = IncomingFiles.shared
+    @ObservedObject private var showcase = ShowcaseStore.shared
+    @AppStorage("husk.library.sort") private var sort: LibrarySort = .recent
     @State private var query = ""
+    @State private var removing: TLApp?
+
+    private let columns = [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 14, alignment: .top)]
+
+    private var shown: [TLApp] {
+        let found = store.apps.filter { matches(query, $0.label, $0.packageName ?? "") }
+        switch sort {
+        case .recent: return Launcher.byRecent(found)
+        case .name: return found.sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
+        }
+    }
+
+    /// The game to pick up where you left off: the last one played, when there is one.
+    private var lead: TLApp? {
+        guard query.isEmpty else { return nil }
+        return Launcher.byRecent(store.apps).first { $0.lastPlayed != nil && !$0.isGeodeLauncher }
+    }
 
     var body: some View {
         NavigationStack(path: $router.library) {
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    HStack {
-                        Text("Library")
-                            .font(.system(size: 34, weight: .heavy, design: .rounded))
-                        Spacer()
-                        HeaderButton(systemImage: "plus") { router.addSomething() }
-                            .accessibilityLabel("Add a Game or App")
-                    }
-                    SearchField(text: $query, prompt: "Search games and apps")
-                    FilterChips(filter: $router.libraryFilter)
+                VStack(alignment: .leading, spacing: 20) {
+                    header
+
+                    if !Launcher.jitOn { JITCard(compact: true) }
+                    if let busy = incoming.preparing { BusyStrip(text: busy) }
                     if let busy = store.busy { BusyStrip(text: busy) }
-                    if let busy = host.busy { BusyStrip(text: busy) }
+                    if jit.busy, !jit.showSetup { BusyStrip(text: jit.status ?? "Turning on JIT…") }
+                    if let error = store.lastError { ErrorStrip(text: error) { store.lastError = nil } }
 
-                    let items = Launcher.items(store: store, host: host)
-                        .filter { matches(query, $0.title) }
-                        .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
-                    let games = items.filter(\.isGame)
-                    // Android, as an app of its own: pinned first, and found by search like anything else.
-                    let apps = (matches(query, "Android") ? [LibraryItem.android] : []) + items.filter { !$0.isGame }
-
-                    if router.libraryFilter != .apps {
-                        section("Games", games, empty: query.isEmpty ? "Add a game with the + button." : nil)
+                    if store.apps.isEmpty {
+                        WelcomeCard()
+                    } else {
+                        if let lead { ContinueCard(app: lead) }
+                        if store.apps.count > 4 { SearchField(text: $query, prompt: "Search your games") }
+                        gridHeader
+                        let apps = shown
+                        if apps.isEmpty {
+                            NoResults(query: query)
+                        } else {
+                            LazyVGrid(columns: columns, spacing: 20) {
+                                ForEach(apps) { app in
+                                    NavigationLink(value: LibraryRoute.game(app.id)) { GameTile(app: app) }
+                                        .buttonStyle(CardButtonStyle())
+                                        .contextMenu { menu(for: app) }
+                                }
+                            }
+                        }
                     }
-                    if router.libraryFilter != .games {
-                        section("Apps", apps, empty: nil)
-                    }
-                    if !query.isEmpty, games.isEmpty, apps.isEmpty { NoResults(query: query) }
                 }
-                .padding(.horizontal, 20)
+                .padding(.horizontal, Theme.margin)
                 .padding(.top, 8)
-                .padding(.bottom, 32)
+                .padding(.bottom, 36)
+                .id(jit.attachGeneration)
             }
             .scrollIndicators(.hidden)
             .scrollDismissesKeyboard(.immediately)
-            .background(Color(uiColor: .systemBackground).ignoresSafeArea())
+            .background(Theme.canvas.ignoresSafeArea())
             .toolbar(.hidden, for: .navigationBar)
             .libraryDestinations()
+            .confirmationDialog("Remove \(removing?.label ?? "this game")?",
+                                isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
+                                titleVisibility: .visible) {
+                Button("Remove Game", role: .destructive) {
+                    if let app = removing { store.remove(app) }
+                    removing = nil
+                }
+            } message: {
+                Text("The game and everything it saved in Husk are deleted.")
+            }
         }
+    }
+
+    private var header: some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Library").font(.display(34, weight: .heavy))
+                Text(store.apps.isEmpty ? "Android games, running natively"
+                     : "\(store.apps.count) game\(store.apps.count == 1 ? "" : "s")")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button { router.addGames() } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 17, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 40, height: 40)
+                    .background(Theme.accent, in: Circle())
+            }
+            .buttonStyle(CardButtonStyle())
+            .accessibilityLabel("Add a Game")
+        }
+        .padding(.top, 6)
+    }
+
+    private var gridHeader: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(query.isEmpty ? "All Games" : "Results")
+                .font(.display(22))
+            Spacer()
+            Menu {
+                Picker("Sort By", selection: $sort) {
+                    ForEach(LibrarySort.allCases) { Text($0.title).tag($0) }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Text(sort.title)
+                    Image(systemName: "chevron.up.chevron.down").font(.system(size: 10, weight: .bold))
+                }
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Theme.accent)
+            }
+        }
+        .padding(.top, 4)
     }
 
     @ViewBuilder
-    private func section(_ title: String, _ items: [LibraryItem], empty: String?) -> some View {
-        if !items.isEmpty || empty != nil {
-            HStack(alignment: .firstTextBaseline) {
-                Text(title).font(.system(.title3, design: .rounded).weight(.bold))
-                Text("\(items.count)").font(.subheadline).foregroundStyle(.secondary)
-            }
-            .padding(.top, 6)
-            if items.isEmpty, let empty {
-                Text(empty).font(.subheadline).foregroundStyle(.secondary)
+    private func menu(for app: TLApp) -> some View {
+        Button {
+            router.autoPlay = app.id
+            router.library.append(.game(app.id))
+        } label: { Label("Play", systemImage: "play.fill") }
+            .disabled(app.isGeodeLauncher)
+        Button { router.library.append(.gameSettings(app.id)) } label: {
+            Label("Game Settings", systemImage: "slider.horizontal.3")
+        }
+        Divider()
+        Button(role: .destructive) { removing = app } label: { Label("Remove", systemImage: "trash") }
+    }
+}
+
+// MARK: - the cards
+
+/// What sits behind a game's name: its gameplay picture when Husk has one, its icon enlarged and blurred otherwise.
+struct GameArtwork: View {
+    let app: TLApp
+    var pixels: Int = 800
+    @ObservedObject private var showcase = ShowcaseStore.shared
+
+    var body: some View {
+        Group {
+            if let art = app.artworkPath {
+                Color.clear.overlay { PictureView(path: art, pixels: pixels) }.clipped()
             } else {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 76, maximum: 110), spacing: 12, alignment: .top)], spacing: 20) {
-                    ForEach(items) { item in
-                        NavigationLink(value: item.route) {
-                            LauncherTile(title: item.title, iconPath: item.iconPath, item: item, caption: caption(item))
-                        }
-                        .buttonStyle(CardButtonStyle())
+                ZStack {
+                    Color(uiColor: .secondarySystemBackground)
+                    if app.iconPath != nil {
+                        AppIcon(path: app.iconPath, size: 120)
+                            .scaleEffect(3.2)
+                            .blur(radius: 30)
+                            .saturation(1.4)
+                            .opacity(0.9)
                     }
                 }
+                .clipped()
             }
         }
+        // Scaled up, the icon reaches far past the card; clipping hides that but does not stop it taking touches.
+        .allowsHitTesting(false)
     }
+}
 
-    private func caption(_ item: LibraryItem) -> String? {
-        switch item {
-        case .game(let g):
-            if g.packageName == GeodeSupport.launcherPackage { return "Geode" }
-            return g.report?.canRun == true ? nil : "May not run"
-        case .android:
-            if AndroidHost.shared.isReady { return "Running" }
-            return guest.state == .ready ? nil : "Not installed"
-        case .app: return nil
+/// A game's icon, with the hairline edge an icon has on a home screen.
+struct GameIcon: View {
+    let app: TLApp
+    let size: CGFloat
+
+    var body: some View {
+        AppIcon(path: app.iconPath, size: size)
+            .overlay {
+                RoundedRectangle(cornerRadius: size * 0.225, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.18), lineWidth: 0.5)
+            }
+    }
+}
+
+/// The big card up top: the game you played last, ready to go again. The card opens the game's page; Play starts it.
+private struct ContinueCard: View {
+    let app: TLApp
+    @ObservedObject private var router = Router.shared
+
+    var body: some View {
+        // The Play button sits over the card rather than inside it: a button inside a navigation link's label does not
+        // reliably get its own taps.
+        ZStack(alignment: .bottomTrailing) {
+            NavigationLink(value: LibraryRoute.game(app.id)) {
+                ZStack(alignment: .bottomLeading) {
+                    GameArtwork(app: app, pixels: 1200)
+                    LinearGradient(colors: [.black.opacity(0.05), .black.opacity(0.78)], startPoint: .top, endPoint: .bottom)
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text("CONTINUE PLAYING")
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .tracking(0.8)
+                            .foregroundStyle(.white.opacity(0.7))
+                        Spacer(minLength: 0)
+                        HStack(alignment: .bottom, spacing: 14) {
+                            GameIcon(app: app, size: 60)
+                                .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(app.label)
+                                    .font(.display(21, weight: .heavy))
+                                    .lineLimit(2)
+                                    .minimumScaleFactor(0.85)
+                                Text(app.playedText ?? app.engineLabel)
+                                    .font(.caption)
+                                    .foregroundStyle(.white.opacity(0.75))
+                            }
+                            .foregroundStyle(.white)
+                            Spacer(minLength: 0)
+                        }
+                        // Room for the Play button beside the name.
+                        .padding(.trailing, 92)
+                    }
+                    .padding(16)
+                }
+                .frame(height: 210)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.heroCorner, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: Theme.heroCorner, style: .continuous))
+            }
+            .buttonStyle(CardButtonStyle())
+
+            Button {
+                router.autoPlay = app.id
+                router.library.append(.game(app.id))
+            } label: {
+                Label("Play", systemImage: "play.fill")
+                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                    .foregroundStyle(.black)
+                    .padding(.horizontal, 16)
+                    .frame(height: 38)
+                    .background(.white, in: Capsule())
+            }
+            .buttonStyle(CardButtonStyle())
+            .padding(16)
         }
     }
 }
 
-private struct FilterChips: View {
-    @Binding var filter: LibraryFilter
+/// One game in the grid: its artwork with the icon on it, its name, and how it runs.
+struct GameTile: View {
+    let app: TLApp
+    @ObservedObject private var statuses = GameStatusStore.shared
+
+    private var result: GameStatusStore.Result? { statuses.status(app.id)?.result }
 
     var body: some View {
-        HStack(spacing: 8) {
-            ForEach(LibraryFilter.allCases) { f in
-                Button {
-                    withAnimation(.easeOut(duration: 0.15)) { filter = f }
-                } label: {
-                    Text(f.title)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(filter == f ? Color(uiColor: .systemBackground) : Color.primary)
-                        .padding(.horizontal, 16)
-                        .frame(height: 32)
-                        .background(filter == f ? Color.primary : Color(uiColor: .tertiarySystemFill), in: Capsule())
-                }
-                .buttonStyle(.plain)
+        VStack(alignment: .leading, spacing: 9) {
+            ZStack {
+                GameArtwork(app: app, pixels: 520)
+                LinearGradient(colors: [.clear, .black.opacity(0.28)], startPoint: .center, endPoint: .bottom)
+                GameIcon(app: app, size: 68)
+                    .shadow(color: .black.opacity(0.3), radius: 10, y: 4)
+            }
+            .aspectRatio(1, contentMode: .fit)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.tileCorner, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: Theme.tileCorner, style: .continuous))
+            .overlay(alignment: .topTrailing) {
+                if let result { GameStatusBadge(result: result).padding(9) }
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(app.label)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Text(caption)
+                    .font(.caption)
+                    .foregroundStyle(app.runs || app.isGeodeLauncher ? Color.secondary : Theme.warn)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 2)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+    }
+
+    private var caption: String {
+        if app.isGeodeLauncher { return "Geode" }
+        if !app.runs { return "May not run" }
+        if let played = app.playedText { return "\(app.engineLabel) · \(played.replacingOccurrences(of: "Played ", with: ""))" }
+        return app.engineLabel
+    }
+}
+
+/// The first time: nothing added yet, and the ways to start.
+private struct WelcomeCard: View {
+    @ObservedObject private var router = Router.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Image(systemName: "gamecontroller.fill")
+                .font(.system(size: 26, weight: .semibold))
+                .foregroundStyle(Theme.accent)
+                .frame(width: 58, height: 58)
+                .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Add your first game")
+                    .font(.display(24))
+                Text("Pick an APK or a bundle (.xapk, .apkm, .apks), share one to Husk from Files or Safari, "
+                   + "or get one from the Store. Games run straight on your iPhone — no Android to boot.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            VStack(spacing: 10) {
+                Button { router.addGames() } label: { Label("Add a Game", systemImage: "plus") }
+                    .buttonStyle(PrimaryButtonStyle())
+                Button { router.tab = .store } label: { Label("Browse the Store", systemImage: "bag") }
+                    .buttonStyle(SecondaryButtonStyle())
             }
         }
+        .padding(20)
+        .huskCard(RoundedRectangle(cornerRadius: Theme.heroCorner, style: .continuous))
+    }
+}
+
+/// Something that went wrong, said once, with a way to put it away.
+private struct ErrorStrip: View {
+    let text: String
+    let close: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.warn)
+            Text(text).font(.subheadline).fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            Button(action: close) {
+                Image(systemName: "xmark").font(.system(size: 12, weight: .bold)).foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss")
+        }
+        .padding(14)
+        .huskCard(RoundedRectangle(cornerRadius: Theme.rowCorner, style: .continuous))
     }
 }
 
 // MARK: - shared pieces
-
-/// One app in a grid, as a home screen draws it: the icon, and its name under it.
-struct LauncherTile: View {
-    let title: String
-    let iconPath: String?
-    var item: LibraryItem? = nil
-    var caption: String? = nil
-    var size: CGFloat = 64
-    @ObservedObject private var statuses = GameStatusStore.shared
-
-    /// How the game did last time it was played, when Husk has seen it played.
-    private var result: GameStatusStore.Result? {
-        guard case .game(let g)? = item else { return nil }
-        return statuses.status(g.id)?.result
-    }
-
-    var body: some View {
-        VStack(spacing: 7) {
-            Group {
-                if let item { ItemIcon(item: item, size: size) } else { AppIcon(path: iconPath, size: size) }
-            }
-            .shadow(color: .black.opacity(0.14), radius: 6, y: 3)
-            .overlay(alignment: .bottom) {
-                if item?.runsInAndroid == true { AndroidBadge().offset(y: 6) }
-            }
-            .overlay(alignment: .topTrailing) {
-                if let result { GameStatusBadge(result: result).offset(x: 5, y: -5) }
-            }
-            VStack(spacing: 1) {
-                Text(title)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.primary)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.center)
-                if let caption {
-                    Text(caption).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                }
-            }
-            .padding(.top, item?.runsInAndroid == true ? 3 : 0)
-        }
-        .frame(maxWidth: .infinity)
-        .contentShape(Rectangle())
-    }
-}
-
-/// A round glyph button in a screen's header.
-struct HeaderButton: View {
-    let systemImage: String
-    let action: () -> Void
-    @Environment(\.isEnabled) private var enabled
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: systemImage)
-                .font(.system(size: 16, weight: .bold))
-                .foregroundStyle(enabled ? Color.accentColor : Color.secondary)
-                .frame(width: 38, height: 38)
-                .background(Color(uiColor: .tertiarySystemFill), in: Circle())
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-/// Work under way, said in one line.
-struct BusyStrip: View {
-    let text: String
-
-    var body: some View {
-        HStack(spacing: 12) {
-            ProgressView()
-            Text(text).font(.subheadline).lineLimit(2)
-            Spacer(minLength: 0)
-        }
-        .padding(14)
-        .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-    }
-}
 
 /// A search field as the system draws one.
 struct SearchField: View {
@@ -671,8 +430,8 @@ struct SearchField: View {
                     .accessibilityLabel("Clear")
                 }
             }
-            .padding(.horizontal, 10)
-            .frame(height: 38)
+            .padding(.horizontal, 12)
+            .frame(height: 40)
             .background(Color(uiColor: .tertiarySystemFill), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             if focused {
                 Button("Cancel") { text = ""; focused = false }
@@ -690,7 +449,7 @@ struct NoResults: View {
         VStack(spacing: 8) {
             Image(systemName: "magnifyingglass").font(.system(size: 28, weight: .light)).foregroundStyle(.secondary)
             Text("No Results").font(.headline)
-            Text("Nothing here is called “\(query)”.").font(.subheadline).foregroundStyle(.secondary)
+            Text("No game is called “\(query)”.").font(.subheadline).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 48)
@@ -704,7 +463,7 @@ func matches(_ query: String, _ names: String...) -> Bool {
 }
 
 extension View {
-    /// The pages an item opens, for whichever stack shows it.
+    /// The pages a game opens.
     func libraryDestinations() -> some View {
         navigationDestination(for: LibraryRoute.self) { route in
             LibraryRouteView(route: route).toolbar(.visible, for: .navigationBar)
@@ -724,16 +483,12 @@ private struct LibraryRouteView: View {
             if let app = store.apps.first(where: { $0.id == id }) { TLAppSettingsView(app: app) } else { GoneView() }
         case .gameReport(let id):
             if let app = store.apps.first(where: { $0.id == id }) { TLTechnicalView(app: app) } else { GoneView() }
-        case .android(let pkg):
-            AndroidAppPage(app: pkg)
-        case .androidSystem:
-            AndroidSystemPage()
         }
     }
 }
 
 private struct GoneView: View {
     var body: some View {
-        Text("This was removed.").foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
+        Text("This game was removed.").foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

@@ -13,28 +13,19 @@ enum WhatsNew {
     }
 
     /// The version whose notes these are. A build of the same version shows nothing again.
-    static let version = "1.0.0"
+    static let version = "2.0.0"
     static let items: [Item] = [
-        Item(symbol: "bag.fill", title: "Google Play",
-             detail: "Get games from the Store tab. Play Store downloads, with their split APKs and asset packs, run in the Translation Layer."),
-        Item(symbol: "checkmark.seal.fill", title: "Google Play services",
-             detail: "Games see Play services as present and signed out, so they stop asking for it and carry on."),
-        Item(symbol: "arrow.up.doc.fill", title: "Save backups",
-             detail: "Back up a game's saves to a .zip from its page, and restore them later or on another device."),
-        Item(symbol: "exclamationmark.bubble.fill", title: "Crash reports",
-             detail: "When a game takes Husk down, the next launch says what happened and gives you a report to share."),
-        Item(symbol: "checkmark.circle.fill", title: "Know what works",
-             detail: "The library marks each game with how it did last time: it plays, it crashed, or it did not start."),
-        Item(symbol: "gamecontroller.fill", title: "Godot games",
-             detail: "Games made with Godot 3 and 4 now run in the Translation Layer."),
-        Item(symbol: "slider.horizontal.below.square.and.square.filled", title: "Your own controls",
-             detail: "Move, resize and hide the on-screen controller's buttons, for each game."),
-        Item(symbol: "keyboard.fill", title: "Typing in Minecraft",
-             detail: "Chat, sign and world-name fields bring up the keyboard."),
-        Item(symbol: "arrow.left.arrow.right", title: "Switching games",
-             detail: "Close Husk to play another game, and it starts by itself when Husk opens."),
-        Item(symbol: "puzzlepiece.extension.fill", title: "Geode",
-             detail: "Mods for Geometry Dash, Geode 5 included, turned on from the game's settings."),
+        Item(symbol: "bolt.fill", title: "Translation layer only",
+             detail: "Husk is now all about running Android games natively. Emulation and the Android system are gone, so the app "
+                   + "is smaller, simpler and quicker to open."),
+        Item(symbol: "square.grid.2x2.fill", title: "A new Library",
+             detail: "Your games as artwork, with the one you played last up top, ready to continue."),
+        Item(symbol: "hand.tap.fill", title: "Nothing over your game",
+             detail: "Games fill the screen. Tap the top of the screen to bring up the toolbar; it hides itself again."),
+        Item(symbol: "speedometer", title: "Performance overlay",
+             detail: "Turn it on in Settings or from a game's toolbar: frame rate, frame time, memory and heat, in the corner you pick."),
+        Item(symbol: "paintbrush.fill", title: "A cleaner look",
+             detail: "Every screen redesigned: the library, game pages, settings and the welcome."),
     ]
 
     private static let seenKey = "husk.whatsNew.seen"
@@ -58,8 +49,8 @@ struct WhatsNewSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 26) {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("What's New in Husk \(WhatsNew.version)").font(.largeTitle.weight(.bold))
-                        Text("The first full release.").foregroundStyle(.secondary)
+                        Text("What's New in Husk \(WhatsNew.version)").font(.display(32, weight: .heavy))
+                        Text("Rebuilt around the translation layer.").foregroundStyle(.secondary)
                     }
                     .padding(.top, 36)
                     ForEach(WhatsNew.items) { item in
@@ -79,10 +70,8 @@ struct WhatsNewSheet: View {
                 .padding(.horizontal, 28)
                 .padding(.bottom, 20)
             }
-            Button(action: done) {
-                Text("Continue").font(.headline).frame(maxWidth: .infinity).padding(.vertical, 8)
-            }
-            .buttonStyle(.borderedProminent)
+            Button(action: done) { Text("Continue") }
+                .buttonStyle(PrimaryButtonStyle())
             .padding(.horizontal, 28)
             .padding(.vertical, 18)
         }
@@ -92,7 +81,8 @@ struct WhatsNewSheet: View {
 
 // MARK: - a newer Husk
 
-/// A newer Husk on GitHub: the releases page is asked at launch (at most twice a day) and the person is told once per release.
+/// A newer Husk on GitHub: this fork's releases page is asked at launch (at most twice a day) and the person is told once per
+/// release. Upstream Husk's releases include emulation, so they are not offered here.
 @MainActor
 final class AppUpdates: ObservableObject {
     static let shared = AppUpdates()
@@ -104,7 +94,7 @@ final class AppUpdates: ObservableObject {
 
     @Published var available: Release?
 
-    private static let api = URL(string: "https://api.github.com/repos/Leviidev/Husk/releases/latest")!
+    private static let api = URL(string: "https://api.github.com/repos/debeanz/Husk/releases/latest")!
     private static let checkedKey = "husk.updates.checked", dismissedKey = "husk.updates.dismissed"
 
     static var current: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0" }

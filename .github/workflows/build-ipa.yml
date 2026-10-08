@@ -3,15 +3,14 @@
 # No signing secrets are needed: package_ipa.sh signs ad hoc, and AltStore /
 # SideStore re-sign with your own Apple ID at install time.
 #
-# The first run compiles QEMU, ANGLE, MoltenVK and friends from scratch, which
-# takes hours. Whatever got built is cached even if the run fails or times out,
-# so the next run picks up where this one stopped.
+# The first run compiles ANGLE and MoltenVK from scratch (about 15 minutes).
+# Whatever got built is cached even if the run fails or times out, so later runs
+# only build the app.
 name: Build IPA
 
 on:
   workflow_dispatch:
   push:
-    branches: [main]
     paths-ignore:
       - '**.md'
       - 'docs/**'
@@ -41,10 +40,10 @@ jobs:
 
       - name: Install build tools
         run: |
-          brew install meson ninja pkg-config xcodegen qemu cmake
+          # xcodegen regenerates the project from project.yml; MoltenVK's
+          # dependency build needs cmake (ninja makes it faster).
+          brew install xcodegen cmake ninja
           rustup target add aarch64-apple-ios
-          # virglrenderer's meson setup generates its format tables from YAML.
-          python3 -m pip install --break-system-packages pyyaml
 
       - name: Restore build cache
         id: cache
@@ -53,8 +52,8 @@ jobs:
           path: |
             build
             third_party
-          key: husk-build-${{ env.XCODE_ID }}-${{ github.run_id }}
-          restore-keys: husk-build-${{ env.XCODE_ID }}-
+          key: husk-tl-${{ env.XCODE_ID }}-${{ github.run_id }}
+          restore-keys: husk-tl-${{ env.XCODE_ID }}-
 
       - name: Build
         timeout-minutes: 320
@@ -68,7 +67,7 @@ jobs:
           path: |
             build
             third_party
-          key: husk-build-${{ env.XCODE_ID }}-${{ github.run_id }}
+          key: husk-tl-${{ env.XCODE_ID }}-${{ github.run_id }}
 
       - name: Upload build logs
         if: failure()
@@ -76,6 +75,16 @@ jobs:
         with:
           name: build-logs
           path: build/logs
+          if-no-files-found: ignore
+
+      # The Xcode project as xcodegen generated it from project.yml, so the
+      # checked-in copy can be kept in step with it.
+      - name: Upload generated project
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodeproj
+          path: src/app/Husk.xcodeproj/project.pbxproj
           if-no-files-found: ignore
 
       - name: Upload IPA

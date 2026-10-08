@@ -4,18 +4,18 @@ import UIKit
 
 /// Husk's visual vocabulary.
 ///
-/// The app is drawn with the system's own materials: grouped lists on the system's grouped background,
-/// the system's tab bar and navigation bars, its label colours, and an accent the user can change
-/// (`AppTheme`). The names below remain so every screen can say what it means ("a surface", "dim text")
-/// without caring which system colour that is today -- but none of them is a colour of Husk's own, so the
-/// app is light or dark as the phone is, and as the user pins it.
+/// The app is drawn with the system's own colours and materials, so it is light or dark as the phone is (or as the user
+/// pins it), with one accent the user chooses (`AppTheme`). Every screen says what it means -- a surface, dim text, the
+/// accent -- through the names here rather than through colours of its own, which is what keeps the screens consistent.
 ///
-/// The one thing that is not the system's is the chrome over the guest's picture (`huskPanel`,
-/// `GuestControl`), which is drawn flat and always dark: it floats over a picture of another phone.
+/// The one thing that is not the system's is the chrome drawn over a running game (`huskPanel`, `OverlayButton`): always
+/// dark, because it floats over a game's picture.
 enum Theme {
     /// The page behind grouped content.
     static let bgUI = UIColor.systemGroupedBackground
     static let bg = Color(uiColor: bgUI)
+    /// The page behind a screen of artwork: the library, a game's page.
+    static let canvas = Color(uiColor: .systemBackground)
     /// Cards, rows, anything holding content.
     static let surface = Color(uiColor: .secondarySystemGroupedBackground)
     /// One step further up: wells, chips, the things that sit on a card.
@@ -30,10 +30,22 @@ enum Theme {
 
     /// The user's accent: what is pressed, selected or switched on.
     static var accent: Color { AppTheme.shared.accentColor }
-    static var accentSoft: Color { AppTheme.shared.accentColor.opacity(0.16) }
+    static var accentSoft: Color { AppTheme.shared.accentColor.opacity(0.14) }
     static let good = Color(uiColor: .systemGreen)
+    static let warn = Color(uiColor: .systemOrange)
+    static let bad = Color(uiColor: .systemRed)
     /// What a floating thing casts.
-    static let shadow = Color.black.opacity(0.25)
+    static let shadow = Color.black.opacity(0.18)
+
+    /// Corner radii, from the largest surface to the smallest control.
+    static let heroCorner: CGFloat = 26
+    static let cardCorner: CGFloat = 20
+    static let tileCorner: CGFloat = 18
+    static let rowCorner: CGFloat = 14
+    static let controlCorner: CGFloat = 14
+
+    /// The margin every screen's content keeps from the edges.
+    static let margin: CGFloat = 20
 
     /// The appearance the app is drawn in. System is the default: it follows the phone, light by day and
     /// dark by night. Light and Dark pin one.
@@ -78,14 +90,11 @@ enum Theme {
         }
     }
 
-    static let cardCorner: CGFloat = 14
-    static let rowCorner: CGFloat = 12
-
     static var backdrop: some View { bg.ignoresSafeArea() }
 }
 
 extension View {
-    /// A container for content that is not a list row: a surface on the grouped page, as the system draws one.
+    /// A container for content that is not a list row: a surface on the page, as the system draws one.
     @ViewBuilder
     func huskCard<S: Shape>(_ shape: S, high: Bool = false) -> some View {
         self.background(high ? Theme.surfaceHigh : Theme.surface, in: shape)
@@ -95,17 +104,14 @@ extension View {
         huskCard(RoundedRectangle(cornerRadius: Theme.cardCorner, style: .continuous), high: high)
     }
 
-    /// Chrome that sits over the guest's own picture.
+    /// Chrome that sits over a running game: a dark, blurred panel with a hairline edge.
     ///
-    /// Solid, not glass. iOS 26 will happily render this as Liquid Glass and it looks wrong here: a
-    /// floating, refracting pill over a game is the phone's design language arguing with the guest's. A
-    /// flat panel with a hairline looks the same on every iOS.
-    ///
-    /// Always dark, whatever the app's appearance: it floats over a guest that is mostly black, and the
-    /// controls on it are drawn in white.
+    /// Always dark, whatever the app's appearance, because it floats over a game's picture and the controls on it are
+    /// drawn in white. The blur keeps it readable over a bright scene without hiding the game behind a solid block.
     func huskPanel<S: Shape>(_ shape: S) -> some View {
-        self.background(Color(red: 0.082, green: 0.094, blue: 0.129).opacity(0.94), in: shape)
-            .overlay(shape.stroke(Color.white.opacity(0.10), lineWidth: 0.5))
+        self.background(.ultraThinMaterial, in: shape)
+            .background(Color.black.opacity(0.55), in: shape)
+            .overlay(shape.stroke(Color.white.opacity(0.12), lineWidth: 0.5))
             .environment(\.colorScheme, .dark)
     }
 }
@@ -117,6 +123,11 @@ extension Font {
     static func technical(_ size: CGFloat = 13, weight: Font.Weight = .regular) -> Font {
         .system(size: size, weight: weight, design: .monospaced)
     }
+
+    /// The face for a screen's own title and for a game's name over its artwork.
+    static func display(_ size: CGFloat, weight: Font.Weight = .bold) -> Font {
+        .system(size: size, weight: weight, design: .rounded)
+    }
 }
 
 /// The one action a screen is for.
@@ -125,43 +136,40 @@ struct PrimaryButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 16, weight: .semibold))
+            .font(.system(size: 17, weight: .semibold, design: .rounded))
             .foregroundStyle(enabled ? .white : Theme.textDim)
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 15)
+            .frame(height: 52)
             .background(enabled ? Theme.accent : Theme.surfaceHigh,
-                        in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                        in: RoundedRectangle(cornerRadius: Theme.controlCorner, style: .continuous))
             .opacity(configuration.isPressed ? 0.85 : 1)
-            .scaleEffect(configuration.isPressed ? 0.985 : 1)
+            .scaleEffect(configuration.isPressed ? 0.98 : 1)
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 
-/// A card that is also a button: it moves a little under the finger.
-struct CardButtonStyle: ButtonStyle {
+/// The second action beside the primary one: the accent, softly.
+struct SecondaryButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaleEffect(configuration.isPressed ? 0.96 : 1)
-            .opacity(configuration.isPressed ? 0.9 : 1)
-            .animation(.easeOut(duration: 0.14), value: configuration.isPressed)
+            .font(.system(size: 17, weight: .semibold, design: .rounded))
+            .foregroundStyle(Theme.accent)
+            .frame(maxWidth: .infinity)
+            .frame(height: 52)
+            .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: Theme.controlCorner, style: .continuous))
+            .opacity(configuration.isPressed ? 0.8 : 1)
+            .scaleEffect(configuration.isPressed ? 0.98 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 
-/// The round glyph buttons in a screen's top corner.
-struct CircleButton: View {
-    let systemImage: String
-    var active = false
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: systemImage)
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(active ? .white : Theme.text)
-                .frame(width: 36, height: 36)
-                .background(active ? Theme.accent : Theme.surfaceHigh, in: Circle())
-        }
-        .buttonStyle(.plain)
+/// A card that is also a button: it gives a little under the finger.
+struct CardButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+            .opacity(configuration.isPressed ? 0.9 : 1)
+            .animation(.easeOut(duration: 0.14), value: configuration.isPressed)
     }
 }
 
@@ -180,39 +188,42 @@ struct HuskMark: View {
             }
         }
         .frame(width: size, height: size)
-        .clipShape(RoundedRectangle(cornerRadius: size * 0.26, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: size * 0.225, style: .continuous))
     }
 }
 
-/// A filter pill.
-struct Chip: View {
-    let title: String
-    let selected: Bool
-    let action: () -> Void
+/// The coloured square a settings row carries, as the Settings app draws them.
+struct SettingsIcon: View {
+    let systemImage: String
+    let tint: Color
 
     var body: some View {
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(selected ? .white : Theme.textDim)
-                .padding(.horizontal, 16).padding(.vertical, 8)
-                .background(selected ? Theme.accent : Theme.surfaceHigh, in: Capsule())
-        }
-        .buttonStyle(.plain)
+        RoundedRectangle(cornerRadius: 7, style: .continuous)
+            .fill(tint.gradient)
+            .frame(width: 29, height: 29)
+            .overlay {
+                Image(systemName: systemImage)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
     }
 }
 
-/// A small tag under a title — a category, an ABI, a state.
+/// A small tag under a title — an engine, an ABI, a state.
 struct Tag: View {
     let text: String
     var tint: Color = Theme.textDim
+    var systemImage: String? = nil
 
     var body: some View {
-        Text(text)
-            .font(.system(size: 12, weight: .medium))
-            .foregroundStyle(tint)
-            .padding(.horizontal, 10).padding(.vertical, 4)
-            .background(Theme.surfaceHigh, in: Capsule())
+        HStack(spacing: 4) {
+            if let systemImage { Image(systemName: systemImage).font(.system(size: 10, weight: .bold)) }
+            Text(text)
+        }
+        .font(.system(size: 12, weight: .semibold))
+        .foregroundStyle(tint)
+        .padding(.horizontal, 9).padding(.vertical, 4)
+        .background(tint == Theme.textDim ? Theme.surfaceHigh : tint.opacity(0.14), in: Capsule())
     }
 }
 
@@ -236,46 +247,6 @@ struct DetailRow: View {
     }
 }
 
-/// One row of a grouped card: an icon, a title, an optional subtitle, and the
-/// chevron that says it goes somewhere.
-struct HuskRow: View {
-    let systemImage: String
-    let title: String
-    var subtitle: String? = nil
-    var tint: Color = Theme.text
-    var showsChevron = true
-
-    var body: some View {
-        HStack(spacing: 14) {
-            Image(systemName: systemImage)
-                .font(.system(size: 16, weight: .medium))
-                .foregroundStyle(tint)
-                .frame(width: 34, height: 34)
-                .background(Theme.surfaceHigh,
-                            in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(tint)
-                if let subtitle {
-                    Text(subtitle)
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.textDim)
-                        .lineLimit(1)
-                }
-            }
-            Spacer(minLength: 8)
-            if showsChevron {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Theme.textDim.opacity(0.7))
-            }
-        }
-        .padding(.horizontal, 14).padding(.vertical, 12)
-        .contentShape(Rectangle())
-    }
-}
-
 /// Rows stacked into one card, hairlines between them.
 struct RowGroup<Content: View>: View {
     @ViewBuilder var content: Content
@@ -288,43 +259,12 @@ struct RowGroup<Content: View>: View {
 
 /// The hairline between two rows in a group.
 struct RowDivider: View {
+    var inset: CGFloat = 62
+
     var body: some View {
         Rectangle().fill(Theme.hairline)
             .frame(height: 0.5)
-            .padding(.leading, 62)
-    }
-}
-
-/// A section label above a group.
-struct SectionHeader: View {
-    let title: String
-    var trailing: String? = nil
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(title)
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(Theme.text)
-            Spacer()
-            if let trailing {
-                Text(trailing).font(.system(size: 13)).foregroundStyle(Theme.textDim)
-            }
-        }
-    }
-}
-
-/// A small status pill. The tint carries the meaning, the text the detail.
-struct StatusPill: View {
-    let text: String
-    let systemImage: String
-    var tint: Color = Theme.accent
-
-    var body: some View {
-        Label(text, systemImage: systemImage)
-            .font(.system(size: 12, weight: .medium))
-            .padding(.horizontal, 10).padding(.vertical, 5)
-            .background(tint.opacity(0.16), in: Capsule())
-            .foregroundStyle(tint)
+            .padding(.leading, inset)
     }
 }
 
@@ -339,15 +279,15 @@ struct EmptyState: View {
     var body: some View {
         VStack(spacing: 14) {
             Image(systemName: systemImage)
-                .font(.system(size: 30, weight: .light))
+                .font(.system(size: 28, weight: .medium))
                 .foregroundStyle(Theme.accent)
                 .frame(width: 64, height: 64)
                 .background(Theme.accentSoft, in: Circle())
             Text(title)
-                .font(.system(size: 18, weight: .semibold))
+                .font(.display(20))
                 .foregroundStyle(Theme.text)
             Text(message)
-                .font(.system(size: 14))
+                .font(.system(size: 15))
                 .foregroundStyle(Theme.textDim)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 28)
@@ -363,78 +303,38 @@ struct EmptyState: View {
     }
 }
 
-/// What finished, said once and then gone.
-///
-/// Progress belongs in a strip that stays while the work does; this is for the
-/// moment after — an APK installed, a machine saved. It says the thing and
-/// leaves, because an outcome that needs dismissing is a dialog.
-struct Toast: Equatable, Identifiable {
-    let id = UUID()
-    let title: String
-    var detail: String?
-    var good = true
-}
-
-struct ToastView: View {
-    let toast: Toast
-    let onClose: () -> Void
+/// Work under way, said in one line.
+struct BusyStrip: View {
+    let text: String
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: toast.good ? "checkmark.circle.fill"
-                                         : "exclamationmark.triangle.fill")
-                .font(.system(size: 19))
-                .foregroundStyle(toast.good ? Theme.good : .orange)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(toast.title)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Theme.text)
-                if let detail = toast.detail {
-                    Text(detail)
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.textDim)
-                        .lineLimit(2)
-                }
-            }
-            Spacer(minLength: 8)
-            Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Theme.textDim)
-            }
-            .buttonStyle(.plain)
+            ProgressView()
+            Text(text).font(.subheadline).lineLimit(2)
+            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 14).padding(.vertical, 12)
-        .background(Theme.surfaceHigh,
-                    in: RoundedRectangle(cornerRadius: Theme.rowCorner, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: Theme.rowCorner, style: .continuous)
-                    .stroke(Theme.hairline, lineWidth: 0.5))
-        .shadow(color: Theme.shadow, radius: 18, y: 8)
+        .padding(14)
+        .huskCard(RoundedRectangle(cornerRadius: Theme.rowCorner, style: .continuous))
     }
 }
 
-/// One control over the guest's picture.
-struct GuestControl: View {
+/// One round control over a running game.
+struct OverlayButton: View {
     let systemImage: String
+    var label: String
     var active = false
-    var busy = false
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            ZStack {
-                if busy {
-                    ProgressView().scaleEffect(0.6).tint(.white)
-                } else {
-                    Image(systemName: systemImage)
-                        .font(.system(size: 17, weight: .medium))
-                        .foregroundStyle(active ? Theme.accent : .white)
-                }
-            }
-            .frame(width: 46, height: 42)
-            .contentShape(Rectangle())
+            Image(systemName: systemImage)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(active ? Theme.accent : .white)
+                .frame(width: 38, height: 38)
+                .background(active ? Color.white.opacity(0.16) : Color.white.opacity(0.08), in: Circle())
+                .contentShape(Circle())
         }
-        .buttonStyle(.plain)
-        .disabled(busy)
+        .buttonStyle(CardButtonStyle())
+        .accessibilityLabel(label)
     }
 }

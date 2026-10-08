@@ -16,7 +16,7 @@ import UIKit
 /// and sets it as the layer's contents. SwiftUI sees nothing change, so nothing
 /// is re-evaluated; the only per-frame work is making a `CGImage` that points at
 /// memory the producer has promised not to touch until it is released.
-final class TLScreenUIView: UIView {
+final class TLScreenUIView: UIView, UIGestureRecognizerDelegate {
     private let content = CALayer()
     private var link: CADisplayLink?
     private var lastGeneration: UInt64 = 0
@@ -24,15 +24,13 @@ final class TLScreenUIView: UIView {
     /// What the guest's frame is, so a touch can be mapped back into it.
     private let guestSize = CGSize(width: 540, height: 960)
 
-    private let stats = UILabel()
-    private var shown = 0
-    private var statsSince = CACurrentMediaTime()
-    private var statsTimer: Timer?
-
-    /// Three fingers tapped at once: the way back to the interface while it is hidden.
+    /// Three fingers tapped at once: another way to bring the game's toolbar up or put it away.
     var onThreeFingerTap: (() -> Void)?
-    /// The frame-rate readout in the corner.
-    var showsStats = true { didSet { stats.isHidden = !showsStats } }
+    /// One finger tapped near the top edge: the way to bring the game's toolbar up.
+    var onTopTap: (() -> Void)?
+    /// How far down from the top edge a tap counts as one at the top, in points.
+    var topZone: CGFloat = 48
+    private var topTap: UITapGestureRecognizer?
     /// The one finger the game is following; a second or third finger is only for the three-finger tap.
     private var primary: UITouch?
 
@@ -48,28 +46,28 @@ final class TLScreenUIView: UIView {
         three.delaysTouchesEnded = false
         addGestureRecognizer(three)
 
+        // A tap near the top edge brings the toolbar down. It watches without taking anything: the game still gets the touch.
+        let top = UITapGestureRecognizer(target: self, action: #selector(topTapped))
+        top.numberOfTouchesRequired = 1
+        top.cancelsTouchesInView = false
+        top.delaysTouchesBegan = false
+        top.delaysTouchesEnded = false
+        top.delegate = self
+        addGestureRecognizer(top)
+        topTap = top
+
         // Opaque, so Core Animation does not blend it with what is behind it.
         content.isOpaque = true
         content.magnificationFilter = .linear
         content.minificationFilter = .linear
         content.actions = ["contents": NSNull(), "bounds": NSNull(), "position": NSNull()]
         layer.addSublayer(content)
-
-        stats.font = .monospacedSystemFont(ofSize: 10, weight: .medium)
-        stats.textColor = .white
-        stats.backgroundColor = UIColor.black.withAlphaComponent(0.55)
-        stats.layer.cornerRadius = 4
-        stats.layer.masksToBounds = true
-        stats.textAlignment = .center
-        stats.isUserInteractionEnabled = false
-        addSubview(stats)
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
     deinit {
         link?.invalidate()
-        statsTimer?.invalidate()
     }
 
     // MARK: layout
@@ -85,7 +83,6 @@ final class TLScreenUIView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         content.frame = fitted
-        stats.frame = CGRect(x: bounds.width - 118, y: bounds.height - 22, width: 112, height: 16)
     }
 
     // MARK: presenting
@@ -94,8 +91,6 @@ final class TLScreenUIView: UIView {
         super.didMoveToWindow()
         link?.invalidate()
         link = nil
-        statsTimer?.invalidate()
-        statsTimer = nil
         guard window != nil else { return }
 
         // Tied to the display, not to a timer: a frame is shown on a refresh or
@@ -105,10 +100,6 @@ final class TLScreenUIView: UIView {
         l.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
         l.add(to: .main, forMode: .common)
         link = l
-
-        statsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            self?.updateStats()
-        }
     }
 
     @objc private func refresh() {
@@ -151,20 +142,6 @@ final class TLScreenUIView: UIView {
         CATransaction.setDisableActions(true)
         content.contents = image
         CATransaction.commit()
-        shown += 1
-    }
-
-    private func updateStats() {
-        let now = CACurrentMediaTime()
-        let shownFps = Double(shown) / max(now - statsSince, 0.001)
-        shown = 0
-        statsSince = now
-
-        var pf = husk_tl_perf()
-        husk_tl_perf_snapshot(&pf)
-        stats.text = pf.fps > 0
-            ? String(format: "%.0f fps · %.1f ms", shownFps, pf.logic_ms + pf.render_ms)
-            : String(format: "%.0f fps", shownFps)
     }
 
     // MARK: touch
@@ -187,6 +164,15 @@ final class TLScreenUIView: UIView {
     }
 
     @objc private func threeFingers() { onThreeFingerTap?() }
+    @objc private func topTapped() { onTopTap?() }
+
+    func gestureRecognizer(_ g: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        guard g === topTap else { return true }
+        return touch.location(in: self).y <= topZone
+    }
+
+    func gestureRecognizer(_ g: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard primary == nil, let t = touches.first else { return }
@@ -205,17 +191,16 @@ final class TLScreenUIView: UIView {
 }
 
 struct TLScreenView: UIViewRepresentable {
-    var showsStats = true
     var onThreeFingerTap: (() -> Void)? = nil
+    var onTopTap: (() -> Void)? = nil
 
     func makeUIView(context: Context) -> TLScreenUIView {
         let view = TLScreenUIView()
-        view.showsStats = showsStats
-        view.onThreeFingerTap = onThreeFingerTap
+        updateUIView(view, context: context)
         return view
     }
     func updateUIView(_ view: TLScreenUIView, context: Context) {
-        view.showsStats = showsStats
         view.onThreeFingerTap = onThreeFingerTap
+        view.onTopTap = onTopTap
     }
 }

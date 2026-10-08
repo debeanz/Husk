@@ -3,7 +3,7 @@ import SwiftUI
 
 /// Google Play Store tab in Husk.
 /// Lets users sign in with their Google account, browse/search Play Store, view app details,
-/// and download/install apps (triggering the IncomingFiles chooser for translation layer or Android).
+/// and download games, which IncomingFiles adds to the library.
 struct StoreView: View {
     @ObservedObject private var manager = PlayStoreManager.shared
     @State private var searchText = ""

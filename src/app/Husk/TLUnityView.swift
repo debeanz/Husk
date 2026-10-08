@@ -22,7 +22,7 @@ enum TLNativeEngine {
 /// Nothing is copied or composed here. The runtime hands the layer to EGL as the game's window; the
 /// game draws and presents on its own thread. This view's jobs are the layer's size, the pause that
 /// goes with leaving the screen, and turning touches into the pixel coordinates Android reports.
-final class TLUnityUIView: UIView, UIKeyInput {
+final class TLUnityUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     override class var layerClass: AnyClass { CAMetalLayer.self }
 
     /// The cocos2d-x or SDL game on screen, which the game's keyboard requests (they arrive on its own thread) are routed to.
@@ -36,18 +36,16 @@ final class TLUnityUIView: UIView, UIKeyInput {
     /// A portrait game is told its size when the screen is taller than wide, as a landscape one is when it is wider.
     private let portrait: Bool
     private var launched = false
-    /// Where the corner statistics go when this view does not draw them itself (a landscape game has its own bar).
-    var onStats: ((String) -> Void)?
     /// Active touches by UITouch identity, each given a small stable id like Android's pointer ids.
     private var pointers: [ObjectIdentifier: Int32] = [:]
 
-    /// "58 fps · 11.2 ms" in the corner, as the other screen has: frames the game finished per second, and the
-    /// mean time one frame takes it. Refreshed once a second from the runtime's own counters.
-    private let stats = UILabel()
-    private var statsTimer: Timer?
-
-    /// Called when three fingers tap at once: the way back to the interface while it is hidden.
+    /// Called when three fingers tap at once: another way to bring the game's toolbar up or put it away.
     var onThreeFingerTap: (() -> Void)?
+    /// Called when one finger taps near the top edge: the way to bring the game's toolbar up.
+    var onTopTap: (() -> Void)?
+    /// How far down from the top edge a tap counts as one at the top, in points.
+    var topZone: CGFloat = 48
+    private var topTap: UITapGestureRecognizer?
 
     init(apk: String, extraApks: [String] = [], dataDir: String, engine: TLNativeEngine, portrait: Bool = false, scale: CGFloat = 2) {
         self.apk = apk
@@ -74,15 +72,16 @@ final class TLUnityUIView: UIView, UIKeyInput {
         threeFingers.delaysTouchesEnded = false
         addGestureRecognizer(threeFingers)
 
-        stats.font = .monospacedSystemFont(ofSize: 10, weight: .medium)
-        stats.textColor = .white
-        stats.backgroundColor = UIColor.black.withAlphaComponent(0.55)
-        stats.layer.cornerRadius = 4
-        stats.layer.masksToBounds = true
-        stats.textAlignment = .center
-        stats.isUserInteractionEnabled = false
-        stats.text = " "
-        if engine == .unity { addSubview(stats) }
+        // A tap near the top edge brings the toolbar down. It watches without taking anything: the game still gets the
+        // touch, exactly as it would with no recognizer there.
+        let top = UITapGestureRecognizer(target: self, action: #selector(topTapped))
+        top.numberOfTouchesRequired = 1
+        top.cancelsTouchesInView = false
+        top.delaysTouchesBegan = false
+        top.delaysTouchesEnded = false
+        top.delegate = self
+        addGestureRecognizer(top)
+        topTap = top
         if engine == .cocos {
             TLUnityUIView.cocosView = self
             TLUnityUIView.installKeyboardHandler()
@@ -103,24 +102,22 @@ final class TLUnityUIView: UIView, UIKeyInput {
     }
 
     @objc private func threeFingerTapped() { onThreeFingerTap?() }
+    @objc private func topTapped() { onTopTap?() }
 
-    deinit { statsTimer?.invalidate(); NotificationCenter.default.removeObserver(self) }
-
-    private func updateStats() {
-        var p = husk_unity_perf()
-        husk_unity_perf_snapshot(&p)
-        let text = p.fps > 0
-            ? String(format: "%.0f fps · %.1f ms · max %.0f", p.fps, p.mean_ms, p.max_ms)
-            : "starting"
-        stats.text = text
-        onStats?(text)
+    func gestureRecognizer(_ g: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        guard g === topTap else { return true }
+        return touch.location(in: self).y <= topZone
     }
+
+    func gestureRecognizer(_ g: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+
+    deinit { NotificationCenter.default.removeObserver(self) }
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        stats.frame = CGRect(x: bounds.width - 148, y: bounds.height - 22, width: 142, height: 16)
         guard bounds.width > 0, bounds.height > 0 else { return }
         let w = Int((bounds.width * contentScaleFactor).rounded())
         let h = Int((bounds.height * contentScaleFactor).rounded())
@@ -144,11 +141,8 @@ final class TLUnityUIView: UIView, UIKeyInput {
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        statsTimer?.invalidate()
-        statsTimer = nil
         if window != nil {
             husk_unity_set_paused(false)
-            statsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in self?.updateStats() }
         } else {
             husk_unity_set_paused(true)
             if isFirstResponder { resignFirstResponder() }
@@ -361,21 +355,24 @@ struct TLUnityScreen: UIViewRepresentable {
     var engine: TLNativeEngine = .unity
     var portrait = false
     var scale: CGFloat = 2
-    var onStats: ((String) -> Void)? = nil
     var onThreeFingerTap: (() -> Void)? = nil
+    var onTopTap: (() -> Void)? = nil
     /// One view per game for the life of the process. The engine's GPU surface belongs to this view's layer and an
     /// engine cannot be started twice, so coming back to the game must show the same layer, not a new one.
     private static var shared: [String: TLUnityUIView] = [:]
 
     func makeUIView(context: Context) -> TLUnityUIView {
-        if let view = Self.shared[apk] { view.onStats = onStats; view.onThreeFingerTap = onThreeFingerTap; return view }
-        let view = TLUnityUIView(apk: apk, extraApks: extraApks, dataDir: dataDir, engine: engine, portrait: portrait, scale: scale)
-        view.onStats = onStats
-        view.onThreeFingerTap = onThreeFingerTap
+        let view = Self.shared[apk]
+            ?? TLUnityUIView(apk: apk, extraApks: extraApks, dataDir: dataDir, engine: engine, portrait: portrait, scale: scale)
         Self.shared[apk] = view
+        updateUIView(view, context: context)
         return view
     }
-    func updateUIView(_ view: TLUnityUIView, context: Context) { view.onStats = onStats; view.onThreeFingerTap = onThreeFingerTap }
+
+    func updateUIView(_ view: TLUnityUIView, context: Context) {
+        view.onThreeFingerTap = onThreeFingerTap
+        view.onTopTap = onTopTap
+    }
 }
 
 /// Polls the runtime for the status line and its log, ten times a second at most.
@@ -411,7 +408,7 @@ final class TLUnityModel: ObservableObject {
         switch state {
         case Int32(HUSK_UNITY_STARTING): return "Loading the engine…"
         case Int32(HUSK_UNITY_RUNNING):  return "Running"
-        case Int32(HUSK_UNITY_FAILED):   return "Could not start — see the log"
+        case Int32(HUSK_UNITY_FAILED):   return "Could not start"
         case Int32(HUSK_UNITY_ENDED):    return "The game exited"
         default:                         return "Starting"
         }
@@ -428,23 +425,23 @@ final class TLUnityModel: ObservableObject {
     var statusColor: Color {
         switch state {
         case Int32(HUSK_UNITY_RUNNING):  return Theme.good
-        case Int32(HUSK_UNITY_FAILED):   return .red
-        case Int32(HUSK_UNITY_ENDED):    return .orange
+        case Int32(HUSK_UNITY_FAILED):   return Theme.bad
+        case Int32(HUSK_UNITY_ENDED):    return Theme.warn
         default:                         return Theme.accent
         }
     }
 }
 
-/// A cocos2d-x game's screen (Geometry Dash). These are landscape games: the app turns to landscape while this is up and
-/// back afterwards, the game takes the whole screen, and a thin bar above it carries what the other runners show -- the
-/// status, the frames per second and the time a frame takes -- and, with developer info on, the log beside the game.
+/// A game the native runtime drives -- Unity, cocos2d-x, GameActivity, SDL, Rockstar, Unreal, Godot, NativeActivity --
+/// full screen, with nothing over it. Tapping the top of the screen brings a toolbar down: the way out, what is running, and
+/// the game's own controls. It goes again a few seconds later. Three fingers tapped together do the same.
 struct TLCocosAttemptView: View {
     let app: TLApp
     @Environment(\.dismiss) private var dismiss
     @StateObject private var model = TLUnityModel()
+    @StateObject private var monitor = PerformanceMonitor()
     @AppStorage("husk.tl.unity.showLog") private var showLogSetting = false
     @AppStorage(TranslationLayer.devInfoKey) private var devInfo = false
-    @State private var stats = "starting"
     @ObservedObject private var pads = HuskGamepads.shared
     @StateObject private var virtualPad = VirtualPad()
     /// Where the player has put the pad's controls in this game, and whether they are moving them now.
@@ -453,21 +450,18 @@ struct TLCocosAttemptView: View {
     @State private var padSelected: String?
     /// This game's own settings (TLAppSettings), read once as the screen opens.
     @State private var settings: TLAppSettings
-    /// Nothing over the picture. Starts as the game's "Hide the interface" setting says, and three fingers tapped together flip it.
-    @State private var uiHidden: Bool
-    /// The line saying how to get the interface back, shown for a few seconds after it goes.
-    @State private var hint = false
-    /// Whether the game was laid out to fill the whole screen: with "Hide the interface" on, the bar is not a strip above the game
-    /// but a layer over it that comes and goes. The game's surface is sized once at launch, so this cannot change while it runs.
-    private let cleanLayout: Bool
+    /// Whether the toolbar is down.
+    @State private var chrome = false
+    /// Whether the game was laid out over the whole screen, the area around the camera included (the game's Full Screen
+    /// setting). The game's surface is sized once at launch, so this cannot change while it runs.
+    private let fullBleed: Bool
     private var showLog: Bool { get { showLogSetting && devInfo } nonmutating set { showLogSetting = newValue } }
 
     init(app: TLApp) {
         self.app = app
         let loaded = TLAppSettings.load(app.id)
         _settings = State(initialValue: loaded)
-        _uiHidden = State(initialValue: loaded.cleanView)
-        cleanLayout = loaded.cleanView
+        fullBleed = loaded.cleanView
     }
 
     /// Geometry Dash and the like are cocos2d-x; Minecraft is built on GameActivity. Both are landscape.
@@ -513,70 +507,86 @@ struct TLCocosAttemptView: View {
         return (loaded as NSString).lastPathComponent
     }
 
-    private func toggleInterface() {
-        withAnimation(.easeInOut(duration: 0.15)) { uiHidden.toggle() }
-        if uiHidden { showHint() }
+    /// The game is not running and is not going to: nothing to hide the toolbar for.
+    private var stopped: Bool {
+        blockedBy != nil || model.state == Int32(HUSK_UNITY_FAILED) || model.state == Int32(HUSK_UNITY_ENDED)
     }
 
-    private func showHint() {
-        hint = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { withAnimation(.easeOut(duration: 0.4)) { hint = false } }
+    private var statusLine: String {
+        guard model.state == Int32(HUSK_UNITY_RUNNING) else { return model.statusText }
+        if !pads.names.isEmpty { return pads.names.count == 1 ? pads.names[0] : "\(pads.names.count) controllers" }
+        return "\(app.report?.nativeEngineName ?? "Native") · running"
+    }
+
+    private func toggleChrome() {
+        withAnimation(.snappy(duration: 0.25)) { chrome.toggle() }
     }
 
     var body: some View {
         ZStack {
+            // The band above the game when it keeps clear of the camera: tapping it is tapping the top of the screen.
             Color.black.ignoresSafeArea()
-            VStack(spacing: 0) {
-                if !cleanLayout {
-                    // Hidden, the strip stays (the game below it must not change size) but shows nothing.
-                    bar.opacity(uiHidden ? 0 : 1).allowsHitTesting(!uiHidden)
+                .contentShape(Rectangle())
+                .onTapGesture { toggleChrome() }
+
+            if let other = blockedBy {
+                VStack(spacing: 8) {
+                    Image(systemName: "rectangle.stack.badge.minus")
+                        .font(.system(size: 30, weight: .medium)).foregroundStyle(.white.opacity(0.7))
+                        .padding(.bottom, 4)
+                    Text("Another game is already loaded")
+                        .font(.system(size: 17, weight: .semibold)).foregroundStyle(.white)
+                    Text("\(other) was started in this session, and a game cannot be unloaded once it has started. Close Husk completely and open it again to run \(app.label).")
+                        .font(.system(size: 14)).foregroundStyle(.white.opacity(0.7))
+                        .multilineTextAlignment(.center).frame(maxWidth: 440)
                 }
-                if let other = blockedBy {
-                    VStack(spacing: 8) {
-                        Text("Another game is already loaded")
-                            .font(.system(size: 16, weight: .semibold)).foregroundStyle(.white)
-                        Text("\(other) was started in this session, and a game cannot be unloaded once it has started. Close Husk completely and open it again to run \(app.label).")
-                            .font(.system(size: 13)).foregroundStyle(.white.opacity(0.7))
-                            .multilineTextAlignment(.center).frame(maxWidth: 460)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if let apk = app.apks.first {
-                    HStack(spacing: 0) {
-                        TLUnityScreen(apk: apk, extraApks: Array(app.apks.dropFirst()), dataDir: dataDir, engine: engine, portrait: portrait,
-                                      scale: settings.resolution.scale, onStats: { stats = $0 }, onThreeFingerTap: { toggleInterface() })
-                            .background(Color.black)
-                        if showLog, !uiHidden { logPanel.frame(width: 320) }
-                    }
+                .padding(24)
+            } else if let apk = app.apks.first {
+                TLUnityScreen(apk: apk, extraApks: Array(app.apks.dropFirst()), dataDir: dataDir, engine: engine, portrait: portrait,
+                              scale: settings.resolution.scale,
+                              onThreeFingerTap: { toggleChrome() }, onTopTap: { toggleChrome() })
+                    .background(Color.black)
                     .overlay {
-                        // A game whose menus answer only a controller: with none paired, one on the glass. Kept in place and
-                        // connected while the interface is hidden, so the game does not see a controller come and go.
+                        // A game whose menus answer only a controller: with none paired, one on the glass.
                         if padOffered, settings.padShown, model.state == Int32(HUSK_UNITY_RUNNING) {
                             VirtualPadView(pad: virtualPad, opacity: settings.padOpacity, haptics: settings.haptics,
                                            layout: padLayout, editing: editingPad, selected: $padSelected,
                                            onChange: { padLayout = $0; padLayout.save(app.id) })
-                                .opacity(uiHidden && !editingPad ? 0 : 1)
-                                .allowsHitTesting(!uiHidden || editingPad)
                                 .overlay(alignment: .center) { if editingPad { padEditor } }
                         }
                     }
-                    .ignoresSafeArea(.container, edges: cleanLayout ? .all : [.horizontal, .bottom])
-                }
+                    .ignoresSafeArea(.container, edges: fullBleed ? .all : [.horizontal, .bottom])
             }
-            if cleanLayout, !uiHidden {
-                VStack(spacing: 0) { bar; Spacer() }
+
+            if showLog {
+                logPanel
+                    .frame(width: 340)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+                    .padding(.top, 64).padding(.trailing, 10).padding(.bottom, 10)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
             }
-            if hint {
-                VStack {
-                    Spacer()
-                    Text("Tap with three fingers to show the interface")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 14).padding(.vertical, 8)
-                        .background(.black.opacity(0.65), in: Capsule())
-                        .padding(.bottom, 26)
+
+            GameOverlay(title: app.label, status: statusLine, statusColor: model.statusColor, shown: $chrome,
+                        pinned: editingPad || showLog || stopped, monitor: monitor, onClose: { dismiss() }) {
+                if padOffered {
+                    OverlayButton(systemImage: "gamecontroller", label: settings.padShown ? "Hide Controller" : "Show Controller",
+                                  active: settings.padShown) {
+                        settings.padShown.toggle()
+                        settings.save(app.id)
+                        if !settings.padShown { editingPad = false }
+                    }
+                    if settings.padShown {
+                        OverlayButton(systemImage: "slider.horizontal.below.square.and.square.filled", label: "Edit Controller",
+                                      active: editingPad) { padSelected = nil; editingPad.toggle() }
+                    }
                 }
-                .allowsHitTesting(false)
-                .transition(.opacity)
+                PerfOverlayButton()
+                if devInfo {
+                    OverlayButton(systemImage: "doc.text.magnifyingglass", label: showLog ? "Hide Log" : "Show Log",
+                                  active: showLog) {
+                        withAnimation(.snappy(duration: 0.25)) { showLog.toggle() }
+                    }
+                }
             }
         }
         .statusBarHidden(true)
@@ -586,10 +596,11 @@ struct TLCocosAttemptView: View {
         .onAppear {
             HuskOrientation.set(portrait ? .portrait : .landscape)
             UIApplication.shared.isIdleTimerDisabled = settings.keepAwake
-            if cleanLayout { showHint() }
             CrashReport.gameStarted(app)
             padLayout = PadLayout.load(app.id)
             model.start()
+            monitor.start(.native)
+            if blockedBy != nil { chrome = true }
         }
         // What happened, for the library: ten seconds of frames is a game that plays; a refusal is one that did not start.
         .onChange(of: model.frames) { f in
@@ -597,10 +608,13 @@ struct TLCocosAttemptView: View {
         }
         .onChange(of: model.state) { st in
             if st == Int32(HUSK_UNITY_FAILED) { GameStatusStore.shared.record(app.id, .failed) }
+            // Stopped for good: the way out stays on screen.
+            if st == Int32(HUSK_UNITY_FAILED) || st == Int32(HUSK_UNITY_ENDED) { withAnimation { chrome = true } }
         }
         .onDisappear {
             CrashReport.gameEnded()
             model.stop()
+            monitor.stop()
             UIApplication.shared.isIdleTimerDisabled = false
             HuskOrientation.set(HuskOrientation.standard)
         }
@@ -608,9 +622,9 @@ struct TLCocosAttemptView: View {
 
     /// While the pad is being edited: what to do with the control picked, in a small panel in the middle of the screen.
     private var padEditor: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 12) {
             if let id = padSelected {
-                Text(PadLayout.name(id)).font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
+                Text(PadLayout.name(id)).font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
                 HStack(spacing: 10) {
                     Image(systemName: "minus.magnifyingglass").foregroundStyle(.white.opacity(0.7))
                     Slider(value: Binding(get: { Double(padLayout[id].scale) },
@@ -626,7 +640,7 @@ struct TLCocosAttemptView: View {
                 .buttonStyle(.bordered).tint(.white)
             } else {
                 Text("Drag a control to move it, or tap one to resize or hide it.")
-                    .font(.system(size: 13, weight: .medium)).foregroundStyle(.white)
+                    .font(.system(size: 14, weight: .medium)).foregroundStyle(.white)
                     .multilineTextAlignment(.center).frame(maxWidth: 260)
             }
             HStack(spacing: 10) {
@@ -635,80 +649,36 @@ struct TLCocosAttemptView: View {
             }
             .buttonStyle(.bordered)
         }
-        .padding(16)
-        .background(.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 16))
+        .padding(18)
+        .huskPanel(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .font(.system(size: 13, weight: .semibold))
-    }
-
-    private var bar: some View {
-        HStack(spacing: 12) {
-            Button { dismiss() } label: {
-                Label("Close", systemImage: "xmark").font(.system(size: 13, weight: .semibold))
-            }
-            .tint(.white)
-            Circle().fill(model.statusColor).frame(width: 7, height: 7)
-            Text(model.state == Int32(HUSK_UNITY_RUNNING) ? app.label : model.statusText)
-                .font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.85)).lineLimit(1)
-            Spacer()
-            if !pads.names.isEmpty {
-                Label(pads.names.count == 1 ? pads.names[0] : "\(pads.names.count) controllers", systemImage: "gamecontroller.fill")
-                    .font(.system(size: 11, weight: .medium)).foregroundStyle(.white.opacity(0.7)).lineLimit(1)
-            }
-            if padOffered {
-                Button { settings.padShown.toggle(); settings.save(app.id); if !settings.padShown { editingPad = false } } label: {
-                    Label(settings.padShown ? "Hide pad" : "Pad", systemImage: "gamecontroller").font(.system(size: 12, weight: .semibold))
-                }
-                .tint(.white)
-                if settings.padShown {
-                    Button { padSelected = nil; editingPad.toggle() } label: {
-                        Label(editingPad ? "Done" : "Edit pad", systemImage: "slider.horizontal.below.square.and.square.filled")
-                            .font(.system(size: 12, weight: .semibold))
-                    }
-                    .tint(editingPad ? .yellow : .white)
-                }
-            }
-            if settings.showStats, model.state == Int32(HUSK_UNITY_RUNNING) {
-                Text(stats).font(.technical(11)).foregroundStyle(.white.opacity(0.7)).lineLimit(1)
-            }
-            if devInfo {
-                Button { withAnimation(.snappy(duration: 0.25)) { showLog.toggle() } } label: {
-                    Text(showLog ? "Hide log" : "Log").font(.system(size: 12, weight: .semibold))
-                }
-                .tint(.white)
-            }
-            Button { toggleInterface() } label: {
-                Label("Hide", systemImage: "eye.slash").font(.system(size: 12, weight: .semibold))
-            }
-            .tint(.white)
-        }
-        .padding(.horizontal, 14)
-        .frame(height: 30)
-        .background(Color(white: 0.08))
     }
 
     private var logPanel: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("ATTEMPT LOG").font(.technical(10, weight: .bold)).foregroundStyle(Theme.textDim)
+                Text("RUN LOG").font(.technical(10, weight: .bold)).foregroundStyle(.white.opacity(0.6))
                 Spacer()
                 Button { UIPasteboard.general.string = model.logText } label: {
-                    Label("Copy", systemImage: "doc.on.doc").font(.system(size: 11))
+                    Label("Copy", systemImage: "doc.on.doc").font(.system(size: 11, weight: .semibold))
                 }
+                .tint(.white)
             }
-            .padding(.horizontal, 10).padding(.vertical, 6)
+            .padding(.horizontal, 12).padding(.vertical, 8)
             ScrollViewReader { proxy in
                 ScrollView {
                     Text(model.logText.isEmpty ? "Starting…" : model.logText)
                         .font(.technical(10))
-                        .foregroundStyle(Theme.text)
+                        .foregroundStyle(.white.opacity(0.85))
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(8)
+                        .padding(10)
                         .textSelection(.enabled)
                         .id("bottom")
                 }
                 .onChange(of: model.logText) { _ in proxy.scrollTo("bottom", anchor: .bottom) }
             }
         }
-        .background(Theme.bg)
+        .huskPanel(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 }

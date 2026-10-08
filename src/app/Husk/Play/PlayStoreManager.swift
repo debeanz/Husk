@@ -225,7 +225,7 @@ final class PlayStoreManager: ObservableObject {
                 self.downloadProgress.removeValue(forKey: pkg)
                 self.installingPackages.remove(pkg)
 
-                // Hand to Husk's IncomingFiles flow, which automatically presents IncomingChooser!
+                // Hand to IncomingFiles, which adds the download to the library as a game.
                 IncomingFiles.shared.receive(files)
             } catch {
                 self.downloadProgress.removeValue(forKey: pkg)

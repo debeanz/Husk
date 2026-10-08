@@ -65,7 +65,7 @@ struct JITSetupFlow: View {
 
     private var choose: some View {
         page(symbol: "bolt.fill", title: "Turn on JIT",
-             subtitle: "Android needs memory it can write and then run, which on iOS only an attached "
+             subtitle: "Games need memory they can write and then run, which on iOS only an attached "
                      + "debugger can grant. Choose how your \(device) gets one.") {
             VStack(spacing: 10) {
                 let builtIn = HuskBuiltInJIT.unavailableReason
@@ -283,7 +283,7 @@ struct JITSetupFlow: View {
             VStack(alignment: .leading, spacing: 14) {
                 point(1, "Tap **Check setup**. Husk checks LocalDevVPN and prepares the Developer Disk Image.",
                       done: jit.prepared || attached)
-                point(2, "Tap **Enable JIT**. Husk's helper attaches and Android can start.", done: attached)
+                point(2, "Tap **Enable JIT**. Husk's helper attaches and games can run.", done: attached)
             }
             .padding(16).huskCard()
 
@@ -295,7 +295,7 @@ struct JITSetupFlow: View {
                 }
                 .padding(16).huskCard(high: true)
             } else if attached {
-                outcome("JIT is on. Android can start.", ok: true)
+                outcome("JIT is on. Games can run.", ok: true)
             } else if let error = jit.error {
                 VStack(alignment: .leading, spacing: 10) {
                     outcome(error, ok: false)
@@ -346,7 +346,7 @@ struct JITSetupFlow: View {
                       done: JITBootstrap.isStikDebugInstalled)
                 point(2, "Import this \(device)'s pairing file into StikDebug.")
                 point(3, "Install and connect [LocalDevVPN](\(LocalDevVPN.appStore.absoluteString)).")
-                point(4, "Whenever Android starts, Husk opens StikDebug, which attaches and comes back.")
+                point(4, "Whenever a game needs JIT, Husk opens StikDebug, which attaches and comes back.")
             }
             .padding(16).huskCard()
         } actions: {
@@ -371,7 +371,7 @@ struct JITSetupFlow: View {
                       done: JITBootstrap.isInstalledWithTrollStore)
                 point(2, "In TrollStore's Settings, turn on URL Scheme. TrollStore ignores enable-jit requests without it.",
                       done: JITBootstrap.isTrollStoreInstalled)
-                point(3, "Whenever Android or a game starts, Husk asks TrollStore to enable JIT. TrollStore opens Husk, "
+                point(3, "Whenever a game needs JIT, Husk asks TrollStore to enable JIT. TrollStore opens Husk, "
                        + "attaches to it for a moment and lets go, which leaves it allowed to run code it wrote.")
             }
             .padding(16).huskCard()

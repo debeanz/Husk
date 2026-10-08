@@ -517,55 +517,24 @@ static bool is_valid_dual_mapping(const tl_dual_mapping *m)
     return true;
 }
 
+/* The JIT region the app claimed while the debugger was attached
+ * (src/app/Husk/JIT/husk-ios-jit.c). Both are compiled into the app, so this is
+ * a direct call -- it used to be found by dlsym and a fixed offset into the QEMU
+ * library, which held the allocator then. HuskDualMapping and tl_dual_mapping
+ * have the same layout: rw, rx, size. */
+extern void *husk_ios_jit_get_mapping(void);
+extern bool husk_ios_jit_prewarm(size_t bytes);
+
 tl_dual_mapping *tl_find_stikdebug_prewarmed(void)
 {
-    tl_dual_mapping *(*get_fn)(void) = (tl_dual_mapping *(*)(void))dlsym(RTLD_DEFAULT, "husk_ios_jit_get_mapping");
-    if (get_fn) {
-        tl_dual_mapping *m = get_fn();
-        if (is_valid_dual_mapping(m)) return m;
-    }
+    tl_dual_mapping *m = (tl_dual_mapping *)husk_ios_jit_get_mapping();
+    if (is_valid_dual_mapping(m)) return m;
 
-    /* Ensure prewarm has been called in case this attempt ran before QEMU. */
-    bool (*prewarm_fn)(size_t) = (bool (*)(size_t))dlsym(RTLD_DEFAULT, "husk_ios_jit_prewarm");
-    if (prewarm_fn) {
-        prewarm_fn(256 * 1024 * 1024);
-    }
-
-    void *fn = dlsym(RTLD_DEFAULT, "husk_ios_jit_prewarm");
-    if (!fn) return NULL;
-
-    /* 1. Try static offset in libqemu-aarch64-softmmu.dylib (_husk_prewarmed is at 0x1ce6920, prewarm at 0x35d788) */
-    tl_dual_mapping *m = (tl_dual_mapping *)((uintptr_t)fn + 0x1989198);
-    if (is_valid_dual_mapping(m)) {
-        return m;
-    }
-
-    /* 2. Decode the specific adrp+ldr right before epilogue (instruction 36) */
-    const uint32_t *p = (const uint32_t *)fn;
-    for (int i = 30; i < 50; i++) {
-        uint32_t insn = p[i];
-        if ((insn & 0x9F000000u) == 0x90000000u) { /* adrp */
-            uint32_t next = p[i + 1];
-            if ((next & 0xFFC00000u) == 0xF9400000u) { /* ldr Xt, [Xn, #imm] */
-                uint32_t rd = insn & 0x1Fu;
-                uint32_t rn = (next >> 5) & 0x1Fu;
-                if (rd == rn) {
-                    uint64_t immlo = (insn >> 29) & 3u;
-                    uint64_t immhi = (insn >> 5) & 0x7FFFFu;
-                    int64_t imm = (int64_t)((immhi << 2) | immlo);
-                    if (imm & 0x100000) imm -= 0x200000;
-                    uintptr_t pc = (uintptr_t)&p[i];
-                    uintptr_t page = (pc & ~0xFFFull) + (imm << 12);
-                    uint64_t pimm = ((next >> 10) & 0xFFFu) << 3;
-                    tl_dual_mapping *cand = (tl_dual_mapping *)(page + pimm);
-                    if (is_valid_dual_mapping(cand)) {
-                        return cand;
-                    }
-                }
-            }
-        }
-    }
-    return NULL;
+    /* Not claimed yet (the app prewarms at launch once the debugger attaches):
+     * try once now. A prewarm that already failed is not repeated. */
+    husk_ios_jit_prewarm(512 * 1024 * 1024);
+    m = (tl_dual_mapping *)husk_ios_jit_get_mapping();
+    return is_valid_dual_mapping(m) ? m : NULL;
 }
 
 /* ------------------------------------------------------------------ ELF  */

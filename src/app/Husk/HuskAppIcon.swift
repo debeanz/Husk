@@ -90,9 +90,8 @@ enum HuskAppIcon: String, CaseIterable, Identifiable {
 }
 
 
-/// The three tabs: Home (what you used last), the Library (everything) and Settings.
+/// The three tabs: the Library (your games), the Store (Google Play) and Settings.
 enum HuskTab: String, CaseIterable, Identifiable {
-    case home
     case library
     case store
     case settings

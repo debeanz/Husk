@@ -3,20 +3,17 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
-/// Android apps without booting Android.
+/// Android games without Android.
 ///
-/// Husk runs an APK in one of two ways. It can boot a whole Android system under QEMU and show one app's surface:
-/// that runs anything, and costs a kernel, an init, a system server and minutes of emulated CPU before the first frame.
-/// Or -- this -- it can keep only the app's own code, its Dex and its native libraries, and run it against a rewrite of the
-/// Android framework on the phone itself, so there is nothing to boot. Games built on Unity, cocos2d-x, Minecraft's
-/// GameActivity and SDL3 start in seconds this way. docs/04-translation-layer.md is the design.
+/// Husk keeps only an app's own code -- its Dex and its native libraries -- and runs it against a rewrite of the Android
+/// framework on the phone itself, so there is nothing to boot. Games built on Unity, cocos2d-x, Minecraft's GameActivity,
+/// SDL, Unreal Engine 4, Godot and Rockstar's engine start in seconds this way. docs/04-translation-layer.md is the design.
 enum TranslationLayer {
     /// Whether the technical detail is shown: library reports, device checks, logs. Off, the screens carry
     /// only what is needed to add an app and run it. Set in Settings > About.
     static let devInfoKey = "husk.devInfo"
 
-    /// One folder per app. Kept apart from Android's apps: those live on the
-    /// guest's disk, and this runtime has no guest.
+    /// One folder per app: its APKs, its report, its settings, and what it saves.
     static var root: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("TranslationLayer", isDirectory: true)
@@ -584,12 +581,12 @@ final class TLAttemptRunner: ObservableObject {
     private var timer: Timer?
 
     var statusText: String {
-        if isRunning { return "Running Attempt..." }
+        if isRunning { return "Running" }
         guard let code = exitCode else { return "Ready" }
         switch code {
-        case 2:  return "Success: The guest drew frames!"
-        case 1:  return "Loaded: Native libraries loaded (no draw)"
-        default: return "Refused: Could not execute"
+        case 2:  return "The game drew and stopped"
+        case 1:  return "Loaded, but drew nothing"
+        default: return "Could not start"
         }
     }
 
@@ -598,8 +595,8 @@ final class TLAttemptRunner: ObservableObject {
         guard let code = exitCode else { return Theme.textDim }
         switch code {
         case 2:  return Theme.good
-        case 1:  return .orange
-        default: return .red
+        case 1:  return Theme.warn
+        default: return Theme.bad
         }
     }
 
@@ -709,80 +706,79 @@ struct TLAttemptView: View {
     }
 }
 
-/// A game Husk runs on its own Java interpreter (Flappy Bird): full screen like every other game, with the same bar, the
-/// same three-finger way to hide it, and the game's own settings.
+//// A game Husk runs on its own Java interpreter (Flappy Bird): full screen like every other game, with the same toolbar that
+/// comes down from the top of the screen, and the game's own settings.
 struct TLClassicAttemptView: View {
     let app: TLApp
     @StateObject private var runner = TLAttemptRunner()
+    @StateObject private var monitor = PerformanceMonitor()
     @Environment(\.dismiss) private var dismiss
     @AppStorage("husk.tl.showLog") private var showLogSetting = false
     @AppStorage(TranslationLayer.devInfoKey) private var devInfo = false
     @State private var settings: TLAppSettings
-    @State private var uiHidden: Bool
-    @State private var hint = false
-    private let cleanLayout: Bool
+    /// Whether the toolbar is down.
+    @State private var chrome = false
+    /// Laid out over the whole screen, the area around the camera included (the game's Full Screen setting).
+    private let fullBleed: Bool
     private var showLog: Bool { get { showLogSetting && devInfo } nonmutating set { showLogSetting = newValue } }
 
     init(app: TLApp) {
         self.app = app
         let loaded = TLAppSettings.load(app.id)
         _settings = State(initialValue: loaded)
-        _uiHidden = State(initialValue: loaded.cleanView)
-        cleanLayout = loaded.cleanView
+        fullBleed = loaded.cleanView
     }
 
     /// These games draw a portrait picture (Flappy Bird's is 540 x 960), unless the game's settings say otherwise.
     private var portrait: Bool { settings.orientation != .landscape }
 
-    private func toggleInterface() {
-        withAnimation(.easeInOut(duration: 0.15)) { uiHidden.toggle() }
-        if uiHidden { showHint() }
-    }
-
-    private func showHint() {
-        hint = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { withAnimation(.easeOut(duration: 0.4)) { hint = false } }
+    private func toggleChrome() {
+        withAnimation(.snappy(duration: 0.25)) { chrome.toggle() }
     }
 
     var body: some View {
         ZStack {
+            // The band above the game when it keeps clear of the camera: tapping it is tapping the top of the screen.
             Color.black.ignoresSafeArea()
-            VStack(spacing: 0) {
-                if !cleanLayout {
-                    bar.opacity(uiHidden ? 0 : 1).allowsHitTesting(!uiHidden)
-                }
-                ZStack {
-                    TLScreenView(showsStats: settings.showStats && !uiHidden, onThreeFingerTap: { toggleInterface() })
-                    if !runner.isRunning, runner.frameCount == 0 {
-                        VStack(spacing: 10) {
-                            if runner.isDone {
-                                Text("The game stopped").font(.headline).foregroundStyle(.white)
-                                Button("Run Again") { runner.start(apks: app.apks) }.buttonStyle(.borderedProminent)
-                            } else {
-                                ProgressView().tint(.white)
-                                Text("Starting \(app.label)…").font(.subheadline).foregroundStyle(.white.opacity(0.7))
-                            }
+                .contentShape(Rectangle())
+                .onTapGesture { toggleChrome() }
+
+            ZStack {
+                TLScreenView(onThreeFingerTap: { toggleChrome() }, onTopTap: { toggleChrome() })
+                if !runner.isRunning, runner.frameCount == 0 {
+                    VStack(spacing: 12) {
+                        if runner.isDone {
+                            Image(systemName: "stop.circle").font(.system(size: 30)).foregroundStyle(.white.opacity(0.7))
+                            Text("The game stopped").font(.headline).foregroundStyle(.white)
+                            Button { runner.start(apks: app.apks) } label: { Label("Run Again", systemImage: "play.fill") }
+                                .buttonStyle(.borderedProminent)
+                        } else {
+                            ProgressView().tint(.white)
+                            Text("Starting \(app.label)…").font(.subheadline).foregroundStyle(.white.opacity(0.7))
                         }
                     }
                 }
-                .ignoresSafeArea(.container, edges: cleanLayout ? .all : [.horizontal, .bottom])
-                if showLog, !uiHidden { logPanel.frame(height: 220) }
             }
-            if cleanLayout, !uiHidden {
-                VStack(spacing: 0) { bar; Spacer() }
+            .ignoresSafeArea(.container, edges: fullBleed ? .all : [.horizontal, .bottom])
+
+            if showLog {
+                logPanel
+                    .frame(maxWidth: 560, maxHeight: 260)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                    .padding(10)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
             }
-            if hint {
-                VStack {
-                    Spacer()
-                    Text("Tap with three fingers to show the interface")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 14).padding(.vertical, 8)
-                        .background(.black.opacity(0.65), in: Capsule())
-                        .padding(.bottom, 26)
+
+            GameOverlay(title: app.label, status: runner.isRunning ? "Java · running" : runner.statusText,
+                        statusColor: runner.statusColor, shown: $chrome, pinned: showLog || runner.isDone,
+                        monitor: monitor, onClose: { runner.stop(); dismiss() }) {
+                PerfOverlayButton()
+                if devInfo {
+                    OverlayButton(systemImage: "doc.text.magnifyingglass", label: showLog ? "Hide Log" : "Show Log",
+                                  active: showLog) {
+                        withAnimation(.snappy(duration: 0.25)) { showLog.toggle() }
+                    }
                 }
-                .allowsHitTesting(false)
-                .transition(.opacity)
             }
         }
         .statusBarHidden(true)
@@ -791,42 +787,18 @@ struct TLClassicAttemptView: View {
         .onAppear {
             HuskOrientation.set(portrait ? .portrait : .landscape)
             UIApplication.shared.isIdleTimerDisabled = settings.keepAwake
-            if cleanLayout { showHint() }
             CrashReport.gameStarted(app)
             runner.start(apks: app.apks)
+            monitor.start(.classic)
         }
+        .onChange(of: runner.isDone) { done in if done { withAnimation { chrome = true } } }
         .onDisappear {
             CrashReport.gameEnded()
             runner.stop()
+            monitor.stop()
             UIApplication.shared.isIdleTimerDisabled = false
             HuskOrientation.set(HuskOrientation.standard)
         }
-    }
-
-    private var bar: some View {
-        HStack(spacing: 12) {
-            Button { runner.stop(); dismiss() } label: {
-                Label("Close", systemImage: "xmark").font(.system(size: 13, weight: .semibold))
-            }
-            .tint(.white)
-            Circle().fill(runner.statusColor).frame(width: 7, height: 7)
-            Text(runner.isRunning ? app.label : runner.statusText)
-                .font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.85)).lineLimit(1)
-            Spacer()
-            if devInfo {
-                Button { withAnimation(.snappy(duration: 0.25)) { showLog.toggle() } } label: {
-                    Text(showLog ? "Hide log" : "Log").font(.system(size: 12, weight: .semibold))
-                }
-                .tint(.white)
-            }
-            Button { toggleInterface() } label: {
-                Label("Hide", systemImage: "eye.slash").font(.system(size: 12, weight: .semibold))
-            }
-            .tint(.white)
-        }
-        .padding(.horizontal, 14)
-        .frame(height: 30)
-        .background(Color(white: 0.08))
     }
 
     private var logPanel: some View {
@@ -836,13 +808,13 @@ struct TLClassicAttemptView: View {
                     .font(.technical(10))
                     .foregroundStyle(.white.opacity(0.85))
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(10)
+                    .padding(12)
                     .textSelection(.enabled)
                     .id("bottom")
             }
-            .background(Color(white: 0.06))
             .onChange(of: runner.logText) { _ in proxy.scrollTo("bottom", anchor: .bottom) }
         }
+        .huskPanel(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 }
-

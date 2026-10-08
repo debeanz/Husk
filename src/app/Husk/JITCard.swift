@@ -3,8 +3,7 @@ import SwiftUI
 
 /// The way to turn on JIT, said plainly: StikJIT is built into Husk, and it is the recommended way.
 ///
-/// Android and the Translation Layer's games both need memory they can write and then execute, which on iOS takes an attached
-/// debugger. Husk can be that debugger itself -- StikJIT, in the app, with no computer and no other app -- so this is the first
+/// Games need memory they can write and then execute, which on iOS takes an attached debugger. Husk can be that debugger itself -- StikJIT, in the app, with no computer and no other app -- so this is the first
 /// thing shown wherever JIT is missing, with the other methods one tap further. Once JIT is on it shrinks to a line saying so.
 struct JITCard: View {
     @ObservedObject private var jit = JITCoordinator.shared
@@ -38,10 +37,10 @@ struct JITCard: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
                 Image(systemName: "bolt.fill")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
-                    .frame(width: 32, height: 32)
-                    .background(Color.accentColor.opacity(0.16), in: Circle())
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 36, height: 36)
+                    .background(Color.yellow.gradient, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 Button { jit.showSetup = true } label: {
                     VStack(alignment: .leading, spacing: 1) {
                         Text("JIT is off").font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
@@ -74,7 +73,7 @@ struct JITCard: View {
             }
         }
         .padding(12)
-        .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .huskCard(RoundedRectangle(cornerRadius: Theme.rowCorner + 2, style: .continuous))
     }
 
     private var explanation: String {
@@ -88,7 +87,7 @@ struct JITCard: View {
             return "StikDebug is installed, so Husk will open it to turn JIT on."
         default:
             return "StikJIT is built into Husk. You can turn JIT on right here — no computer and no other app. "
-                 + "Games and Android both need it."
+                 + "Every game needs it."
         }
     }
 
@@ -108,7 +107,7 @@ struct JITCard: View {
                 .foregroundStyle(.green)
             VStack(alignment: .leading, spacing: 2) {
                 Text("JIT is on").font(.headline)
-                Text("Games and Android can run.").font(.subheadline).foregroundStyle(.secondary)
+                Text("Games can run.").font(.subheadline).foregroundStyle(.secondary)
             }
             Spacer(minLength: 0)
         }

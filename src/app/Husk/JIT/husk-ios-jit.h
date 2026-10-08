@@ -53,7 +53,7 @@
 extern "C" {
 #endif
 
-/* See husk-display.h for why this is necessary. */
+/* Exported, so dlsym(RTLD_DEFAULT, ...) can find these from anywhere in the process. */
 #define HUSK_EXPORT __attribute__((visibility("default")))
 
 typedef struct HuskDualMapping {
@@ -84,6 +84,10 @@ HuskDualMapping husk_ios_jit_allocate(size_t bytes);
  * will ask for (tb-size).
  */
 HUSK_EXPORT bool husk_ios_jit_prewarm(size_t bytes);
+
+/* The prewarmed region, or NULL before a successful prewarm. The translation
+   layer's loader places game libraries in it. */
+HUSK_EXPORT HuskDualMapping *husk_ios_jit_get_mapping(void);
 
 /* Release a mapping obtained from husk_ios_jit_allocate(). */
 void husk_ios_jit_release(HuskDualMapping *m);

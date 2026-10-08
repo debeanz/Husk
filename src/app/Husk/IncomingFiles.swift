@@ -2,23 +2,21 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// APKs handed to Husk from another app: the share sheet's "Husk" (or "Copy to Husk"), or "Open in Husk" from Files.
+/// APKs handed to Husk: picked with the + button, shared from another app ("Husk" or "Copy to Husk" in the share sheet),
+/// opened in Husk from Files, or downloaded from the Store.
 ///
 /// Each arrives as a URL that may only be readable for a moment (a security-scoped file in another app's container, or a copy
-/// in Documents/Inbox that iOS made), so it is copied straight away to a folder of Husk's own, and then the person is asked
-/// where it goes: the Translation Layer, which runs a game on the iPhone itself, or Android. Several shared at once -- a base
-/// APK and its splits -- arrive one URL at a time and are gathered into one question.
+/// in Documents/Inbox that iOS made), so it is copied straight away to a folder of Husk's own, then added to the library as a
+/// game. Several shared at once -- a base APK and its splits -- arrive one URL at a time and are gathered into one game.
 @MainActor
 final class IncomingFiles: ObservableObject {
     static let shared = IncomingFiles()
 
-    /// Files waiting for the person to say where they go.
-    @Published var waiting: [URL] = []
-    /// Files meant for Android, held until Android is up to take them.
-    @Published private(set) var forAndroid: [URL] = []
-
     private var gathering: [URL] = []
     private var gatherTask: Task<Void, Never>?
+    /// Sets of files waiting for the library to finish adding the one before.
+    private var queue: [[URL]] = []
+    private var draining = false
 
     /// Where copies wait. Emptied when Husk starts, so nothing left over takes up space.
     nonisolated static var folder: URL {
@@ -39,22 +37,43 @@ final class IncomingFiles: ObservableObject {
         guard url.isFileURL, Self.extensions.contains(url.pathExtension.lowercased()) else { return }
         take([url]) { copies in
             self.gathering += copies
-            // The pieces of a split set arrive one after another: ask once they have all come.
+            // The pieces of a split set arrive one after another: add them once they have all come.
             self.gatherTask?.cancel()
             self.gatherTask = Task {
                 try? await Task.sleep(nanoseconds: 600_000_000)
                 guard !Task.isCancelled else { return }
-                self.waiting += self.gathering
+                let set = self.gathering
                 self.gathering = []
+                self.deliver(set)
             }
         }
     }
 
-    /// Files picked inside Husk: all at once, so they are one question.
+    /// Files picked inside Husk, or downloaded by the Store: all at once, so they are one game.
     func receive(_ urls: [URL]) {
         let wanted = urls.filter { Self.extensions.contains($0.pathExtension.lowercased()) }
         guard !wanted.isEmpty else { return }
-        take(wanted) { self.waiting += $0 }
+        take(wanted) { self.deliver($0) }
+    }
+
+    /// Hand a set to the library, or queue it while the library is busy adding another.
+    private func deliver(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        queue.append(urls)
+        guard !draining else { return }
+        draining = true
+        Task {
+            while !queue.isEmpty {
+                let store = TranslationLayerStore.shared
+                while store.busy != nil { try? await Task.sleep(nanoseconds: 300_000_000) }
+                let next = queue.removeFirst()
+                // Moved, not copied: the copy here is Husk's own, and a game can be gigabytes.
+                store.add(next, move: true)
+                // Let the store take it before looking at the next one.
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+            draining = false
+        }
     }
 
     /// Copy files to Husk's own folder, off the main thread -- a game can be gigabytes -- then hand back the copies.
@@ -83,98 +102,5 @@ final class IncomingFiles: ObservableObject {
                 if !copies.isEmpty { then(copies) }
             }
         }
-    }
-
-    /// Run on the iPhone itself.
-    func sendToTranslationLayer() {
-        let urls = waiting
-        waiting = []
-        guard !urls.isEmpty else { return }
-        // Moved, not copied: the copy here is Husk's own, and a game can be gigabytes.
-        TranslationLayerStore.shared.add(urls, move: true)
-    }
-
-    /// Installed into Android -- now if it is up, otherwise as soon as it is.
-    func sendToAndroid() {
-        let urls = waiting
-        waiting = []
-        guard !urls.isEmpty else { return }
-        forAndroid += urls
-        installForAndroidIfReady()
-    }
-
-    func installForAndroidIfReady() {
-        guard AndroidHost.shared.isReady, AndroidHost.shared.busy == nil, !forAndroid.isEmpty else { return }
-        let urls = forAndroid
-        forAndroid = []
-        AndroidHost.shared.install(urls)
-    }
-
-    func discard() {
-        for url in waiting { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        waiting = []
-    }
-}
-
-/// Where a shared APK goes. Two choices, each saying what it means, and a way out.
-struct IncomingChooser: View {
-    @ObservedObject private var incoming = IncomingFiles.shared
-    @ObservedObject private var host = AndroidHost.shared
-    @ObservedObject private var guest = GuestImage.shared
-
-    private var title: String {
-        guard let first = incoming.waiting.first else { return "" }
-        return incoming.waiting.count == 1 ? first.lastPathComponent : "\(incoming.waiting.count) files"
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Add to Husk").font(.title2.weight(.bold))
-                Text(title).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
-            }
-
-            choice(icon: "bolt.fill", title: "Translation Layer",
-                   detail: "Runs the game directly on your iPhone, without starting Android. Best for games.") {
-                incoming.sendToTranslationLayer()
-            }
-            choice(icon: "apps.iphone", title: "Android",
-                   detail: androidDetail) {
-                incoming.sendToAndroid()
-            }
-
-            Button("Cancel", role: .cancel) { incoming.discard() }
-                .frame(maxWidth: .infinity)
-                .padding(.top, 2)
-        }
-        .padding(22)
-    }
-
-    private var androidDetail: String {
-        if host.isReady { return "Installs it into Android, where any app can run." }
-        if guest.state == .ready { return "Installs it into Android the next time Android starts." }
-        return "Installs it into Android once Android is downloaded and started."
-    }
-
-    private func choice(icon: String, title: String, detail: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 14) {
-                Image(systemName: icon)
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
-                    .frame(width: 44, height: 44)
-                    .background(Color.accentColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.headline).foregroundStyle(.primary)
-                    Text(detail).font(.subheadline).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
-            }
-            .padding(14)
-            .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        }
-        .buttonStyle(CardButtonStyle())
     }
 }

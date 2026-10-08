@@ -65,9 +65,8 @@ struct TLAppSettings: Codable, Equatable {
 
     var orientation: Orientation = .auto
     var resolution: Resolution = .high
-    /// The frames-per-second readout in the top bar.
-    var showStats = true
-    /// Start with nothing over the picture: no bar, no controller, no readout. Three fingers tapped together bring them back.
+    /// Full screen: the game draws over the whole display, the area around the camera included. Off, it keeps clear of the
+    /// camera. (Stored under its old name, from when it was "Hide the interface", so the choice carries over.)
     var cleanView = false
     /// Stop the screen from dimming and locking while the game is on.
     var keepAwake = true
@@ -86,7 +85,6 @@ struct TLAppSettings: Codable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         orientation = try c.decodeIfPresent(Orientation.self, forKey: .orientation) ?? .auto
         resolution = try c.decodeIfPresent(Resolution.self, forKey: .resolution) ?? .high
-        showStats = try c.decodeIfPresent(Bool.self, forKey: .showStats) ?? true
         cleanView = try c.decodeIfPresent(Bool.self, forKey: .cleanView) ?? false
         keepAwake = try c.decodeIfPresent(Bool.self, forKey: .keepAwake) ?? true
         pad = try c.decodeIfPresent(PadMode.self, forKey: .pad) ?? .auto
@@ -142,7 +140,7 @@ struct TLAppSettingsView: View {
 
     private var dataDirs: [URL] {
         let dir = TranslationLayer.root.appendingPathComponent(app.id, isDirectory: true)
-        return ["unity-data", "cocos-data", "minecraft-data", "sdl-data", "ue4-data", "gta-data", "na-data"]
+        return ["unity-data", "cocos-data", "minecraft-data", "sdl-data", "ue4-data", "gta-data", "godot-data", "na-data"]
             .map { dir.appendingPathComponent($0, isDirectory: true) }
             .filter { FileManager.default.fileExists(atPath: $0.path) }
     }
@@ -151,14 +149,17 @@ struct TLAppSettingsView: View {
         Form {
             Section {
                 HStack(spacing: 14) {
-                    AppIcon(path: app.iconPath, size: 52)
-                    TextField("Name", text: $name)
-                        .focused($nameFocused)
-                        .submitLabel(.done)
-                        .onSubmit { rename() }
-                        .font(.system(size: 18, weight: .semibold))
+                    GameIcon(app: app, size: 56)
+                    VStack(alignment: .leading, spacing: 3) {
+                        TextField("Name", text: $name)
+                            .focused($nameFocused)
+                            .submitLabel(.done)
+                            .onSubmit { rename() }
+                            .font(.system(size: 18, weight: .semibold))
+                        Text(app.engineLabel).font(.subheadline).foregroundStyle(.secondary)
+                    }
                 }
-                .padding(.vertical, 2)
+                .padding(.vertical, 4)
             } footer: {
                 Text("What the game is called in Husk. The game itself is not changed.")
             }
@@ -170,23 +171,13 @@ struct TLAppSettingsView: View {
                 Picker("Resolution", selection: $settings.resolution) {
                     ForEach(TLAppSettings.Resolution.allCases) { Text($0.title).tag($0) }
                 }
-                Toggle("Performance readout", isOn: $settings.showStats)
-                Toggle("Keep the screen on", isOn: $settings.keepAwake)
+                Toggle("Full Screen", isOn: $settings.cleanView)
+                Toggle("Keep the Screen On", isOn: $settings.keepAwake)
             } header: {
                 Text("Display")
             } footer: {
-                Text("\(settings.resolution.detail) Orientation and resolution apply the next time the game starts, and a game already "
-                   + "running in this session needs Husk closed and opened again.")
-            }
-
-            Section {
-                Toggle("Hide the interface", isOn: $settings.cleanView)
-            } header: {
-                Text("Screenshots")
-            } footer: {
-                Text("The game starts with nothing over it: no bar, no controller, no readout, the picture to every edge. Tap with three "
-                   + "fingers at once to bring the bar back, and again to hide it. The Hide button in the bar does the same while "
-                   + "playing, but leaves the strip the bar sat in.")
+                Text("\(settings.resolution.detail) Full Screen draws the game around the camera too. These apply the next time "
+                   + "the game starts; a game already running in this session needs Husk closed and opened again.")
             }
 
             if app.packageName == GeodeSupport.gamePackage {
@@ -203,27 +194,33 @@ struct TLAppSettingsView: View {
             }
 
             Section {
-                Picker("On-screen controller", selection: $settings.pad) {
+                Picker("On-Screen Controller", selection: $settings.pad) {
                     ForEach(TLAppSettings.PadMode.allCases) { Text($0.title).tag($0) }
                 }
                 if settings.pad != .never {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("Opacity")
+                        HStack {
+                            Text("Opacity")
+                            Spacer()
+                            Text("\(Int((settings.padOpacity * 100).rounded()))%")
+                                .font(.technical(14)).foregroundStyle(.secondary)
+                        }
                         Slider(value: $settings.padOpacity, in: 0.3...1)
                     }
-                    Toggle("Vibrate on a press", isOn: $settings.haptics)
+                    Toggle("Vibrate on a Press", isOn: $settings.haptics)
                 }
             } header: {
                 Text("Controller")
             } footer: {
                 Text("Automatic offers the controller for games that cannot be played without one (Unreal Engine games), when no real "
-                   + "controller is connected. Always offers it for any game that understands one. A paired controller is always used.")
+                   + "controller is connected. Always offers it for any game that understands one. A paired controller is always "
+                   + "used. In the game, tap the top of the screen to show, hide or rearrange it.")
             }
 
             Section {
-                DetailRow(label: "Saved by the game", value: dataSize, mono: false)
+                LabeledContent("Saved by the Game", value: dataSize)
                 Button(role: .destructive) { confirmReset = true } label: {
-                    Label("Reset Game Data", systemImage: "arrow.counterclockwise")
+                    Text("Reset Game Data")
                 }
                 .disabled(inUse || dataDirs.isEmpty)
             } header: {
@@ -234,7 +231,7 @@ struct TLAppSettingsView: View {
             }
         }
         .huskForm()
-        .navigationTitle("Settings")
+        .navigationTitle("Game Settings")
         .navigationBarTitleDisplayMode(.inline)
         .onChange(of: settings) { $0.save(app.id) }
         .onChange(of: settings.geode) { on in
@@ -288,7 +285,7 @@ struct TLAppSettingsView: View {
                     if values?.isRegularFile == true { bytes += Int64(values?.fileSize ?? 0) }
                 }
             }
-            return bytes == 0 ? "nothing" : ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+            return bytes == 0 ? "Nothing" : ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
         }.value
     }
 }

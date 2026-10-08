@@ -1,72 +1,63 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import SwiftUI
 
-// MARK: - the top of every page
+// MARK: - pieces of a page
 
-/// An item's page opens on its artwork: the icon over a blurred, darkened copy of itself, the name, a line under it, and
-/// the one thing to do -- Play, Open, Start -- as a big button.
-private struct PageHero<Action: View>: View {
-    let item: LibraryItem
-    let subtitle: String
-    @ViewBuilder var action: Action
-
-    var body: some View {
-        VStack(spacing: 0) {
-            ZStack(alignment: .bottomLeading) {
-                ItemBackdrop(item: item, fallback: Color(uiColor: .tertiarySystemFill))
-                LinearGradient(colors: [.clear, .black.opacity(0.7)], startPoint: .top, endPoint: .bottom)
-                HStack(alignment: .bottom, spacing: 14) {
-                    ItemIcon(item: item, size: 84)
-                        .shadow(color: .black.opacity(0.35), radius: 12, y: 5)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(item.title)
-                            .font(.system(.title2, design: .rounded).weight(.heavy))
-                            .lineLimit(2)
-                            .minimumScaleFactor(0.8)
-                        Text(subtitle)
-                            .font(.subheadline)
-                            .foregroundStyle(.white.opacity(0.75))
-                            .lineLimit(2)
-                    }
-                    .foregroundStyle(.white)
-                    Spacer(minLength: 0)
-                }
-                .padding(16)
-            }
-            .frame(height: 210)
-            action
-                .padding(14)
-        }
-        .background(Color(uiColor: .secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-    }
-}
-
-/// The page's main button.
-private struct BigButton: View {
-    let title: String
+/// A row on a page's card that goes somewhere or does something: a coloured icon, a title, and a chevron when it opens a page.
+private struct PageRow: View {
     let systemImage: String
-    var prominent = true
-    let action: () -> Void
+    let tint: Color
+    let title: String
+    var detail: String? = nil
+    var chevron = true
+    var destructive = false
 
     var body: some View {
-        Button(action: action) {
-            Label(title, systemImage: systemImage)
-                .font(.system(.headline, design: .rounded))
-                .frame(maxWidth: .infinity)
-                .frame(height: 50)
-                .foregroundStyle(prominent ? Color.white : Color.accentColor)
-                .background(prominent ? Color.accentColor : Color.accentColor.opacity(0.14),
-                            in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+        HStack(spacing: 14) {
+            SettingsIcon(systemImage: systemImage, tint: tint)
+            Text(title)
+                .font(.system(size: 16))
+                .foregroundStyle(destructive ? Theme.bad : Theme.text)
+            Spacer(minLength: 8)
+            if let detail {
+                Text(detail).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+            }
+            if chevron {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
         }
-        .buttonStyle(CardButtonStyle())
+        .padding(.horizontal, 16)
+        .frame(minHeight: 52)
+        .contentShape(Rectangle())
     }
 }
 
-/// A hero that sits in a List as its first row, edge to edge within the list's margins.
-private extension View {
-    func heroRow() -> some View {
-        listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
+/// A titled card of rows.
+private struct PageCard<Content: View>: View {
+    var title: String? = nil
+    var footer: String? = nil
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let title {
+                Text(title.uppercased())
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 16)
+            }
+            VStack(spacing: 0) { content }
+                .huskCard()
+            if let footer {
+                Text(footer)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 16)
+            }
+        }
     }
 }
 
@@ -85,13 +76,15 @@ private func fileBytes(_ paths: [String]) -> String {
 
 // MARK: - a game
 
-/// A translation-layer game: Play, its settings, what it is, and removing it.
+/// One game: Play, its settings, its saves, what it is, and removing it.
 struct GamePage: View {
     let app: TLApp
-    @ObservedObject private var showcase = ShowcaseStore.shared
 
+    @ObservedObject private var showcase = ShowcaseStore.shared
     @ObservedObject private var store = TranslationLayerStore.shared
     @ObservedObject private var jit = JITCoordinator.shared
+    @ObservedObject private var statuses = GameStatusStore.shared
+    @AppStorage(TranslationLayer.devInfoKey) private var devInfo = false
     @Environment(\.dismiss) private var dismiss
     @State private var playing = false
     @State private var confirmRemove = false
@@ -101,8 +94,6 @@ struct GamePage: View {
     @State private var confirmRestore: URL?
     @State private var confirmQuit = false
 
-    private var runs: Bool { app.report?.canRun == true }
-
     /// Another game already loaded in this run of Husk: engines cannot be unloaded, so this one cannot start until Husk is
     /// closed and opened again.
     private var blockedBy: String? {
@@ -111,78 +102,102 @@ struct GamePage: View {
         return store.apps.first { $0.apks.first == loaded }?.label ?? "Another game"
     }
 
-    private var subtitle: String {
-        if let used = LibraryItem.game(app).usedText { return used }
-        return runs ? "Ready to play" : "May not run on this iPhone"
+    /// This game's engine is loaded in this run of Husk, so its files may be open: no restoring under it.
+    private var loadedNow: Bool {
+        guard let loaded = husk_native_loaded_apk().map({ String(cString: $0) }) else { return false }
+        return loaded == app.apks.first
     }
 
+    private var geometryDash: TLApp? { store.apps.first { $0.packageName == GeodeSupport.gamePackage } }
+
     var body: some View {
-        List {
-            Section {
-                PageHero(item: .game(app), subtitle: subtitle) { primary }
-            } footer: {
-                if isGeodeLauncher {
-                    Text("This is Geode's Android launcher. On Husk, Geode runs inside Geometry Dash instead: turn it on here "
-                       + "(or in Geometry Dash's settings, under Mods), then start Geometry Dash and use Geode's button on its "
-                       + "main menu to get mods. This APK supplies a library Geode needs, so keep it.")
-                } else if let other = blockedBy {
-                    Text("\(other) is still loaded, and a game cannot be unloaded once it has started. Close Husk with the "
-                       + "button above, then open it again to play \(app.label).")
-                } else if !runs {
-                    Text("This APK has no 64-bit code Husk can run, so it will probably not start.")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                VStack(spacing: 14) {
+                    hero
+                    primary
+                    if let note { Text(note).font(.footnote).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading).fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 4) }
                 }
-            }
-            .heroRow()
 
-            if !ShowcaseStore.shared.pictures(for: app.packageName).isEmpty {
-                Section("Screenshots") {
-                    ShowcaseGallery(package: app.packageName)
-                        .listRowInsets(EdgeInsets(top: 10, leading: 12, bottom: 10, trailing: 12))
-                }
-            }
-
-            Section {
-                NavigationLink(value: LibraryRoute.gameSettings(app.id)) {
-                    Label("Game Settings", systemImage: "slider.horizontal.3")
-                }
-                NavigationLink(value: LibraryRoute.gameReport(app.id)) {
-                    Label("Technical Details", systemImage: "cpu")
-                }
-            }
-
-            if !isGeodeLauncher {
-                Section {
-                    Button { backUp() } label: { Label("Back Up Saves", systemImage: "square.and.arrow.up") }
-                        .disabled(savesBusy || !SaveBackup.hasData(app))
-                    Button { pickRestore() } label: { Label("Restore Saves", systemImage: "clock.arrow.circlepath") }
-                        .disabled(savesBusy || loadedNow)
-                } header: {
-                    Text("Saves")
-                } footer: {
-                    if let savesMessage { Text(savesMessage) }
-                    else if loadedNow { Text("\(app.label) has been started in this run of Husk. Close Husk and open it again to restore saves.") }
-                    else { Text("A backup is a .zip of everything \(app.label) has saved in Husk, to keep in Files or move to another device.") }
-                }
-            }
-
-            Section("About") {
-                LabeledContent("Runs With", value: app.report?.runnerName ?? "Unknown")
-                if let st = GameStatusStore.shared.status(app.id) {
-                    LabeledContent("Last Result") {
-                        Label(st.result.label, systemImage: st.result.symbol).foregroundStyle(st.result.color)
+                if !showcase.pictures(for: app.packageName).isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("SCREENSHOTS")
+                            .font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary).padding(.leading, 16)
+                        ShowcaseGallery(package: app.packageName)
                     }
                 }
-                LabeledContent("Last Played", value: app.lastPlayed.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "Never")
-                LabeledContent("Size", value: fileBytes(app.apks))
-            }
 
-            Section {
-                Button(role: .destructive) { confirmRemove = true } label: {
-                    Label("Remove Game", systemImage: "trash")
+                PageCard {
+                    NavigationLink(value: LibraryRoute.gameSettings(app.id)) {
+                        PageRow(systemImage: "slider.horizontal.3", tint: .blue, title: "Game Settings")
+                    }
+                    .buttonStyle(.plain)
+                    RowDivider(inset: 59)
+                    NavigationLink(value: LibraryRoute.gameReport(app.id)) {
+                        PageRow(systemImage: "cpu", tint: .gray, title: "Technical Details")
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                if !app.isGeodeLauncher {
+                    PageCard(title: "Saves", footer: savesFooter) {
+                        Button { backUp() } label: {
+                            PageRow(systemImage: "square.and.arrow.up", tint: .green, title: "Back Up Saves",
+                                    chevron: false)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(savesBusy || !SaveBackup.hasData(app))
+                        .opacity(savesBusy || !SaveBackup.hasData(app) ? 0.45 : 1)
+                        RowDivider(inset: 59)
+                        Button { pickRestore() } label: {
+                            PageRow(systemImage: "clock.arrow.circlepath", tint: .orange, title: "Restore Saves",
+                                    chevron: false)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(savesBusy || loadedNow)
+                        .opacity(savesBusy || loadedNow ? 0.45 : 1)
+                    }
+                }
+
+                PageCard(title: "About") {
+                    VStack(spacing: 12) {
+                        DetailRow(label: "Runs with", value: app.report?.runnerName ?? "Unknown", mono: false)
+                        if let st = statuses.status(app.id) {
+                            HStack {
+                                Text("Last result").foregroundStyle(Theme.textDim)
+                                Spacer()
+                                Label(st.result.label, systemImage: st.result.symbol)
+                                    .foregroundStyle(st.result.color)
+                            }
+                            .font(.system(size: 15))
+                        }
+                        DetailRow(label: "Last played",
+                                  value: app.lastPlayed.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "Never",
+                                  mono: false)
+                        DetailRow(label: "Size", value: fileBytes(app.apks), mono: false)
+                        if let package = app.packageName {
+                            DetailRow(label: "Package", value: package)
+                        }
+                    }
+                    .padding(16)
+                }
+
+                PageCard {
+                    Button { confirmRemove = true } label: {
+                        PageRow(systemImage: "trash.fill", tint: .red, title: "Remove Game", chevron: false,
+                                destructive: true)
+                    }
+                    .buttonStyle(.plain)
                 }
             }
+            .padding(.horizontal, Theme.margin)
+            .padding(.top, 8)
+            .padding(.bottom, 36)
         }
-        .listStyle(.insetGrouped)
+        .scrollIndicators(.hidden)
+        .background(Theme.bg.ignoresSafeArea())
         .navigationTitle(app.label)
         .navigationBarTitleDisplayMode(.inline)
         .fullScreenCover(isPresented: $playing) { TLAttemptView(app: app) }
@@ -208,12 +223,12 @@ struct GamePage: View {
             Text("\(blockedBy ?? "The other game") is still loaded and only one game can run per session. Husk closes; open it again and \(app.label) starts by itself.")
         }
         .confirmationDialog("Remove \(app.label)?", isPresented: $confirmRemove, titleVisibility: .visible) {
-            Button("Remove", role: .destructive) {
+            Button("Remove Game", role: .destructive) {
                 dismiss()
                 store.remove(app)
             }
         } message: {
-            Text("The game and everything it saved here are deleted from Husk.")
+            Text("The game and everything it saved in Husk are deleted.")
         }
         .id(jit.attachGeneration)
         .onAppear {
@@ -223,6 +238,101 @@ struct GamePage: View {
             play()
         }
     }
+
+    // MARK: header
+
+    private var hero: some View {
+        ZStack(alignment: .bottomLeading) {
+            GameArtwork(app: app, pixels: 1200)
+            LinearGradient(colors: [.clear, .black.opacity(0.72)], startPoint: .top, endPoint: .bottom)
+            HStack(alignment: .bottom, spacing: 14) {
+                GameIcon(app: app, size: 84)
+                    .shadow(color: .black.opacity(0.35), radius: 12, y: 5)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(app.label)
+                        .font(.display(24, weight: .heavy))
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.8)
+                        .foregroundStyle(.white)
+                    HStack(spacing: 6) {
+                        Text(app.engineLabel)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 9).padding(.vertical, 4)
+                            .background(.white.opacity(0.2), in: Capsule())
+                        if let played = app.playedText {
+                            Text(played).font(.caption).foregroundStyle(.white.opacity(0.75)).lineLimit(1)
+                        }
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(16)
+        }
+        .frame(height: 230)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.heroCorner, style: .continuous))
+    }
+
+    /// What to say under the button, when there is something.
+    private var note: String? {
+        if app.isGeodeLauncher {
+            return "This is Geode's Android launcher. On Husk, Geode runs inside Geometry Dash instead: turn it on here (or in "
+                 + "Geometry Dash's settings), then start Geometry Dash and use Geode's button on its main menu to get mods. "
+                 + "This APK supplies a library Geode needs, so keep it."
+        }
+        if let other = blockedBy {
+            return "\(other) is still loaded, and a game cannot be unloaded once it has started. Close Husk with the button "
+                 + "above, then open it again to play \(app.label)."
+        }
+        if !app.runs { return "This APK has no 64-bit code Husk can run, so it will probably not start." }
+        return nil
+    }
+
+    private var savesFooter: String {
+        if let savesMessage { return savesMessage }
+        if loadedNow { return "\(app.label) has been started in this run of Husk. Close Husk and open it again to restore saves." }
+        return "A backup is a .zip of everything \(app.label) has saved in Husk, to keep in Files or move to another device."
+    }
+
+    @ViewBuilder
+    private var primary: some View {
+        if app.isGeodeLauncher {
+            if let gd = geometryDash {
+                let on = TLAppSettings.load(gd.id).geode
+                Button {
+                    var s = TLAppSettings.load(gd.id)
+                    s.geode = true
+                    s.save(gd.id)
+                    Task { await GeodeSupport.shared.prepare(gd) }
+                } label: {
+                    Label(on ? "Geode Is On for Geometry Dash" : "Turn On Geode for Geometry Dash",
+                          systemImage: "puzzlepiece.extension.fill")
+                }
+                .buttonStyle(PrimaryButtonStyle(enabled: !on))
+                .disabled(on)
+            } else {
+                Button {} label: { Label("Add Geometry Dash First", systemImage: "plus") }
+                    .buttonStyle(PrimaryButtonStyle(enabled: false))
+                    .disabled(true)
+            }
+        } else if blockedBy != nil {
+            Button { confirmQuit = true } label: { Label("Close Husk to Play", systemImage: "arrow.clockwise") }
+                .buttonStyle(SecondaryButtonStyle())
+        } else if !Launcher.jitOn {
+            if jit.busy {
+                HStack(spacing: 10) { ProgressView(); Text(jit.status ?? "Turning on JIT…").foregroundStyle(.secondary) }
+                    .frame(maxWidth: .infinity).frame(height: 52)
+            } else {
+                Button { turnOnJIT() } label: { Label("Turn On JIT to Play", systemImage: "bolt.fill") }
+                    .buttonStyle(PrimaryButtonStyle())
+            }
+        } else {
+            Button { play() } label: { Label(app.runs ? "Play" : "Try to Run", systemImage: "play.fill") }
+                .buttonStyle(PrimaryButtonStyle())
+        }
+    }
+
+    // MARK: actions
 
     /// Play: with Geode on, whatever it is missing (a newer release, its resources) is fetched first.
     private func play() {
@@ -235,12 +345,6 @@ struct GamePage: View {
             return
         }
         playing = true
-    }
-
-    /// This game's engine is loaded in this run of Husk, so its files may be open: no restoring under it.
-    private var loadedNow: Bool {
-        guard let loaded = husk_native_loaded_apk().map({ String(cString: $0) }) else { return false }
-        return loaded == app.apks.first
     }
 
     private func backUp() {
@@ -278,288 +382,6 @@ struct GamePage: View {
             }
         }
     }
-
-    /// Geode's Android launcher, added as if it were a game: it is a whole Android app, which Husk does not run. On Husk Geode
-    /// is turned on from Geometry Dash's own settings, and this APK only lends it a library.
-    private var isGeodeLauncher: Bool { app.packageName == GeodeSupport.launcherPackage }
-    private var geometryDash: TLApp? { store.apps.first { $0.packageName == GeodeSupport.gamePackage } }
-
-    @ViewBuilder
-    private var primary: some View {
-        if isGeodeLauncher {
-            if let gd = geometryDash {
-                BigButton(title: TLAppSettings.load(gd.id).geode ? "Geode Is On for Geometry Dash" : "Turn On Geode for Geometry Dash",
-                          systemImage: "puzzlepiece.extension.fill", prominent: !TLAppSettings.load(gd.id).geode) {
-                    var s = TLAppSettings.load(gd.id)
-                    s.geode = true
-                    s.save(gd.id)
-                    Task { await GeodeSupport.shared.prepare(gd) }
-                }
-            } else {
-                BigButton(title: "Add Geometry Dash First", systemImage: "plus", prominent: false) { }.disabled(true)
-            }
-        } else if blockedBy != nil {
-            BigButton(title: "Close Husk to Play", systemImage: "xmark.circle", prominent: false) { confirmQuit = true }
-        } else if !Launcher.jitOn {
-            if jit.busy {
-                HStack(spacing: 10) { ProgressView(); Text(jit.status ?? "Turning on JIT…").foregroundStyle(.secondary) }
-                    .frame(maxWidth: .infinity).frame(height: 50)
-            } else {
-                BigButton(title: "Turn On JIT to Play", systemImage: "bolt.fill", action: turnOnJIT)
-            }
-        } else {
-            BigButton(title: runs ? "Play" : "Try to Run", systemImage: "play.fill", prominent: runs) { play() }
-        }
-    }
-}
-
-// MARK: - an app inside Android
-
-/// An app installed in Android: Open (starting Android first when it is not running), what it is, and its files.
-struct AndroidAppPage: View {
-    let app: AndroidHost.Package
-    @ObservedObject private var showcase = ShowcaseStore.shared
-
-    @ObservedObject private var host = AndroidHost.shared
-    @ObservedObject private var guest = GuestImage.shared
-    @ObservedObject private var runner = QemuRunner.shared
-    @ObservedObject private var router = Router.shared
-    @Environment(\.dismiss) private var dismiss
-    @State private var confirmUninstall = false
-
-    private var live: AndroidHost.Package { host.packages.first { $0.name == app.name } ?? app }
-    private var canOpen: Bool { host.isReady && host.busy == nil }
-    private var item: LibraryItem { .app(live) }
-
-    var body: some View {
-        List {
-            Section {
-                PageHero(item: item, subtitle: item.usedText ?? "Runs inside Android") { primary }
-            } footer: {
-                if router.pendingAndroidLaunch == app.name, !host.isReady {
-                    Text("\(live.label) opens by itself once Android has started.")
-                }
-            }
-            .heroRow()
-
-            if !ShowcaseStore.shared.pictures(for: app.name).isEmpty {
-                Section("Screenshots") {
-                    ShowcaseGallery(package: app.name)
-                        .listRowInsets(EdgeInsets(top: 10, leading: 12, bottom: 10, trailing: 12))
-                }
-            }
-
-            Section("About") {
-                LabeledContent("Version", value: live.version ?? "—")
-                LabeledContent("Size", value: live.sizeBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "—")
-                LabeledContent("Package", value: live.name)
-                if let b = live.bitness { LabeledContent("Architecture", value: b) }
-            }
-
-            Section {
-                Button { router.openFiles(at: "/sdcard/Android/data/\(app.name)") } label: {
-                    Label("Open in Files", systemImage: "folder")
-                }
-                .disabled(!canOpen)
-                Button { appInfo() } label: {
-                    Label("Android App Info", systemImage: "info.circle")
-                }
-                .disabled(!canOpen)
-                Button { UIPasteboard.general.string = app.name } label: {
-                    Label("Copy Package Name", systemImage: "doc.on.doc")
-                }
-            }
-
-            Section {
-                Button(role: .destructive) { confirmUninstall = true } label: {
-                    Label("Uninstall", systemImage: "trash")
-                }
-                .disabled(!canOpen)
-            } footer: {
-                if !canOpen { Text("Start Android to uninstall or look inside the app.") }
-            }
-        }
-        .listStyle(.insetGrouped)
-        .navigationTitle(live.label)
-        .navigationBarTitleDisplayMode(.inline)
-        .confirmationDialog("Uninstall \(live.label)?", isPresented: $confirmUninstall, titleVisibility: .visible) {
-            Button("Uninstall", role: .destructive) {
-                host.uninstall(app.name)
-                dismiss()
-            }
-        } message: {
-            Text("Its data goes with it.")
-        }
-    }
-
-    @ViewBuilder
-    private var primary: some View {
-        if canOpen {
-            BigButton(title: "Open", systemImage: "play.fill") {
-                host.launch(app.name) { router.openGuest() }
-            }
-        } else if router.androidStarted {
-            VStack(spacing: 10) {
-                BigButton(title: "Starting Android…", systemImage: "hourglass", prominent: false) { }
-                    .disabled(true)
-                if runner.bootProgress > 0 { ProgressView(value: Double(runner.bootProgress), total: 100) }
-            }
-        } else if guest.state == .ready {
-            BigButton(title: Launcher.jitOn ? "Start Android and Open" : "Turn On JIT", systemImage: Launcher.jitOn ? "play.fill" : "bolt.fill") {
-                if Launcher.jitOn { router.pendingAndroidLaunch = app.name }
-                router.startAndroid()
-            }
-        } else {
-            NavigationLink(value: LibraryRoute.androidSystem) {
-                Label("Get Android First", systemImage: "arrow.down.circle")
-                    .font(.system(.headline, design: .rounded))
-                    .frame(maxWidth: .infinity).frame(height: 50)
-                    .foregroundStyle(.white)
-                    .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-            }
-            .buttonStyle(CardButtonStyle())
-        }
-    }
-
-    /// Android's own page for the app: permissions, storage, force stop.
-    private func appInfo() {
-        let pkg = app.name
-        DispatchQueue.global(qos: .userInitiated).async {
-            _ = try? GuestBridge.shared.shell("am start -a android.settings.APPLICATION_DETAILS_SETTINGS -d package:\(pkg)", timeout: 30)
-        }
-        router.openGuest()
-    }
-}
-
-// MARK: - Android itself
-
-/// The whole Android system, as an app of its own: get it, start it, open it, and its settings.
-struct AndroidSystemPage: View {
-    @ObservedObject private var guest = GuestImage.shared
-    @ObservedObject private var runner = QemuRunner.shared
-    @ObservedObject private var host = AndroidHost.shared
-    @ObservedObject private var router = Router.shared
-    @ObservedObject private var jit = JITCoordinator.shared
-
-    private var running: Bool { router.androidStarted }
-
-    var body: some View {
-        List {
-            Section {
-                PageHero(item: .android, subtitle: status) {
-                    VStack(spacing: 10) {
-                        primary
-                        if let progress { ProgressView(value: progress) }
-                    }
-                }
-            } footer: {
-                if let note { Text(note) }
-            }
-            .heroRow()
-
-            if host.isReady {
-                Section {
-                    Button { router.openFiles(at: FilesTab.root) } label: { Label("Files", systemImage: "folder") }
-                    Button { runner.saveState(reason: "asked from the Android page") } label: {
-                        Label(runner.isSavingState ? "Saving…" : "Save Android Now", systemImage: "externaldrive.badge.checkmark")
-                    }
-                    .disabled(runner.isSavingState)
-                } footer: {
-                    Text("Saving keeps Android exactly as it is, so the next start skips booting.")
-                }
-            }
-
-            Section("Settings") {
-                NavigationLink { PerformanceSettings() } label: { Label("Performance", systemImage: "speedometer") }
-                NavigationLink { InputSettings() } label: { Label("Input", systemImage: "hand.tap") }
-                NavigationLink { NetworkSettings() } label: { Label("Network", systemImage: "globe") }
-                NavigationLink { SavedMachineSettings() } label: { Label("Saved Machine", systemImage: "externaldrive") }
-            }
-
-            Section {
-                Text("Android runs fully emulated, so it is slower than games on the translation layer. Use it for apps "
-                   + "Husk cannot run directly, like Termux or app stores.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .listStyle(.insetGrouped)
-        .navigationTitle("Android")
-        .navigationBarTitleDisplayMode(.inline)
-        .animation(.easeInOut(duration: 0.2), value: status)
-    }
-
-    private var status: String {
-        if running {
-            if host.isReady { return "Running" }
-            return runner.setupMessage ?? (runner.bootProgress > 0 ? "Starting · \(runner.bootProgress)%" : "Starting…")
-        }
-        switch guest.state {
-        case .missing: return "Not downloaded yet"
-        case .downloading(_, let received, let total):
-            return "Downloading · \(bytes(received)) of \(total > 0 ? bytes(total) : "…")"
-        case .installing: return "Installing…"
-        case .failed: return "Something went wrong"
-        case .ready: return Launcher.jitOn ? "Ready to start" : "Needs JIT to start"
-        }
-    }
-
-    private var progress: Double? {
-        if running, !host.isReady, runner.bootProgress > 0 { return Double(runner.bootProgress) / 100 }
-        if !running, case .downloading(let p, _, _) = guest.state { return p }
-        return nil
-    }
-
-    private var note: String? {
-        guard !running else { return nil }
-        switch guest.state {
-        case .missing: return "Husk's Android runtime is about 760 MB. Android itself follows once it is installed."
-        case .failed(let message): return message
-        default: return nil
-        }
-    }
-
-    @ViewBuilder
-    private var primary: some View {
-        if running {
-            if host.isReady {
-                BigButton(title: "Open Android", systemImage: "play.fill") { open() }
-            } else {
-                BigButton(title: "Watch It Start", systemImage: "eye", prominent: false) { open() }
-            }
-        } else {
-            switch guest.state {
-            case .missing:
-                BigButton(title: "Download Android", systemImage: "arrow.down.circle") {
-                    // Claim the JIT region before the download: it takes a while, and StikDebug lets go by the end of it.
-                    JITBootstrap.prewarm()
-                    guest.download()
-                }
-            case .downloading:
-                BigButton(title: "Cancel Download", systemImage: "xmark", prominent: false) { guest.cancel() }
-            case .installing:
-                ProgressView().frame(height: 50)
-            case .failed:
-                BigButton(title: "Try Again", systemImage: "arrow.clockwise") { JITBootstrap.prewarm(); guest.download() }
-            case .ready:
-                if jit.busy {
-                    HStack(spacing: 10) { ProgressView(); Text(jit.status ?? "Turning on JIT…").foregroundStyle(.secondary) }
-                        .frame(maxWidth: .infinity).frame(height: 50)
-                } else {
-                    BigButton(title: Launcher.jitOn ? "Start Android" : "Turn On JIT", systemImage: Launcher.jitOn ? "power" : "bolt.fill") {
-                        router.startAndroid()
-                    }
-                }
-            }
-        }
-    }
-
-    private func open() {
-        UserDefaults.standard.set(Date(), forKey: "husk.android.lastOpened")
-        router.openGuest()
-    }
-
-    private func bytes(_ n: Int64) -> String { ByteCountFormatter.string(fromByteCount: n, countStyle: .file) }
 }
 
 /// A URL that a sheet can be presented for.

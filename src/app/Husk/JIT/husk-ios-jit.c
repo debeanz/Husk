@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * Husk -- iOS dual-mapped JIT memory for QEMU's TCG.  See husk-ios-jit.h.
+ * Husk -- iOS dual-mapped JIT memory for the translation layer.  See husk-ios-jit.h.
  *
  * Derived from AetherPS4-iOS's src/core/ios/ios_jit_allocator.cpp
  * (shadPS4 Emulator Project, GPL-2.0-or-later), ported C++ -> C.
@@ -33,52 +33,14 @@
 #include <unistd.h>
 #include <fcntl.h>
 
-/*
- * Provide pipe2 for iOS systems where libc does not export it.
- */
-__attribute__((visibility("default")))
-int pipe2(int fds[2], int flags)
-{
-    if (!fds) {
-        errno = EFAULT;
-        return -1;
-    }
-    if (pipe(fds) < 0) {
-        return -1;
-    }
-    if (flags & O_CLOEXEC) {
-        if (fcntl(fds[0], F_SETFD, FD_CLOEXEC) < 0 ||
-            fcntl(fds[1], F_SETFD, FD_CLOEXEC) < 0) {
-            int err = errno;
-            close(fds[0]);
-            close(fds[1]);
-            errno = err;
-            return -1;
-        }
-    }
-    if (flags & O_NONBLOCK) {
-        int f0 = fcntl(fds[0], F_GETFL);
-        int f1 = fcntl(fds[1], F_GETFL);
-        if (f0 < 0 || f1 < 0 ||
-            fcntl(fds[0], F_SETFL, f0 | O_NONBLOCK) < 0 ||
-            fcntl(fds[1], F_SETFL, f1 | O_NONBLOCK) < 0) {
-            int err = errno;
-            close(fds[0]);
-            close(fds[1]);
-            errno = err;
-            return -1;
-        }
-    }
-    return 0;
-}
-
-/* TCG's own W^X toggle. pthread_jit_write_protect_np() is marked unavailable in
- * the iOS SDK -- the symbol exists but the header refuses it -- so QEMU pokes
- * the APRR registers through the comm page instead. This file is compiled
- * inside QEMU's tcg/ directory, so the same header is the right one to use, and
- * using anything else would risk testing a different mechanism from the one the
- * emulator will actually run on. */
-#include "tcg/tcg-apple-jit.h"
+/* The W^X toggle the MAP_JIT probe brackets its write with. This file used to be
+ * compiled inside QEMU's tcg/ directory against tcg/tcg-apple-jit.h, whose APRR
+ * path is guarded by CONFIG_DARWIN -- a macro from QEMU's config-host.h, which
+ * this file never included. The guard was therefore always false here and the
+ * header's no-op fallbacks were what ran. They are kept as they were, so the
+ * probe behaves exactly as it did before the move into the app. */
+static inline bool jit_write_protect_supported(void) { return false; }
+static inline void jit_write_protect(int enabled) { (void)enabled; }
 
 /* Maximum verbosity by default: this path is nearly impossible to debug after the
  * fact on device, and every line here is printed at most a handful of times per
@@ -312,6 +274,14 @@ HUSK_EXPORT bool husk_ios_jit_prewarm(size_t bytes)
     fprintf(stderr, "[husk-jit] prewarm %s: %zu bytes\n",
             husk_prewarmed.rw_addr ? "OK" : "FAILED", bytes);
     return husk_prewarmed.rw_addr != NULL;
+}
+
+/* The prewarmed region itself, for the translation layer's loader, which places
+ * a game's libraries in it (husk-tl-load.c, tl_find_stikdebug_prewarmed). NULL
+ * until a prewarm has succeeded. */
+HUSK_EXPORT __attribute__((used)) HuskDualMapping *husk_ios_jit_get_mapping(void)
+{
+    return husk_prewarmed.rw_addr ? &husk_prewarmed : NULL;
 }
 
 HuskDualMapping husk_ios_jit_allocate(size_t bytes)
@@ -636,6 +606,7 @@ HuskDualMapping husk_ios_jit_allocate(size_t bytes)
     return husk_ios_jit_allocate_real(bytes);
 }
 bool husk_ios_jit_prewarm(size_t bytes) { (void)bytes; return false; }
+HuskDualMapping *husk_ios_jit_get_mapping(void) { return NULL; }
 void husk_ios_jit_release(HuskDualMapping *m) { (void)m; }
 void husk_ios_jit_detach(void) {}
 bool husk_ios_jit_is_available(void) { return false; }
