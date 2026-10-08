@@ -28,6 +28,8 @@ static struct {
     tl_unity_config cfg;
     jobj *activity;          /* the Context handed to the engine */
     jobj *player;            /* the UnityPlayer object natives are called on */
+    const char *player_class; /* the class its natives were registered on: UnityPlayer, or a subclass in newer Unity */
+    bool ui_looper;          /* the starting thread has Android's UI-thread looper and goes on running it */
     atomic_ulong frames;
     atomic_bool stop;
     atomic_bool paused;
@@ -40,12 +42,38 @@ static struct {
 
 typedef int32_t (*onload_fn)(void *vm, void *reserved);
 
+void *tl_looper_prepare_here(void);
+
 static void *native_of(const char *cls, const char *name, const char *sig)
 {
     void *fn = tl_jni_native(cls, name, sig);
+    if (!fn) {
+        /* Newer engines can register a method on another class than the one an older Unity used: take it from there. */
+        const char *owner = tl_jni_native_owner(name, sig);
+        if (owner) {
+            fn = tl_jni_native(owner, name, sig);
+            tl_log_line("unity: native %s%s is registered on %s, not %s; using it", name, sig, owner, cls);
+        }
+    }
     if (!fn) tl_log_line("unity: native %s.%s%s was not registered", cls, name, sig);
     return fn;
 }
+
+/* Unity 2023 and later: the player is split into subclasses (for an Activity or a Service, and for GameActivity), and the
+ * engine expects the UI thread to have a native looper ("Couldn't retrieve native ALooper for UI thread"). */
+static bool newer_unity(void)
+{
+    static const char *const marks[] = {
+        "com/unity3d/player/UnityPlayerForActivityOrService",
+        "com/unity3d/player/UnityPlayerForGameActivity",
+        "com/unity3d/player/UnityPlayerGameActivity",
+    };
+    for (size_t i = 0; i < sizeof(marks) / sizeof(marks[0]); i++)
+        if (tl_dexidx_has_class(marks[i])) { tl_log_line("unity: %s is in the APK: a Unity of 2023 or later", marks[i]); return true; }
+    return false;
+}
+
+bool tl_unity_ui_looper(void) { return U.ui_looper; }
 
 bool tl_unity_start(const tl_unity_config *cfg)
 {
@@ -54,6 +82,14 @@ bool tl_unity_start(const tl_unity_config *cfg)
     tl_nwindow_configure(cfg->width, cfg->height, cfg->metal_layer);
     int n = tl_dexidx_open(cfg->apk_path);
     tl_log_line("unity: %d classes in the APK's DEX", n);
+    U.player_class = "com/unity3d/player/UnityPlayer";
+    /* This thread is the one Android would load the engine on: the UI thread. A newer Unity looks for that thread's
+     * looper as its libraries load, so it gets one first, and the thread goes on running it (husk-tl-unity-app.c). */
+    if (newer_unity()) {
+        tl_looper_prepare_here();
+        U.ui_looper = true;
+        tl_log_line("unity: the starting thread is the UI thread, with a looper");
+    }
     if (!tl_ld_add_apk(cfg->apk_path)) return false;
     if (cfg->angle_egl && !tl_egl_init(cfg->angle_egl, cfg->angle_gles, cfg->frame_dir, cfg->frame_every)) return false;
     tl_jni_init();
@@ -80,6 +116,18 @@ bool tl_unity_start(const tl_unity_config *cfg)
     jobj *dir = tl_jni_new_string("/data/app/lib/arm64");
     uint8_t ok = load(tl_jni_env(), tl_jni_class_object("com/unity3d/player/NativeLoader"), dir);
     tl_log_line("unity: NativeLoader.load -> %d", ok);
+    /* Where the engine put the player's natives: UnityPlayer in older Unity, a subclass of it in newer ones. The player
+     * object the natives are called on is made of that class, as Android would have made it. */
+    if (ok && !tl_jni_native(U.player_class, "nativeRender", "()Z")) {
+        const char *owner = tl_jni_native_owner("nativeRender", "()Z");
+        if (owner) {
+            tl_log_line("unity: the player's natives are on %s", owner);
+            U.player_class = owner;
+            U.player = tl_jni_new_object(tl_jni_class(owner));
+        } else {
+            tl_log_line("unity: no class has nativeRender registered: this Unity drives its frames some other way");
+        }
+    }
     return ok != 0;
 }
 
@@ -96,7 +144,7 @@ static void call_native_on(const char *cls, jobj *self, const char *name, const 
 }
 static void call_native(const char *name, const char *sig, uintptr_t a, uintptr_t b)
 {
-    call_native_on("com/unity3d/player/UnityPlayer", U.player, name, sig, a, b);
+    call_native_on(U.player_class, U.player, name, sig, a, b);
 }
 #define NATIVE_VOID(name, sig, a, b) call_native(name, sig, (uintptr_t)(a), (uintptr_t)(b))
 
@@ -123,7 +171,7 @@ static void *unity_main(void *arg)
         tl_log_line("unity: told the engine the volume (7 of 15) and that sound is on");
     }
 
-    void *render = native_of("com/unity3d/player/UnityPlayer", "nativeRender", "()Z");
+    void *render = native_of(U.player_class, "nativeRender", "()Z");
     bool was_paused = false;
     while (render && !atomic_load(&U.stop)) {
         if (atomic_load(&U.paused)) {
@@ -191,8 +239,8 @@ static int64_t uptime_ms(void) { struct timespec ts; clock_gettime(CLOCK_MONOTON
 void tl_unity_touch(int phase, int id, float x, float y)
 {
     typedef uint8_t (*inject_fn)(void *env, void *self, void *event, uintptr_t source);
-    inject_fn fn = (inject_fn)native_of("com/unity3d/player/UnityPlayer", "nativeInjectEvent", "(Landroid/view/InputEvent;I)Z");
-    if (!fn) fn = (inject_fn)native_of("com/unity3d/player/UnityPlayer", "nativeInjectEvent", "(Landroid/view/InputEvent;)Z");
+    inject_fn fn = (inject_fn)native_of(U.player_class, "nativeInjectEvent", "(Landroid/view/InputEvent;I)Z");
+    if (!fn) fn = (inject_fn)native_of(U.player_class, "nativeInjectEvent", "(Landroid/view/InputEvent;)Z");
     if (!fn) return;
     pthread_mutex_lock(&T.lock);
     int idx = -1;
@@ -240,8 +288,8 @@ static void inject(jobj *ev)
 {
     typedef uint8_t (*inject_fn)(void *env, void *self, void *event, uintptr_t source);
     /* The newer players take (InputEvent, int), older ones only the event; the extra argument is harmless to those. */
-    inject_fn fn = (inject_fn)native_of("com/unity3d/player/UnityPlayer", "nativeInjectEvent", "(Landroid/view/InputEvent;I)Z");
-    if (!fn) fn = (inject_fn)native_of("com/unity3d/player/UnityPlayer", "nativeInjectEvent", "(Landroid/view/InputEvent;)Z");
+    inject_fn fn = (inject_fn)native_of(U.player_class, "nativeInjectEvent", "(Landroid/view/InputEvent;I)Z");
+    if (!fn) fn = (inject_fn)native_of(U.player_class, "nativeInjectEvent", "(Landroid/view/InputEvent;)Z");
     if (fn) { fn(tl_jni_env(), U.player, ev, 0); if (tl_jni_pending()) tl_jni_clear(); }
     tl_jni_unref(ev);
 }

@@ -320,8 +320,17 @@ static void *launch_thread(void *arg)
      * This thread loaded the game's libraries and ran their JNI_OnLoad, which on Android is the UI thread, and that thread
      * never ends. Some code relies on it: Geode 5 takes this thread as the game's main thread and keeps thread-local state
      * on it, and ending the thread ran that state's cleanup, which freed what was not its to free and took Husk down
-     * (Geometry Dash 2.2081, a SIGTRAP from libmalloc right after the sound started). So it stays, asleep.
+     * (Geometry Dash 2.2081, a SIGTRAP from libmalloc right after the sound started). So it stays, asleep -- or, for a newer
+     * Unity that was given this thread's looper, running it, as Android's UI thread runs its own.
      */
+    if (A.engine == ENGINE_UNITY && tl_unity_ui_looper()) {
+        extern int tl_looper_poll_here(int timeout_ms);
+        for (;;) {
+            int r = tl_looper_poll_here(1000);
+            if (r == -4) break;                 /* no looper after all */
+            if (r >= 0) usleep(1000);           /* a ready descriptor nobody here handles: do not spin on it */
+        }
+    }
     for (;;) pause();
 }
 

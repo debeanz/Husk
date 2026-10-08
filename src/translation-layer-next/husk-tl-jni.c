@@ -478,6 +478,8 @@ static jo jni_FindClass(void *env, const char *name)
         return tl_jni_class(name)->mirror;
     }
     TRACE("jni: FindClass(%s) -> NoClassDefFoundError", name);
+    /* An engine's own class that is not in the APK is worth knowing about whatever the trace level. */
+    if (!strncmp(name, "com/unity3d/", 12)) tl_log_line("jni: FindClass(%s): not in the APK", name);
     char msg[200]; snprintf(msg, sizeof(msg), "%s", name);
     tl_jni_throw("java/lang/NoClassDefFoundError", msg);
     return NULL;
@@ -859,6 +861,10 @@ static int32_t jni_RegisterNatives(void *env, jo cls, const native_method *m, in
     (void)env;
     if (!cls || cls->kind != TL_K_CLASS) return -1;
     tl_jclass *c = cls->klass.jc;
+    /* One line per call, naming what was registered: which class an engine puts its entry points on is what a driver
+     * depends on, and it changes between engine versions. */
+    char line[900];
+    int len = snprintf(line, sizeof(line), "jni: %d native(s) on %s:", (int)n, c->name);
     pthread_mutex_lock(&g_lock);
     for (int32_t i = 0; i < n; i++) {
         c->natives = realloc(c->natives, (size_t)(c->nnatives + 1) * sizeof(*c->natives));
@@ -866,10 +872,26 @@ static int32_t jni_RegisterNatives(void *env, jo cls, const native_method *m, in
         c->natives[c->nnatives].sig = strdup(m[i].sig);
         c->natives[c->nnatives].fn = m[i].fn;
         c->nnatives++;
+        if (len > 0 && len < (int)sizeof(line) - 2) len += snprintf(line + len, sizeof(line) - (size_t)len, " %s", m[i].name);
         TRACE("jni: RegisterNatives %s.%s%s -> %p", c->name, m[i].name, m[i].sig, m[i].fn);
     }
     pthread_mutex_unlock(&g_lock);
+    tl_log_line("%s", line);
     return 0;
+}
+
+/* The class a native of this name (and signature, if given) was registered on, whichever class that is: for a driver whose
+ * engine put its entry points somewhere other than where an older version did. */
+const char *tl_jni_native_owner(const char *name, const char *sig)
+{
+    const char *owner = NULL;
+    pthread_mutex_lock(&g_lock);
+    for (int b = 0; b < NBUCKETS && !owner; b++)
+        for (tl_jclass *c = g_classes[b]; c && !owner; c = c->next)
+            for (int i = 0; i < c->nnatives; i++)
+                if (!strcmp(c->natives[i].name, name) && (!sig || !strcmp(c->natives[i].sig, sig))) { owner = c->name; break; }
+    pthread_mutex_unlock(&g_lock);
+    return owner;
 }
 static int32_t jni_UnregisterNatives(void *env, jo cls) { (void)env; (void)cls; return 0; }
 

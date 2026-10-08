@@ -34,6 +34,10 @@ bool tl_unity_start(const tl_unity_config *cfg);
 /* Start the UnityMain thread and begin rendering frames. */
 bool tl_unity_run(void);
 
+/* Whether the thread that ran tl_unity_start has Android's UI-thread looper (a Unity of 2023 or later), which the caller
+ * then keeps running on that thread. */
+bool tl_unity_ui_looper(void);
+
 /* Frames rendered so far. */
 unsigned long tl_unity_frames(void);
 

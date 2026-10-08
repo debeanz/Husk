@@ -50,6 +50,12 @@ static tl_looper *looper_make(void)
 }
 static void *b_ALooper_prepare(int opts) { (void)opts; if (!t_looper) t_looper = looper_make(); return t_looper; }
 static void *b_ALooper_forThread(void) { return t_looper; }
+static int b_ALooper_pollOnce(int timeout_ms, int *out_fd, int *out_events, void **out_data);
+
+/* For a driver whose thread plays Android's UI thread: give it the looper Android's main thread always has... */
+void *tl_looper_prepare_here(void) { return b_ALooper_prepare(0); }
+/* ...and run it: dispatch what is ready on it, waiting up to timeout_ms. ALOOPER_POLL_ERROR (-4) when there is none. */
+int tl_looper_poll_here(int timeout_ms) { return b_ALooper_pollOnce(timeout_ms, NULL, NULL, NULL); }
 static void b_ALooper_acquire(tl_looper *l) { if (l) atomic_fetch_add(&l->refs, 1); }
 static void b_ALooper_release(tl_looper *l) { (void)l; }
 static void b_ALooper_wake(tl_looper *l)
