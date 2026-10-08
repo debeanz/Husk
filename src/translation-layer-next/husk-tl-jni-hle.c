@@ -750,6 +750,9 @@ static void AudioManager_requestAudioFocus(tl_jcall *c) { c->ret = vi(1); /* AUD
 static void Uri_encode(tl_jcall *c) { c->ret = vl(STR(S(c->args[0].l))); }
 static void PAD_init(tl_jcall *c) { c->ret = vl(make("com/unity3d/player/PlayAssetDeliveryUnityWrapper")); }
 static void PAD_playCoreApiMissing(tl_jcall *c) { c->ret = vz(1); }
+/* "All files access" (MANAGE_EXTERNAL_STORAGE): a game has its whole /sdcard here, so it has it. Asked no, a game opens Settings to ask for it
+ * and waits (Hades). */
+static void Env_isExternalStorageManager(tl_jcall *c) { c->ret = vz(1); }
 /*
  * FMOD Ex's Java output (org.fmod.FMODAudioDevice), which Unity's audio uses on Android. In Java, start() runs a thread that
  * asks the native mixer for each next block -- fmodProcess(ByteBuffer) fills a direct buffer and returns FMOD_OK (0) -- and
@@ -983,6 +986,9 @@ static const tl_jhle k_hle[] = {
     M("android/content/pm/PackageManager", "getPackageInfo", "(Ljava/lang/String;I)Landroid/content/pm/PackageInfo;", PM_getPackageInfo),
     M("android/os/Environment", "getExternalStorageState", "()Ljava/lang/String;", Env_getExternalStorageState),
     M("android/os/Environment", "getExternalStorageDirectory", "()Ljava/io/File;", Env_getExternalStorageDirectory),
+    M("android/os/Environment", "isExternalStorageManager", "()Z", Env_isExternalStorageManager),
+    M("android/os/Environment", "isExternalStorageManager", "(Ljava/io/File;)Z", Env_isExternalStorageManager),
+    M("android/os/Environment", "isExternalStorageLegacy", "()Z", Env_isExternalStorageManager),
     M("android/os/Process", "setThreadPriority", "(II)V", Process_setThreadPriority),
     M("android/os/Process", "myPid", "()I", Process_myPid), M("android/os/Process", "myTid", "()I", Process_myTid),
     M("java/lang/Object", "getClass", "()Ljava/lang/Class;", Object_getClass),

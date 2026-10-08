@@ -149,6 +149,23 @@ const char *tl_path_resolve(const char *path, char *buf, size_t n)
     return path;
 }
 
+/*
+ * A file a game looks for in shared storage (/sdcard) and does not find: always worth a line, once each, whatever the trace level. Ports that
+ * run on a copy of the PC game read its files from there, and this is how the player learns where to put them.
+ */
+static void note_missing(const char *what, const char *path)
+{
+    if (!path || (strncmp(path, "/sdcard", 7) && strncmp(path, "/storage/", 9))) return;
+    static char said[40][160]; static int nsaid; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&mu);
+    bool seen = false;
+    for (int i = 0; i < nsaid && !seen; i++) seen = !strncmp(said[i], path, sizeof(said[0]) - 1);
+    if (!seen && nsaid < 40) {
+        snprintf(said[nsaid++], sizeof(said[0]), "%s", path);
+        tl_log_line("file: the game looked for %s (%s) and it is not there", path, what);
+    }
+    pthread_mutex_unlock(&mu);
+}
 
 /* ------------------------------------------------------------ virtual files */
 
@@ -402,6 +419,7 @@ static int b_open(const char *path, int flags, unsigned mode)
     int e = errno;
     TL_ERRNO_END();
     { static int tr = -1; if (tr < 0) tr = getenv("TL_FILE_TRACE") ? atoi(getenv("TL_FILE_TRACE")) : 0; if (tr) tl_log_line("file: open(%s, %#x) -> %d%s", path, flags, fd, fd < 0 ? (e == ENOENT ? " ENOENT" : " error") : ""); }
+    if (fd < 0 && e == ENOENT) note_missing("open", path);
     return fd;
 }
 static int b___open_2(const char *path, int flags) { return b_open(path, flags, 0); }
@@ -480,6 +498,19 @@ static long b_lseek(int fd, long off, int whence)
 static int b_dup(int fd) { TL_ERRNO_BEGIN(); int r = dup(fd); TL_ERRNO_END(); return r; }
 static int b_dup2(int a, int b) { TL_ERRNO_BEGIN(); int r = dup2(a, b); if (r >= 0 && a != b) tl_atomic_closed(b); TL_ERRNO_END(); return r; }
 static int b_pipe(int fds[2]) { TL_ERRNO_BEGIN(); int r = pipe(fds); TL_ERRNO_END(); return r; }
+/* pipe2(fds, flags), with Linux's flags: O_CLOEXEC is 02000000 and O_NONBLOCK 04000. NativeActivity's app glue makes the pipe that carries the
+ * activity's events to the game's main loop with it (Hades); without it the game never hears that it has a window. */
+static int b_pipe2(int fds[2], int flags)
+{
+    TL_ERRNO_BEGIN();
+    int r = pipe(fds);
+    if (r == 0) for (int i = 0; i < 2; i++) {
+        if (flags & 02000000) fcntl(fds[i], F_SETFD, FD_CLOEXEC);
+        if (flags & 04000) fcntl(fds[i], F_SETFL, fcntl(fds[i], F_GETFL) | O_NONBLOCK);
+    }
+    TL_ERRNO_END();
+    return r;
+}
 static int b_fsync(int fd) { TL_ERRNO_BEGIN(); int r = fsync(fd); TL_ERRNO_END(); return r; }
 static int b_ftruncate(int fd, long n) { TL_ERRNO_BEGIN(); int r = ftruncate(fd, n); TL_ERRNO_END(); return r; }
 static int b_truncate(const char *p, long n) { char b[1024]; TL_ERRNO_BEGIN(); int r = truncate(tl_path_resolve(p, b, sizeof(b)), n); TL_ERRNO_END(); return r; }
@@ -497,6 +528,7 @@ static void ftrace(const char *what, const char *path, int r, int e)
     static int tr = -1;
     if (tr < 0) tr = getenv("TL_FILE_TRACE") ? atoi(getenv("TL_FILE_TRACE")) : 0;
     if (tr) tl_log_line("file: %s(%s) -> %d%s", what, path ? path : "(null)", r, r < 0 ? (e == ENOENT ? " ENOENT" : " error") : "");
+    if (r < 0 && e == ENOENT) note_missing(what, path);
 }
 static int b_access(const char *p, int m) { char b[1024]; jar_entry jar; if (jar_lookup(p, &jar)) { if (!jar.found) { tl_set_guest_errno(2); return -1; } if (m & 2) { tl_set_guest_errno(13); return -1; } return 0; } if (vfile_find(p)) { if (m & 2) { tl_set_guest_errno(13); return -1; } return 0; } TL_ERRNO_BEGIN(); int r = access(tl_path_resolve(p, b, sizeof(b)), m); int e = errno; TL_ERRNO_END(); ftrace("access", p, r, e); return r; }
 static int b_chmod(const char *p, unsigned m) { char b[1024]; TL_ERRNO_BEGIN(); int r = chmod(tl_path_resolve(p, b, sizeof(b)), (mode_t)m); TL_ERRNO_END(); return r; }
@@ -1240,7 +1272,7 @@ const tl_bionic_entry tl_tab_io[] = {
     TL_WRAP("open", b_open), TL_WRAP("__open_2", b___open_2), TL_WRAP("close", b_close), TL_WRAP("read", b_read),
     TL_WRAP("__read_chk", b___read_chk), TL_WRAP("write", b_write), TL_WRAP("writev", b_writev),
     TL_WRAP("pread64", b_pread64), TL_WRAP("pwrite64", b_pwrite64), TL_WRAP("__pread64_chk", b___pread64_chk), TL_WRAP("__pwrite64_chk", b___pwrite64_chk), TL_WRAP("__pwrite_chk", b___pwrite64_chk), TL_WRAP("__pread_chk", b___pread64_chk), TL_WRAP("lseek", b_lseek), TL_WRAP("lseek64", b_lseek),
-    TL_WRAP("dup", b_dup), TL_WRAP("dup2", b_dup2), TL_WRAP("pipe", b_pipe), TL_WRAP("fsync", b_fsync), TL_WRAP("fdatasync", b_fsync),
+    TL_WRAP("dup", b_dup), TL_WRAP("dup2", b_dup2), TL_WRAP("pipe", b_pipe), TL_WRAP("pipe2", b_pipe2), TL_WRAP("fsync", b_fsync), TL_WRAP("fdatasync", b_fsync),
     TL_WRAP("ftruncate", b_ftruncate), TL_WRAP("truncate", b_truncate), TL_WRAP("isatty", b_isatty), TL_WRAP("flock", b_flock),
     TL_WRAP("unlink", b_unlink), TL_WRAP("rmdir", b_rmdir), TL_WRAP("mkdir", b_mkdir), TL_WRAP("access", b_access),
     TL_WRAP("chmod", b_chmod), TL_WRAP("fchmod", b_fchmod), TL_WRAP("link", b_link), TL_WRAP("symlink", b_symlink),
