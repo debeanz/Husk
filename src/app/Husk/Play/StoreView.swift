@@ -96,19 +96,22 @@ struct StoreView: View {
     // MARK: - Signed Out State
 
     private var signedOutState: some View {
-        VStack(spacing: 20) {
+        VStack(spacing: 22) {
             Spacer()
 
-            Image(systemName: "cart.fill")
-                .font(.system(size: 64))
-                .foregroundStyle(Color.accentColor)
+            Image(systemName: "bag.fill")
+                .font(.system(size: 38, weight: .semibold))
+                .foregroundStyle(Theme.accent)
+                .frame(width: 96, height: 96)
+                .background(Theme.accentSoft, in: Circle())
 
             VStack(spacing: 8) {
-                Text("Google Play Store")
-                    .font(.title2.weight(.bold))
+                Text("Google Play")
+                    .font(.display(28, weight: .heavy))
                     .foregroundStyle(Theme.text)
 
-                Text("Browse and download apps using an anonymous Aurora guest account, or sign in with your Google account.")
+                Text("Download games from Google Play with an anonymous guest account, or sign in with your own. "
+                   + "Downloads go straight to your Library.")
                     .font(.subheadline)
                     .foregroundStyle(Theme.textDim)
                     .multilineTextAlignment(.center)
@@ -124,40 +127,26 @@ struct StoreView: View {
                 }
                 .padding(.top, 12)
             } else {
-                VStack(spacing: 12) {
-                    // Aurora Guest Button
+                VStack(spacing: 10) {
                     Button {
                         Task {
                             await manager.signInAsGuest()
                         }
                     } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: "person.crop.circle.badge.checkmark")
-                            Text("Use Guest Account")
-                        }
-                        .font(.headline)
-                        .frame(maxWidth: 240)
-                        .padding(.vertical, 12)
+                        Label("Use Guest Account", systemImage: "person.crop.circle.badge.checkmark")
                     }
-                    .buttonStyle(.borderedProminent)
-                    .buttonBorderShape(.capsule)
+                    .buttonStyle(PrimaryButtonStyle())
 
-                    // Google Account Button
                     Button {
                         showSignIn = true
                     } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: "person.badge.key")
-                            Text("Sign In with Google")
-                        }
-                        .font(.subheadline.weight(.medium))
-                        .frame(maxWidth: 240)
-                        .padding(.vertical, 10)
+                        Label("Sign In with Google", systemImage: "person.badge.key")
                     }
-                    .buttonStyle(.bordered)
-                    .buttonBorderShape(.capsule)
+                    .buttonStyle(SecondaryButtonStyle())
                 }
-                .padding(.top, 8)
+                .frame(maxWidth: 340)
+                .padding(.horizontal, 28)
+                .padding(.top, 6)
             }
 
             Spacer()
@@ -198,7 +187,9 @@ struct StoreView: View {
                             appRow(app)
                         }
                     } header: {
-                        Text("Featured Apps")
+                        Text("Featured")
+                    } footer: {
+                        Text("Downloads are added to your Library. Games need 64-bit (arm64) code to run.")
                     }
                 } else {
                     Section {

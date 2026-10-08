@@ -8,22 +8,23 @@
 
 [![Husk Downloads](https://img.shields.io/github/downloads/leviidev/husk/total?style=for-the-badge&color=5865F2&labelColor=111111)](https://github.com/leviidev/husk/releases)
 
-Android apps and games on your iPhone.
+Android games on your iPhone, running natively.
 
-Add an APK, tap it, and it opens full-screen. Husk runs it in one of two ways,
-shown as the two sides of its Library:
+> This is a fork of [Leviidev/Husk](https://github.com/Leviidev/Husk) that
+> keeps **only the translation layer**: emulation (QEMU and the LineageOS
+> guest) is removed, and the app is redesigned around games.
 
-- **Translation Layer.** The game's own 64-bit Android code runs directly on
-  the iPhone's processor, and Husk stands in for Android around it: the C
-  library, the Java calls the game makes, OpenGL ES (through ANGLE), Vulkan
-  (through MoltenVK), sound, touch and controllers. No Android boots, so a
-  game starts in seconds, and its code is never emulated.
-  See [docs/04-translation-layer.md](docs/04-translation-layer.md).
-- **Emulation.** A full Android system (LineageOS) boots under QEMU inside
-  Husk, for apps the translation layer cannot run yet and for using Android
-  itself. iOS gives apps no hypervisor, so the processor is emulated, and
-  this is much slower than the translation layer.
-  See [docs/00-architecture.md](docs/00-architecture.md).
+Add an APK, tap Play, and it opens full-screen. The game's own 64-bit Android
+code runs directly on the iPhone's processor, and Husk stands in for Android
+around it: the C library, the Java calls the game makes, OpenGL ES (through
+ANGLE), Vulkan (through MoltenVK), sound, touch and controllers. No Android
+boots, so a game starts in seconds, and its code is never emulated.
+See [docs/04-translation-layer.md](docs/04-translation-layer.md).
+
+While a game runs nothing is drawn over it. Tap the top of the screen to bring
+down its toolbar (close, on-screen controller, performance overlay); it hides
+itself again a few seconds later. The performance overlay (frame rate, frame
+time, memory, thermal state) is turned on in Settings or from that toolbar.
 
 ## Screenshots
 
@@ -70,8 +71,7 @@ An APK needs 64-bit (`arm64-v8a`) native code. iPhones cannot run 32-bit ARM
 code, so an APK that only has 32-bit libraries cannot run here. APKs and
 split bundles (`.xapk`, `.apkm`, `.apks`, or a Play download's separate split
 APKs and asset packs) can all be added. Apps written only
-in Java, with no native engine, are not supported on the translation layer;
-Emulation is the way to run those.
+in Java, with no native engine, are not supported.
 
 One game runs per launch of Husk. To switch, press **Close Husk to Play** on
 the other game's page; when you open Husk again, that game starts by itself.
@@ -89,8 +89,7 @@ sideloader re-signs it with your own. Husk needs iOS 16.4 or later.
 
 ## JIT
 
-Both the translation layer and Emulation need JIT, which on iOS comes from a
-debugger. Husk can get it in several ways, and walks you through each one
+Games need JIT, which on iOS comes from a debugger. Husk can get it in several ways, and walks you through each one
 (Settings › JIT & Sideload):
 
 - **Built-in StikJIT** (iOS 26 and later): Husk turns JIT on itself, with no
@@ -102,23 +101,25 @@ debugger. Husk can get it in several ways, and walks you through each one
 
 ## Building
 
-Husk is built on a Mac with Xcode. The build scripts also call `meson`,
-`ninja`, `pkg-config`, `python3`, `xcodegen`, `qemu-img` and a Rust
-toolchain with the `aarch64-apple-ios` target.
+Husk is built on a Mac with Xcode. The build scripts also call `python3`,
+`cmake`, `xcodegen` and a Rust toolchain with the `aarch64-apple-ios` target.
+
+No Mac? Every push to this repository builds `Husk.ipa` on a GitHub Actions
+macOS runner (`.github/workflows/build-ipa.yml`); download it from the run's
+**Husk-ipa** artifact.
 
 ```sh
 ./scripts/ci_build.sh
 ```
 
-From a clean checkout this fetches and cross-compiles everything Husk links:
+From a clean checkout this builds everything Husk embeds or links:
 
-- QEMU and its dependencies
-- ANGLE and virglrenderer
-- MoltenVK
+- ANGLE (EGL and OpenGL ES over Metal)
+- MoltenVK (Vulkan over Metal)
 - the on-device pairing library
 
 It then builds the app and writes the IPA to `build/Husk.ipa`. The first run
-takes a couple of hours, and later runs reuse what is already built. After
+takes about fifteen minutes, and later runs reuse what is already built. After
 that, `./scripts/package_ipa.sh` rebuilds just the app and writes
 `~/Desktop/Husk.ipa`.
 
@@ -128,8 +129,6 @@ top of `tools/regress/cases.txt` for what it needs).
 
 ## Licence
 
-GPL-2.0-or-later. Husk links QEMU, which is GPLv2, so the shipped binary is a
-combined GPLv2 work and the full source is public. The translation layer is
-Husk's own code, under the same licence. Husk cannot go on the App Store, both
-because of that and because it needs `get-task-allow` plus a debugger
-attaching at runtime. See [docs/01-licensing.md](docs/01-licensing.md).
+GPL-2.0-or-later, as upstream Husk; the full source is public. Husk cannot go
+on the App Store, because it needs `get-task-allow` plus a debugger attaching
+at runtime. See [docs/01-licensing.md](docs/01-licensing.md).
