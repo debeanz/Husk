@@ -3,9 +3,10 @@
 # No signing secrets are needed: package_ipa.sh signs ad hoc, and AltStore /
 # SideStore re-sign with your own Apple ID at install time.
 #
-# The first run compiles ANGLE and MoltenVK from scratch (about 15 minutes).
-# Whatever got built is cached even if the run fails or times out, so later runs
-# only build the app.
+# The first run compiles ANGLE and MoltenVK from scratch (about 12 minutes).
+# Whatever got built is cached even if the run fails or times out -- the Rust
+# pairing library's build and its crates included -- so later runs only build
+# the app (about 1.5 minutes).
 name: Build IPA
 
 on:
@@ -52,6 +53,9 @@ jobs:
           path: |
             build
             third_party
+            src/rppairing-ios/target
+            ~/.cargo/registry
+            ~/.cargo/git
           key: husk-tl-${{ env.XCODE_ID }}-${{ github.run_id }}
           restore-keys: husk-tl-${{ env.XCODE_ID }}-
 
@@ -67,6 +71,9 @@ jobs:
           path: |
             build
             third_party
+            src/rppairing-ios/target
+            ~/.cargo/registry
+            ~/.cargo/git
           key: husk-tl-${{ env.XCODE_ID }}-${{ github.run_id }}
 
       - name: Upload build logs
