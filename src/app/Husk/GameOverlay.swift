@@ -6,14 +6,6 @@ import UIKit
 
 /// The frame-rate readout over a running game: off unless turned on in Settings (or from a game's toolbar), and drawn in the
 /// corner the person picks. It is the same for every game.
-/// Which screen edges a game keeps for itself. The bottom always is (a swipe up there would leave the game for the home screen).
-/// The top is only when asked: guarding it means iOS shows its pill with an arrow on the first swipe down and opens Notification
-/// Center or Control Center only on a second one, and apps cannot show one without the other.
-enum GameEdges {
-    static let guardTopKey = "husk.game.guardTopEdge"
-    static func deferred(guardTop: Bool) -> Edge.Set { guardTop ? .all : [.bottom, .leading, .trailing] }
-}
-
 enum PerfOverlay {
     static let enabledKey = "husk.perfOverlay"
     static let positionKey = "husk.perfOverlay.position"

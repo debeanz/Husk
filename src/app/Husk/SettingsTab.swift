@@ -11,7 +11,6 @@ struct SettingsTab: View {
     @AppStorage(GameDisplay.resolutionKey) private var resolution = GameDisplay.automatic
     @AppStorage(GameDisplay.scalingKey) private var scaling = GameScaling.fit.rawValue
     @AppStorage(TranslationLayer.devInfoKey) private var devInfo = false
-    @AppStorage(GameEdges.guardTopKey) private var guardTopEdge = false
     @State private var showLogs = false
 
     var body: some View {
@@ -44,7 +43,6 @@ struct SettingsTab: View {
                 }
 
                 Section {
-                    Toggle(isOn: $guardTopEdge) { row("rectangle.topthird.inset.filled", .teal, "Guard the Top Edge") }
                     Toggle(isOn: $perfOn) { row("speedometer", .orange, "Performance Overlay") }
                     if perfOn {
                         Picker(selection: $perfPosition) {
@@ -94,13 +92,6 @@ struct SettingsTab: View {
         } else {
             text = "Tap with three fingers in a game to bring up its controls: close the game, the on-screen controller, "
             text += "this overlay and the game's log."
-        }
-        if guardTopEdge {
-            text += " With the top edge guarded, a swipe down from it shows iOS's pill first and opens Notification Center"
-            text += " only on a second swipe, so a game's swipes near the top are never taken."
-        } else {
-            text += " A swipe down from the top edge opens Notification Center or Control Center straight away; guard"
-            text += " the top edge if a game's own swipes start up there."
         }
         return text
     }

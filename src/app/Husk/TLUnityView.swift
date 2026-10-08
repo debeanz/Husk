@@ -509,7 +509,6 @@ struct TLCocosAttemptView: View {
     @State private var settings: TLAppSettings
     /// Whether the toolbar is down.
     @State private var chrome = false
-    @AppStorage(GameEdges.guardTopKey) private var guardTopEdge = false
     /// Whether the game was laid out over the whole screen, the area around the camera included (the game's Full Screen
     /// setting). The game's surface is sized once at launch, so this cannot change while it runs.
     private let fullBleed: Bool
@@ -668,7 +667,7 @@ struct TLCocosAttemptView: View {
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
         // Swipes near the edges are the game's.
-        .defersSystemGestures(on: GameEdges.deferred(guardTop: guardTopEdge))
+        .defersSystemGestures(on: .all)
         .onAppear {
             HuskOrientation.set(portrait ? .portrait : .landscape)
             UIApplication.shared.isIdleTimerDisabled = settings.keepAwake

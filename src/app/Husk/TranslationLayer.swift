@@ -718,7 +718,6 @@ struct TLClassicAttemptView: View {
     @State private var settings: TLAppSettings
     /// Whether the toolbar is down.
     @State private var chrome = false
-    @AppStorage(GameEdges.guardTopKey) private var guardTopEdge = false
     /// Laid out over the whole screen, the area around the camera included (the game's Full Screen setting).
     private let fullBleed: Bool
 
@@ -783,7 +782,7 @@ struct TLClassicAttemptView: View {
         }
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
-        .defersSystemGestures(on: GameEdges.deferred(guardTop: guardTopEdge))
+        .defersSystemGestures(on: .all)
         .onAppear {
             HuskOrientation.set(portrait ? .portrait : .landscape)
             UIApplication.shared.isIdleTimerDisabled = settings.keepAwake
