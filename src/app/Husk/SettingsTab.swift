@@ -39,8 +39,8 @@ struct SettingsTab: View {
                 } footer: {
                     Text(perfOn
                          ? "Shows the frame rate over every game\(perfDetailed ? ", with the time a frame takes, the memory Husk uses and a warning when the iPhone runs hot" : "")."
-                           + " Tap the top of the screen in a game to bring up its controls."
-                         : "Tap the top of the screen in a game to bring up its controls: close the game, the on-screen "
+                           + " Swipe down from the top edge in a game to bring up its controls."
+                         : "Swipe down from the top edge in a game to bring up its controls: close the game, the on-screen "
                            + "controller, this overlay and the game's log.")
                 }
 

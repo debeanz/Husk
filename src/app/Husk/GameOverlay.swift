@@ -158,7 +158,7 @@ struct PerformanceHUD: View {
 
 // MARK: - the toolbar
 
-/// The bar that comes down over a game when the top of the screen is tapped: the way out, what is running, and the game's
+/// The bar that comes down over a game when a finger pulls down from the top edge: the way out, what is running, and the game's
 /// own controls. It hides itself a few seconds later.
 struct GameToolbar<Actions: View>: View {
     let title: String
@@ -193,7 +193,7 @@ struct GameToolbar<Actions: View>: View {
     }
 }
 
-/// Everything drawn over a running game, in one layer: the toolbar (shown only once the top of the screen is tapped, and
+/// Everything drawn over a running game, in one layer: the toolbar (shown only once pulled down from the top edge, and
 /// hidden again after a few seconds unless `pinned`), the performance readout, and for the first few games a line saying how
 /// to bring the toolbar up.
 struct GameOverlay<Actions: View>: View {
@@ -236,7 +236,7 @@ struct GameOverlay<Actions: View>: View {
                 }
                 Spacer(minLength: 0)
                 if hint {
-                    Label("Tap the top of the screen for controls", systemImage: "hand.tap")
+                    Label("Swipe down from the top for controls", systemImage: "hand.draw")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 14).frame(height: 34)
@@ -336,5 +336,56 @@ struct GameLogPanel: View {
         }
         .huskPanel(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+}
+
+// MARK: - the pull down outside the game
+
+/// What is behind a game: black, and the place a pull down from the top edge starts when the game keeps clear of the camera
+/// (the band at the top of a portrait screen is this view, not the game's). UIKit, like the game's own view, so it never
+/// takes part in the game's touches the way a SwiftUI gesture behind it can.
+struct PullDownArea: UIViewRepresentable {
+    var onPullDown: () -> Void
+
+    func makeUIView(context: Context) -> PullDownView {
+        let view = PullDownView()
+        view.onPullDown = onPullDown
+        return view
+    }
+
+    func updateUIView(_ view: PullDownView, context: Context) { view.onPullDown = onPullDown }
+}
+
+final class PullDownView: UIView, UIGestureRecognizerDelegate {
+    var onPullDown: (() -> Void)?
+    private var fired = false
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .black
+        let pull = UIPanGestureRecognizer(target: self, action: #selector(pulled(_:)))
+        pull.maximumNumberOfTouches = 1
+        pull.delegate = self
+        addGestureRecognizer(pull)
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    @objc private func pulled(_ g: UIPanGestureRecognizer) {
+        switch g.state {
+        case .changed:
+            let t = g.translation(in: self)
+            if !fired, t.y > 36, t.y > abs(t.x) * 1.5 {
+                fired = true
+                onPullDown?()
+            }
+        default:
+            fired = false
+        }
+    }
+
+    /// Only a pull that starts at the top: within the band above the game, or just below it.
+    func gestureRecognizer(_ g: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        touch.location(in: self).y <= safeAreaInsets.top + 24
     }
 }

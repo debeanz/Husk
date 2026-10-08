@@ -21,7 +21,7 @@ ANGLE), Vulkan (through MoltenVK), sound, touch and controllers. No Android
 boots, so a game starts in seconds, and its code is never emulated.
 See [docs/04-translation-layer.md](docs/04-translation-layer.md).
 
-While a game runs nothing is drawn over it. Tap the top of the screen to bring
+While a game runs nothing is drawn over it. Swipe down from the top edge to bring
 down its toolbar (close, on-screen controller, performance overlay); it hides
 itself again a few seconds later. The performance overlay (frame rate, frame
 time, memory, thermal state) is turned on in Settings or from that toolbar.

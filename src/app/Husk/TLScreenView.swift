@@ -26,11 +26,13 @@ final class TLScreenUIView: UIView, UIGestureRecognizerDelegate {
 
     /// Three fingers tapped at once: another way to bring the game's toolbar up or put it away.
     var onThreeFingerTap: (() -> Void)?
-    /// One finger tapped near the top edge: the way to bring the game's toolbar up.
-    var onTopTap: (() -> Void)?
-    /// How far down from the top edge a tap counts as one at the top, in points.
-    var topZone: CGFloat = 48
-    private var topTap: UITapGestureRecognizer?
+    /// Called when a finger pulls down from the top edge: the way to bring the game's toolbar down. A tap at the top is the
+    /// game's alone -- games put buttons there.
+    var onPullDown: (() -> Void)?
+    /// How close to the top edge the pull has to start, in points.
+    var pullEdge: CGFloat = 24
+    private var topPull: UIPanGestureRecognizer?
+    private var pullFired = false
     /// The one finger the game is following; a second or third finger is only for the three-finger tap.
     private var primary: UITouch?
 
@@ -46,15 +48,16 @@ final class TLScreenUIView: UIView, UIGestureRecognizerDelegate {
         three.delaysTouchesEnded = false
         addGestureRecognizer(three)
 
-        // A tap near the top edge brings the toolbar down. It watches without taking anything: the game still gets the touch.
-        let top = UITapGestureRecognizer(target: self, action: #selector(topTapped))
-        top.numberOfTouchesRequired = 1
-        top.cancelsTouchesInView = false
-        top.delaysTouchesBegan = false
-        top.delaysTouchesEnded = false
-        top.delegate = self
-        addGestureRecognizer(top)
-        topTap = top
+        // A pull down from the top edge brings the toolbar down. It watches without taking anything: the game still gets
+        // every touch, exactly as it would with no recognizer there.
+        let pull = UIPanGestureRecognizer(target: self, action: #selector(pulled(_:)))
+        pull.maximumNumberOfTouches = 1
+        pull.cancelsTouchesInView = false
+        pull.delaysTouchesBegan = false
+        pull.delaysTouchesEnded = false
+        pull.delegate = self
+        addGestureRecognizer(pull)
+        topPull = pull
 
         // Opaque, so Core Animation does not blend it with what is behind it.
         content.isOpaque = true
@@ -164,11 +167,23 @@ final class TLScreenUIView: UIView, UIGestureRecognizerDelegate {
     }
 
     @objc private func threeFingers() { onThreeFingerTap?() }
-    @objc private func topTapped() { onTopTap?() }
+    /// Down far enough, and more down than sideways: the toolbar, once per pull.
+    @objc private func pulled(_ g: UIPanGestureRecognizer) {
+        switch g.state {
+        case .changed:
+            let t = g.translation(in: self)
+            if !pullFired, t.y > 36, t.y > abs(t.x) * 1.5 {
+                pullFired = true
+                onPullDown?()
+            }
+        default:
+            pullFired = false
+        }
+    }
 
     func gestureRecognizer(_ g: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        guard g === topTap else { return true }
-        return touch.location(in: self).y <= topZone
+        guard g === topPull else { return true }
+        return touch.location(in: self).y <= pullEdge
     }
 
     func gestureRecognizer(_ g: UIGestureRecognizer,
@@ -192,7 +207,7 @@ final class TLScreenUIView: UIView, UIGestureRecognizerDelegate {
 
 struct TLScreenView: UIViewRepresentable {
     var onThreeFingerTap: (() -> Void)? = nil
-    var onTopTap: (() -> Void)? = nil
+    var onPullDown: (() -> Void)? = nil
 
     func makeUIView(context: Context) -> TLScreenUIView {
         let view = TLScreenUIView()
@@ -201,6 +216,6 @@ struct TLScreenView: UIViewRepresentable {
     }
     func updateUIView(_ view: TLScreenUIView, context: Context) {
         view.onThreeFingerTap = onThreeFingerTap
-        view.onTopTap = onTopTap
+        view.onPullDown = onPullDown
     }
 }

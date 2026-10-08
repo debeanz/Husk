@@ -735,14 +735,19 @@ struct TLClassicAttemptView: View {
         withAnimation(.snappy(duration: 0.25)) { chrome.toggle() }
     }
 
+    private func showChrome() {
+        withAnimation(.snappy(duration: 0.25)) { chrome = true }
+    }
+
     var body: some View {
         ZStack {
             // No SwiftUI gesture here: from iOS 18 one behind the game can take the game's own touches and cancel them.
-            // Taps at the top are seen by the game's view itself (TLScreenUIView.onTopTap), which takes nothing.
-            Color.black.ignoresSafeArea()
+            // A pull down from the top is seen by the game's view itself (TLScreenUIView.onPullDown) and, above a game that keeps
+            // clear of the camera, by this view behind it; both are UIKit and take nothing from the game.
+            PullDownArea { showChrome() }.ignoresSafeArea()
 
             ZStack {
-                TLScreenView(onThreeFingerTap: { toggleChrome() }, onTopTap: { toggleChrome() })
+                TLScreenView(onThreeFingerTap: { toggleChrome() }, onPullDown: { showChrome() })
                 if !runner.isRunning, runner.frameCount == 0 {
                     VStack(spacing: 12) {
                         if runner.isDone {
@@ -750,7 +755,7 @@ struct TLClassicAttemptView: View {
                             Text("The game stopped").font(.headline).foregroundStyle(.white)
                             Button { runner.start(apks: app.apks) } label: { Label("Run Again", systemImage: "play.fill") }
                                 .buttonStyle(.borderedProminent)
-                            Label("Tap the top of the screen to close or see the log", systemImage: "hand.tap")
+                            Label("Swipe down from the top to close or see the log", systemImage: "hand.draw")
                                 .font(.system(size: 13, weight: .medium)).foregroundStyle(.white.opacity(0.55))
                         } else {
                             ProgressView().tint(.white)

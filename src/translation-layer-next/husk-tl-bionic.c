@@ -540,6 +540,17 @@ static void *bionic_dlsym(void *handle, const char *name)
         if (!r) r = tl_bionic_find(name);
     } else if ((sysh *)handle >= g_sys_handle && (sysh *)handle < g_sys_handle + 16) {
         r = tl_bionic_find(name);
+        /* Something a game asks Android for that Husk does not provide: always worth a line, once. Engines that load a
+         * system library with dlopen (FMOD and libaaudio.so) give up on the whole library when one function is missing. */
+        if (!r) {
+            static char said[64][64]; static int nsaid;
+            bool seen = false;
+            for (int i = 0; i < nsaid && !seen; i++) seen = !strcmp(said[i], name);
+            if (!seen) {
+                if (nsaid < 64) snprintf(said[nsaid++], sizeof(said[0]), "%s", name);
+                tl_log_line("dl: %s is not provided by Husk's Android", name);
+            }
+        }
     } else {
         r = tl_ld_sym((tl_lib *)handle, name);
     }

@@ -21,7 +21,7 @@ enum WhatsNew {
         Item(symbol: "square.grid.2x2.fill", title: "A new Library",
              detail: "Your games as artwork, with the one you played last up top, ready to continue."),
         Item(symbol: "hand.tap.fill", title: "Nothing over your game",
-             detail: "Games fill the screen. Tap the top of the screen to bring up the toolbar; it hides itself again."),
+             detail: "Games fill the screen. Swipe down from the top edge to bring up the toolbar; it hides itself again. Taps at the top stay the game's."),
         Item(symbol: "speedometer", title: "Performance overlay",
              detail: "Turn it on in Settings or from a game's toolbar: frame rate, frame time, memory and heat, in the corner you pick."),
         Item(symbol: "paintbrush.fill", title: "A cleaner look",

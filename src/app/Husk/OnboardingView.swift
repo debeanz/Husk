@@ -97,7 +97,7 @@ struct OnboardingView: View {
                 feature("gamecontroller.fill", "Made for games",
                         "Unity, Unreal, cocos2d-x, Godot, SDL and more — with touch, sound and controllers.")
                 feature("hand.tap.fill", "Nothing in the way",
-                        "Games fill the screen. Tap the top of the screen for controls when you need them.")
+                        "Games fill the screen. Swipe down from the top edge for controls when you need them.")
             }
             .padding(.horizontal, 32)
             .padding(.top, 12)
