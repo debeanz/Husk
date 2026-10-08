@@ -55,16 +55,7 @@ struct SettingsTab: View {
                 } header: {
                     Text("In Game")
                 } footer: {
-                    Text((perfOn
-                          ? "Shows the frame rate over every game\(perfDetailed ? ", with the time a frame takes, the memory Husk uses and a warning when the iPhone runs hot" : "")."
-                            + " Tap with three fingers in a game to bring up its controls."
-                          : "Tap with three fingers in a game to bring up its controls: close the game, the on-screen "
-                            + "controller, this overlay and the game's log.")
-                         + (guardTopEdge
-                            ? " With the top edge guarded, a swipe down from it shows iOS's pill first and opens Notification Center "
-                              + "only on a second swipe, so a game's swipes near the top are never taken."
-                            : " A swipe down from the top edge opens Notification Center or Control Center straight away; guard "
-                              + "the top edge if a game's own swipes start up there."))
+                    Text(inGameFooter)
                 }
 
                 Section {
@@ -91,6 +82,27 @@ struct SettingsTab: View {
             .navigationTitle("Settings")
             .sheet(isPresented: $showLogs) { LogView() }
         }
+    }
+
+    /// What the In Game section says, built in steps: as one expression it is more than the type checker will take.
+    private var inGameFooter: String {
+        var text: String
+        if perfOn {
+            let detail = perfDetailed
+                ? ", with the time a frame takes, the memory Husk uses and a warning when the iPhone runs hot" : ""
+            text = "Shows the frame rate over every game" + detail + ". Tap with three fingers in a game to bring up its controls."
+        } else {
+            text = "Tap with three fingers in a game to bring up its controls: close the game, the on-screen controller, "
+            text += "this overlay and the game's log."
+        }
+        if guardTopEdge {
+            text += " With the top edge guarded, a swipe down from it shows iOS's pill first and opens Notification Center"
+            text += " only on a second swipe, so a game's swipes near the top are never taken."
+        } else {
+            text += " A swipe down from the top edge opens Notification Center or Control Center straight away; guard"
+            text += " the top edge if a game's own swipes start up there."
+        }
+        return text
     }
 
     private var appCard: some View {
