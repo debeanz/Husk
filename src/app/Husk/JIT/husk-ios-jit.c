@@ -264,6 +264,53 @@ static HuskDualMapping husk_ios_jit_allocate_real(size_t bytes);
 static HuskDualMapping husk_prewarmed;
 static bool husk_prewarm_done;
 
+/*
+ * How far apart the two views may be. The translation layer's loader writes
+ * code through the writable view and patches it with adrp, which reaches
+ * +-4 GiB, so it refuses views more than 3 GiB apart. This keeps them within 2.
+ */
+#define HUSK_ALIAS_REACH ((intptr_t)2 << 30)
+
+/*
+ * A read+write alias of [rx, rx+bytes) placed near it: right after, right
+ * before, then further out on either side, never further than HUSK_ALIAS_REACH.
+ * VM_FLAGS_FIXED without OVERWRITE only ever takes free address space, so a
+ * candidate that overlaps anything simply fails and the next is tried. Returns
+ * 0 when there is no room near enough; the alias is not yet writable.
+ *
+ * The alias is of the same physical pages, made locally like the first one, so
+ * it needs no debugger and stays valid after detach.
+ */
+static vm_address_t husk_alias_near(vm_address_t rx, size_t bytes)
+{
+    const intptr_t step = (intptr_t)bytes;
+    for (intptr_t off = step; off <= HUSK_ALIAS_REACH; off += step) {
+        for (int side = 0; side < 2; side++) {
+            intptr_t delta = side == 0 ? off : -off;
+            if (delta < 0 && (uintptr_t)(-delta) > (uintptr_t)rx) {
+                continue;
+            }
+            vm_address_t at = (vm_address_t)((intptr_t)rx + delta);
+            vm_prot_t cur = VM_PROT_NONE, max = VM_PROT_NONE;
+            kern_return_t kr = vm_remap(mach_task_self(), &at, (vm_size_t)bytes,
+                                        /*mask=*/0, VM_FLAGS_FIXED,
+                                        mach_task_self(), rx,
+                                        /*copy=*/FALSE, &cur, &max, VM_INHERIT_NONE);
+            if (kr == KERN_SUCCESS) {
+                return at;
+            }
+        }
+    }
+    return 0;
+}
+
+/* Whether the two views are close enough for the translation layer's loader. */
+static bool husk_views_close(const HuskDualMapping *m)
+{
+    intptr_t d = (intptr_t)(m->rw_addr - m->rx_addr);
+    return d <= ((intptr_t)3 << 30) && d >= -((intptr_t)3 << 30);
+}
+
 HUSK_EXPORT bool husk_ios_jit_prewarm(size_t bytes)
 {
     if (husk_prewarm_done) {
@@ -281,7 +328,27 @@ HUSK_EXPORT bool husk_ios_jit_prewarm(size_t bytes)
  * until a prewarm has succeeded. */
 HUSK_EXPORT __attribute__((used)) HuskDualMapping *husk_ios_jit_get_mapping(void)
 {
-    return husk_prewarmed.rw_addr ? &husk_prewarmed : NULL;
+    if (!husk_prewarmed.rw_addr) {
+        return NULL;
+    }
+    /* A region whose writable view landed too far away (the allocator could only
+     * place it anywhere) is given a new one nearby before a game uses it. */
+    if (!husk_views_close(&husk_prewarmed)) {
+        vm_address_t rw = husk_alias_near((vm_address_t)husk_prewarmed.rx_addr, husk_prewarmed.size);
+        if (rw && vm_protect(mach_task_self(), rw, (vm_size_t)husk_prewarmed.size, FALSE,
+                             VM_PROT_READ | VM_PROT_WRITE) == KERN_SUCCESS) {
+            HUSK_LOG("writable view was %lld MiB from the executable one; moved it to %p (%+lld MiB)",
+                     (long long)((husk_prewarmed.rw_addr - husk_prewarmed.rx_addr) >> 20), (void *)rw,
+                     (long long)(((intptr_t)rw - (intptr_t)husk_prewarmed.rx_addr) >> 20));
+            vm_deallocate(mach_task_self(), (vm_address_t)husk_prewarmed.rw_addr, (vm_size_t)husk_prewarmed.size);
+            husk_prewarmed.rw_addr = (uint8_t *)rw;
+        } else {
+            if (rw) vm_deallocate(mach_task_self(), rw, (vm_size_t)husk_prewarmed.size);
+            HUSK_LOG("writable view is %lld MiB from the executable one and no nearer place was free",
+                     (long long)((husk_prewarmed.rw_addr - husk_prewarmed.rx_addr) >> 20));
+        }
+    }
+    return &husk_prewarmed;
 }
 
 HuskDualMapping husk_ios_jit_allocate(size_t bytes)
@@ -384,14 +451,21 @@ static HuskDualMapping husk_ios_jit_allocate_real(size_t bytes)
     }
 
     /* Writable alias of the same physical pages. Purely local -- no debugger
-     * involvement, and therefore still available after detach. */
-    vm_address_t rw = 0;
-    vm_prot_t cur_prot = VM_PROT_NONE, max_prot = VM_PROT_NONE;
-    kern_return_t kr = vm_remap(mach_task_self(), &rw, (vm_size_t)bytes,
-                                /*mask=*/0, VM_FLAGS_ANYWHERE,
-                                mach_task_self(), (vm_address_t)rx,
-                                /*copy=*/FALSE, &cur_prot, &max_prot,
-                                VM_INHERIT_NONE);
+     * involvement, and therefore still available after detach. Placed next to
+     * the executable view when there is room, because the translation layer's
+     * loader reaches one from the other with adrp; anywhere otherwise. */
+    kern_return_t kr = KERN_SUCCESS;
+    vm_address_t rw = husk_alias_near((vm_address_t)rx, bytes);
+    if (rw == 0) {
+        vm_prot_t cur_prot = VM_PROT_NONE, max_prot = VM_PROT_NONE;
+        kr = vm_remap(mach_task_self(), &rw, (vm_size_t)bytes,
+                      /*mask=*/0, VM_FLAGS_ANYWHERE,
+                      mach_task_self(), (vm_address_t)rx,
+                      /*copy=*/FALSE, &cur_prot, &max_prot,
+                      VM_INHERIT_NONE);
+        HUSK_LOG("#%llu: no free space within 2 GiB of rx=%p for the writable view; placed anywhere",
+                 (unsigned long long)n, rx);
+    }
     if (kr != KERN_SUCCESS) {
         HUSK_LOG("#%llu: vm_remap failed for rx=%p size=%zu: %d (%s)",
                  (unsigned long long)n, rx, bytes, (int)kr, mach_error_string(kr));
