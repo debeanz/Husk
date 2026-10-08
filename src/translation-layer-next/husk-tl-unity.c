@@ -44,6 +44,18 @@ typedef int32_t (*onload_fn)(void *vm, void *reserved);
 
 void *tl_looper_prepare_here(void);
 
+/* Whether a line about this native has been said already: a lookup made on every touch must not log on every touch. */
+static bool said_once(const char *name)
+{
+    static char said[32][48]; static int nsaid; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    bool seen = false;
+    pthread_mutex_lock(&mu);
+    for (int i = 0; i < nsaid && !seen; i++) seen = !strcmp(said[i], name);
+    if (!seen && nsaid < 32) snprintf(said[nsaid++], sizeof(said[0]), "%s", name);
+    pthread_mutex_unlock(&mu);
+    return seen;
+}
+
 static void *native_of(const char *cls, const char *name, const char *sig)
 {
     void *fn = tl_jni_native(cls, name, sig);
@@ -52,7 +64,7 @@ static void *native_of(const char *cls, const char *name, const char *sig)
         const char *owner = tl_jni_native_owner(name, sig);
         if (owner) {
             fn = tl_jni_native(owner, name, sig);
-            tl_log_line("unity: native %s%s is registered on %s, not %s; using it", name, sig, owner, cls);
+            if (!said_once(name)) tl_log_line("unity: native %s%s is registered on %s, not %s; using it", name, sig, owner, cls);
         }
     }
     if (!fn) {
@@ -61,8 +73,9 @@ static void *native_of(const char *cls, const char *name, const char *sig)
         const char *owner = tl_jni_native(cls, name, NULL) ? cls : tl_jni_native_owner(name, NULL);
         if (owner) {
             fn = tl_jni_native(owner, name, NULL);
-            tl_log_line("unity: native %s is registered on %s as %s, not %s; calling it with what this driver has",
-                        name, owner, tl_jni_native_sig(owner, name), sig);
+            if (!said_once(name))
+                tl_log_line("unity: native %s is registered on %s as %s, not %s; calling it with what this driver has",
+                            name, owner, tl_jni_native_sig(owner, name), sig);
         }
     }
     if (!fn) tl_log_line("unity: native %s.%s%s was not registered", cls, name, sig);
