@@ -525,16 +525,32 @@ static bool is_valid_dual_mapping(const tl_dual_mapping *m)
 extern void *husk_ios_jit_get_mapping(void);
 extern bool husk_ios_jit_prewarm(size_t bytes);
 
+/* The native loader patches code through the writable view with adrp (+-4 GiB)
+ * and refuses views more than 3 GiB apart. A region like that is no use to it,
+ * so it is passed over and the loader makes its own instead, where the device
+ * allows that -- which is what happened before the region could be found here. */
+static bool views_within_reach(const tl_dual_mapping *m)
+{
+    ptrdiff_t d = m->rw_addr - m->rx_addr;
+    return d <= ((ptrdiff_t)3 << 30) && d >= -((ptrdiff_t)3 << 30);
+}
+
 tl_dual_mapping *tl_find_stikdebug_prewarmed(void)
 {
     tl_dual_mapping *m = (tl_dual_mapping *)husk_ios_jit_get_mapping();
-    if (is_valid_dual_mapping(m)) return m;
-
-    /* Not claimed yet (the app prewarms at launch once the debugger attaches):
-     * try once now. A prewarm that already failed is not repeated. */
-    husk_ios_jit_prewarm(512 * 1024 * 1024);
-    m = (tl_dual_mapping *)husk_ios_jit_get_mapping();
-    return is_valid_dual_mapping(m) ? m : NULL;
+    if (!is_valid_dual_mapping(m)) {
+        /* Not claimed yet (the app prewarms at launch once the debugger attaches):
+         * try once now. A prewarm that already failed is not repeated. */
+        husk_ios_jit_prewarm(512 * 1024 * 1024);
+        m = (tl_dual_mapping *)husk_ios_jit_get_mapping();
+        if (!is_valid_dual_mapping(m)) return NULL;
+    }
+    if (!views_within_reach(m)) {
+        tl_log_line("jit: the debugger's region has its views %td MiB apart, too far to load a game into; not using it",
+                    (m->rw_addr - m->rx_addr) >> 20);
+        return NULL;
+    }
+    return m;
 }
 
 /* ------------------------------------------------------------------ ELF  */
