@@ -148,13 +148,21 @@ struct TLAppSettingsView: View {
                 Picker("Orientation", selection: $settings.orientation) {
                     ForEach(TLAppSettings.Orientation.allCases) { Text($0.title).tag($0) }
                 }
-                Picker("Resolution", selection: $settings.resolution) {
-                    Text("Default (\(GameDisplay.title(GameDisplay.savedResolution)))").tag(GameDisplay.followDefault)
+                Picker(selection: resolutionChoice) {
                     ForEach(GameDisplay.resolutions, id: \.self) { Text(GameDisplay.title($0)).tag($0) }
+                } label: {
+                    customLabel("Resolution", custom: resolutionIsCustom)
                 }
-                Picker("Screen Scaling", selection: $settings.scaling) {
-                    Text("Default (\(GameDisplay.savedScaling.title))").tag(GameDisplay.followDefault)
-                    ForEach(GameScaling.allCases) { Text($0.title).tag($0.rawValue) }
+                Picker(selection: scalingChoice) {
+                    ForEach(GameScaling.allCases) { Text($0.title).tag($0) }
+                } label: {
+                    customLabel("Screen Scaling", custom: scalingIsCustom)
+                }
+                if resolutionIsCustom || scalingIsCustom {
+                    Button("Use Husk's Settings") {
+                        settings.resolution = GameDisplay.followDefault
+                        settings.scaling = GameDisplay.followDefault
+                    }
                 }
                 Toggle("Full Screen", isOn: $settings.cleanView)
                 Toggle("Keep the Screen On", isOn: $settings.keepAwake)
@@ -162,6 +170,9 @@ struct TLAppSettingsView: View {
                 Text("Display")
             } footer: {
                 Text("\(GameDisplay.detail(GameDisplay.resolution(for: settings))) \(GameDisplay.scaling(for: settings).detail) "
+                   + (resolutionIsCustom || scalingIsCustom
+                      ? "Custom is this game's own choice; the others follow Husk's Settings. "
+                      : "These follow Husk's Settings until you choose something else here. ")
                    + "Full Screen draws the game around the camera too. These apply the next time the game starts; a game "
                    + "already running in this session needs Husk closed and opened again.")
             }
@@ -235,6 +246,31 @@ struct TLAppSettingsView: View {
             Button("Cancel", role: .cancel) { }
         } message: {
             Text("Saves, settings and caches the game made here are deleted.")
+        }
+    }
+
+    // MARK: resolution and scaling: Husk's Settings unless this game says otherwise
+
+    /// Whether this game has its own resolution or scaling rather than Husk's.
+    private var resolutionIsCustom: Bool { GameDisplay.resolutions.contains(settings.resolution) }
+    private var scalingIsCustom: Bool { GameScaling(rawValue: settings.scaling) != nil }
+
+    /// The pickers show what the game will use. Choosing what Husk's Settings already say goes back to following them, so a
+    /// later change there reaches this game too; choosing anything else makes it this game's own.
+    private var resolutionChoice: Binding<String> {
+        Binding(get: { GameDisplay.resolution(for: settings) },
+                set: { settings.resolution = $0 == GameDisplay.savedResolution ? GameDisplay.followDefault : $0 })
+    }
+    private var scalingChoice: Binding<GameScaling> {
+        Binding(get: { GameDisplay.scaling(for: settings) },
+                set: { settings.scaling = $0 == GameDisplay.savedScaling ? GameDisplay.followDefault : $0.rawValue })
+    }
+
+    /// A row's name, with a tag when the game's choice differs from Husk's Settings.
+    private func customLabel(_ title: String, custom: Bool) -> some View {
+        HStack(spacing: 8) {
+            Text(title)
+            if custom { Tag(text: "Custom", tint: Theme.accent) }
         }
     }
 
