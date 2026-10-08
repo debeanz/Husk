@@ -125,6 +125,7 @@
 		EDD9BF5E120ED2453CB023FA /* icon-default.png in Resources */ = {isa = PBXBuildFile; fileRef = 555112D0E3895EBE37A68FEB /* icon-default.png */; };
 		EF4D3972DFB4447D5FDDF0AE /* stb_vorbis.inc in Resources */ = {isa = PBXBuildFile; fileRef = 4B06A9BB292E04A841BE20D2 /* stb_vorbis.inc */; };
 		F1E2ED25F28A24BA7197C5DB /* PipeShim.c in Sources */ = {isa = PBXBuildFile; fileRef = 766F6F7816E672E83CFFE47D /* PipeShim.c */; };
+		F26CFAB85029B6510395F90A /* GameDisplay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1258609947716D7341A440D7 /* GameDisplay.swift */; };
 		F4833815482790E167401965 /* husk-tl-ld.c in Sources */ = {isa = PBXBuildFile; fileRef = 4D54C1E4F20A020AC62C9419 /* husk-tl-ld.c */; };
 		F6B3DA43CA16FAF920EF236D /* AppTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = D05B2EFC533719ED2E455C24 /* AppTheme.swift */; };
 		FA5016C04E0EFC5FD0CF32F9 /* JITCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = F54A47159D39CB8039E9E44E /* JITCard.swift */; };
@@ -182,6 +183,7 @@
 		0F570EB6EAB321272B32955C /* VirtualPad.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VirtualPad.swift; sourceTree = "<group>"; };
 		0FCF57D3D74B527852EC0327 /* AppIcon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppIcon.swift; sourceTree = "<group>"; };
 		100DF87CB49D35A4DA089C94 /* husk-tl-framework.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "husk-tl-framework.h"; sourceTree = "<group>"; };
+		1258609947716D7341A440D7 /* GameDisplay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameDisplay.swift; sourceTree = "<group>"; };
 		182A386166343D705B52A7BF /* husk-tl-godot.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-godot.c"; sourceTree = "<group>"; };
 		198FA3419B26F852A2B05ED9 /* HuskJITMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HuskJITMessages.swift; sourceTree = "<group>"; };
 		1A03EC803ECECBFCA11026AF /* husk-tl-jni-tls.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-tl-jni-tls.c"; sourceTree = "<group>"; };
@@ -368,6 +370,7 @@
 				BD3B1227581E9D6E7C9DCC3E /* CrashReport.swift */,
 				CC860BD7A5AF9DC83B015219 /* fishhook.c */,
 				3B9FC5A63D4CAA7FBDA016EB /* fishhook.h */,
+				1258609947716D7341A440D7 /* GameDisplay.swift */,
 				D6B2BE4EA9D5048347B60B36 /* GameOverlay.swift */,
 				7A59295CA11423842CD527E0 /* GameStatus.swift */,
 				9736391C1BCE43667293DB7B /* Geode.swift */,
@@ -759,6 +762,7 @@
 				7FA5D73DC2780CACC7399534 /* BundleUnpacker.swift in Sources */,
 				4E1329C07A116B3BE1FDFA7A /* ContentView.swift in Sources */,
 				BE7E302D6F02165C04588DA1 /* CrashReport.swift in Sources */,
+				F26CFAB85029B6510395F90A /* GameDisplay.swift in Sources */,
 				B4F594886695D8BD3BF811FF /* GameOverlay.swift in Sources */,
 				01C829DC8D87A407F2CF98A2 /* GameStatus.swift in Sources */,
 				6EE0DCCC80014D645AC6E23A /* Geode.swift in Sources */,
