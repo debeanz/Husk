@@ -1,0 +1,76 @@
+# Build Husk.ipa on a GitHub macOS runner.
+#
+# No signing secrets are needed: package_ipa.sh signs ad hoc, and AltStore /
+# SideStore re-sign with your own Apple ID at install time.
+#
+# The first run compiles QEMU, ANGLE, MoltenVK and friends from scratch, which
+# takes hours. Whatever got built is cached even if the run fails or times out,
+# so the next run picks up where this one stopped.
+name: Build IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'Screenshots/**'
+      - 'showcase/**'
+      - 'research/**'
+
+concurrency:
+  group: build-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          brew install meson ninja pkg-config xcodegen qemu
+          rustup target add aarch64-apple-ios
+          xcodebuild -version
+
+      - name: Restore build cache
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            build
+            third_party
+          key: husk-build-${{ github.run_id }}
+          restore-keys: husk-build-
+
+      - name: Build
+        timeout-minutes: 320
+        run: ./scripts/ci_build.sh "$GITHUB_WORKSPACE/build/Husk.ipa"
+
+      # Saved even when the build fails or times out, so progress is not lost.
+      - name: Save build cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            build
+            third_party
+          key: husk-build-${{ github.run_id }}
+
+      - name: Upload build logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: build/logs
+          if-no-files-found: ignore
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Husk-ipa
+          path: build/Husk.ipa
+          if-no-files-found: error
