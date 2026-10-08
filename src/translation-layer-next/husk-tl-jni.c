@@ -57,7 +57,7 @@ void tl_jni_set_trace(int level) { g_trace = level; }
 
 static uint32_t hash_str(const char *s) { uint32_t h = 2166136261u; while (*s) { h ^= (unsigned char)*s++; h *= 16777619u; } return h; }
 
-#define TRACE(...) do { if (g_trace >= 1) tl_log_line(__VA_ARGS__); } while (0)
+#define TRACE(...) do { if (g_trace >= 1 || tl_watch_line()) tl_log_line(__VA_ARGS__); } while (0)
 #define TRACE2(...) do { if (g_trace >= 2) tl_log_line(__VA_ARGS__); } while (0)
 
 /* --------------------------------------------------------------- objects */
@@ -419,6 +419,17 @@ static jvalue invoke(jobj *self, tl_jmeth *m, bool nonvirtual, const jvalue *arg
     if (fn) {
         if (g_trace >= 2) tl_log_line("jni: call %s.%s%s", m->cls->name, m->name, m->sig);
         fn(&c);
+        /* A watched thread: the call and what it was answered. */
+        if (g_trace < 2 && tl_watch_line()) {
+            const jobj *o = m->retk == 'L' ? c.ret.l : NULL;
+            const char *str = tl_jni_string(o);
+            if (str) tl_log_line("jni: call %s.%s%s -> \"%s\"", m->cls->name, m->name, m->sig, str);
+            else if (m->retk == 'L') tl_log_line("jni: call %s.%s%s -> %s", m->cls->name, m->name, m->sig, !o ? "null" : o->cls ? o->cls->name : "an object");
+            else if (m->retk == 'V') tl_log_line("jni: call %s.%s%s", m->cls->name, m->name, m->sig);
+            else if (m->retk == 'F' || m->retk == 'D') tl_log_line("jni: call %s.%s%s -> %g", m->cls->name, m->name, m->sig, m->retk == 'F' ? (double)c.ret.f : c.ret.d);
+            else tl_log_line("jni: call %s.%s%s -> %lld", m->cls->name, m->name, m->sig,
+                             m->retk == 'J' ? (long long)c.ret.j : m->retk == 'Z' ? (long long)c.ret.z : (long long)c.ret.i);
+        }
         /* A method that returns an object hands the caller a new local reference. The implementations
          * return objects they keep (the Activity, the Display), so without this a caller releasing its
          * reference would free an object that is still in use. */

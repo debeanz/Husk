@@ -85,7 +85,14 @@ static sl_object *obj_of_object(const void *itf) { return (sl_object *)itf; }
 #define OBJ_FROM(itf, field) ((sl_object *)((const char *)(itf) - offsetof(sl_object, field)))
 
 /* ---- SLObjectItf */
-static uint32_t o_Realize(const void *self, uint32_t async) { (void)async; sl_object *o = obj_of_object(self); o->state = SL_OBJECT_REALIZED; return SL_OK; }
+static const char *kind_name(const sl_object *o) { static const char *const k[] = { "?", "engine", "output mix", "player" }; return k[o->kind >= 1 && o->kind <= K_PLAYER ? o->kind : 0]; }
+static uint32_t o_Realize(const void *self, uint32_t async)
+{
+    sl_object *o = obj_of_object(self);
+    o->state = SL_OBJECT_REALIZED;
+    if (o->kind != K_PLAYER || tl_watch_here) tl_log_line("opensl: %s realized%s", kind_name(o), async ? " (asked asynchronously)" : "");
+    return SL_OK;
+}
 static uint32_t o_Resume(const void *self, uint32_t async) { (void)self; (void)async; return SL_OK; }
 static uint32_t o_GetState(const void *self, uint32_t *state) { if (state) *state = (uint32_t)obj_of_object(self)->state; return SL_OK; }
 static uint32_t o_GetInterface(const void *self, const sl_iid *iid, const void **out)
@@ -105,8 +112,7 @@ static uint32_t o_GetInterface(const void *self, const sl_iid *iid, const void *
     for (int i = 0; i < nsaid && !seen; i++) seen = said[i] == id;
     if (!seen) {
         if (nsaid < 32) said[nsaid++] = id;
-        static const char *const kinds[] = { "?", "engine", "output mix", "player" };
-        tl_log_line("opensl: the game asked the %s for interface %08x, which Husk does not offer", kinds[o->kind <= K_PLAYER ? o->kind : 0], id);
+        tl_log_line("opensl: the game asked the %s for interface %08x, which Husk does not offer", kind_name(o), id);
     }
     return SL_FEATURE_UNSUPPORTED;
 }
@@ -116,7 +122,9 @@ static void player_stop_thread(sl_object *o);
 static void o_Destroy(const void *self)
 {
     sl_object *o = obj_of_object(self);
+    tl_log_line("opensl: %s destroyed", kind_name(o));
     if (o->kind == K_PLAYER) player_stop_thread(o);
+    if (o->kind == K_ENGINE) tl_watch_here = 0;
     free(o);
 }
 static uint32_t o_SetPriority(const void *self, int32_t p, uint32_t pre) { (void)self; (void)p; (void)pre; return SL_OK; }
@@ -306,6 +314,7 @@ static uint32_t e_CreateAudioPlayer(const void *self, const void **out, const sl
     atomic_store(&o->play_state, SL_STOPPED);
     static const char *const names[] = { "16-bit", "8-bit", "32-bit", "float" };
     tl_log_line("opensl: audio player (%d channel(s), %d Hz, %s samples)", o->channels, o->rate, names[o->pcm]);
+    tl_watch_here = 0;
     *out = o;
     return SL_OK;
 }
@@ -334,6 +343,7 @@ static uint32_t e_QueryCount(const void *self, uint32_t id, uint32_t *n)
     (void)self; const sl_iid *ids[8];
     if (!n) return SL_PARAMETER_INVALID;
     *n = (uint32_t)offered(id, ids);
+    tl_log_line("opensl: the game asked which interfaces object type %#x has (%u)", id, *n);
     return SL_OK;
 }
 static uint32_t e_QueryOne(const void *self, uint32_t id, uint32_t index, const sl_iid **iid)
@@ -344,9 +354,39 @@ static uint32_t e_QueryOne(const void *self, uint32_t id, uint32_t index, const 
     *iid = ids[index];
     return SL_OK;
 }
-static uint32_t e_QueryExtCount(const void *self, uint32_t *n) { (void)self; if (n) *n = 0; return SL_OK; }
-static uint32_t e_QueryExt(void) { return SL_PARAMETER_INVALID; }
-static uint32_t e_IsExt(const void *self, const void *name, uint32_t *yes) { (void)self; (void)name; if (yes) *yes = 0; return SL_OK; }
+/* Android's engine has one extension, its API level -- which engines read to know what Android they are on. */
+static const char k_extension[] = "ANDROID_SDK_LEVEL_34";
+static uint32_t e_QueryExtCount(const void *self, uint32_t *n)
+{
+    (void)self;
+    if (!n) return SL_PARAMETER_INVALID;
+    *n = 1;
+    tl_log_line("opensl: the game asked how many extensions the engine has (1: %s)", k_extension);
+    return SL_OK;
+}
+static uint32_t e_QueryExt(const void *self, uint32_t index, char *name, int16_t *len)
+{
+    (void)self;
+    if (!len) return SL_PARAMETER_INVALID;
+    if (index != 0) { *len = 0; return SL_PARAMETER_INVALID; }
+    int16_t need = (int16_t)sizeof(k_extension);                       /* with its NUL, as Android counts it */
+    uint32_t r = SL_OK;
+    if (name) {
+        if (*len <= 0) r = SL_BUFFER_INSUFFICIENT;
+        else if (need > *len) { memcpy(name, k_extension, (size_t)*len - 1); name[*len - 1] = 0; r = SL_BUFFER_INSUFFICIENT; }
+        else memcpy(name, k_extension, sizeof(k_extension));
+    }
+    *len = need;
+    return r;
+}
+static uint32_t e_IsExt(const void *self, const char *name, uint32_t *yes)
+{
+    (void)self;
+    if (!name || !yes) return SL_PARAMETER_INVALID;
+    *yes = !strcmp(name, k_extension);
+    tl_log_line("opensl: the game asked whether the engine has extension %s (%s)", name, *yes ? "yes" : "no");
+    return SL_OK;
+}
 static const void *const k_vt_engine[] = {
     e_LED, e_Vibra, e_CreateAudioPlayer, e_Recorder, e_Midi, e_Listener, e_3DGroup, e_CreateMix,
     e_Metadata, e_Extension, e_QueryCount, e_QueryOne, e_QueryExtCount, e_QueryExt, e_IsExt
@@ -358,7 +398,10 @@ static uint32_t b_slCreateEngine(const void **engine, uint32_t n, const void *op
     sl_object *o = new_object(K_ENGINE);
     if (!o) return 3;
     o->vt_engine = k_vt_engine;
-    tl_log_line("opensl: engine created");
+    /* Engines (FMOD) can stop between here and making a player without a word; until they make one, what this thread
+     * asks of Android goes in the log. */
+    tl_watch_here = 1;
+    tl_log_line("opensl: engine created; logging what this thread asks of Android until it makes a player");
     *engine = o;
     return SL_OK;
 }

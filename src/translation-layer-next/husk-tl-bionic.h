@@ -85,6 +85,12 @@ const char *tl_sysprop(const char *name);
 /* The log. */
 void tl_log_line(const char *fmt, ...);
 
+/* A thread being watched: what it asks of Android -- Java, libraries, system properties -- goes in the log, up to a limit.
+ * For an engine that gives up on something without saying what (FMOD setting up its sound: see husk-tl-opensles.c).
+ * tl_watch_line() is true when this thread is watched and may log one more line. */
+extern __thread int tl_watch_here;
+int tl_watch_line(void);
+
 /* A one-line note, once per distinct text, for things that are stubbed. */
 void tl_note_once(const char *what);
 

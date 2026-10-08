@@ -173,7 +173,19 @@ static int bionic___system_property_read(const void *pi, char *name, char *value
 
 int tl_dns_servers(char out[][64], int max);
 
+__thread int tl_watch_here;
+static __thread int t_watch_lines;
+int tl_watch_line(void) { if (!tl_watch_here || t_watch_lines >= 300) return 0; t_watch_lines++; return 1; }
+
+static int bionic___system_property_get(const char *name, char *value);
+static int system_property_get(const char *name, char *value);
 static int bionic___system_property_get(const char *name, char *value)
+{
+    int n = system_property_get(name, value);
+    if (tl_watch_line()) tl_log_line("prop: %s = \"%s\"", name ? name : "(null)", value ? value : "");
+    return n;
+}
+static int system_property_get(const char *name, char *value)
 {
     /* net.dns1, net.dns2: the phone's DNS servers (see tl_dns_servers) */
     if (name && value && !strncmp(name, "net.dns", 7) && name[7] >= '1' && name[7] <= '4' && !name[8]) {
@@ -529,7 +541,7 @@ static void *bionic_dlopen(const char *path, int flags)
     /* A path to a file of its own (a mod's library) loads from there; a bare name, or a path into the app, from the APK. */
     tl_lib *L = tl_ld_find_lib(base);
     if (!L) L = tl_ld_load(path[0] == '/' ? path : base);
-    if (getenv("TL_DL_TRACE")) tl_log_line("dl: dlopen(%s) -> %s", path, L ? "ok" : "not found");
+    if (getenv("TL_DL_TRACE") || tl_watch_line()) tl_log_line("dl: dlopen(%s) -> %s", path, L ? "ok" : "not found");
     if (!L) { dl_fail("dlopen failed: library \"%s\" not found", path); return NULL; }
     tl_ld_init(L);
     return L;
@@ -558,7 +570,7 @@ static void *bionic_dlsym(void *handle, const char *name)
     } else {
         r = tl_ld_sym((tl_lib *)handle, name);
     }
-    if (getenv("TL_DL_TRACE")) tl_log_line("dl: dlsym(%s) -> %s", name, r ? "found" : "missing");
+    if (getenv("TL_DL_TRACE") || tl_watch_line()) tl_log_line("dl: dlsym(%s) -> %s", name, r ? "found" : "missing");
     if (!r) dl_fail("undefined symbol: %s", name);
     return r;
 }
