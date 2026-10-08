@@ -226,11 +226,15 @@ enum { AA_OK = 0, AA_UNAVAILABLE = -899, AA_INVALID_STATE = -895, AA_FORMAT_I16 
 #define AA_BURST 1024
 
 typedef int (*aa_data_cb)(void *stream, void *user, void *data, int frames);
-typedef struct aa_builder { aa_data_cb cb; void *user; int direction; int frames_per_cb; int format; } aa_builder;
+typedef struct aa_builder { aa_data_cb cb; void *user; int direction; int frames_per_cb; int format; int rate; int channels; } aa_builder;
 typedef struct aa_stream {
     aa_data_cb cb; void *user;
     int burst;                       /* frames per data callback: what the game asked for, or AA_BURST */
     int format;                      /* the samples the game writes: 16-bit, float or 32-bit, as it asked */
+    int rate, channels;              /* the rate and channel count it writes them at, as it asked */
+    double phase;                    /* the resampler's place, in the game's frames, from the start of the next buffer */
+    int16_t last[2];                 /* the game's last stereo frame, for resampling across buffers */
+    bool have_last;
     atomic_int state, buffer_size;
     atomic_bool run;
     atomic_llong frames;             /* frames played so far: the stream's position */
@@ -248,11 +252,57 @@ static void b_AAudioStreamBuilder_setFramesPerDataCallback(aa_builder *b, int n)
 /* The sample format the game will write. FMOD in Unity 6 asks for float; reading its float samples as 16-bit was a loud
  * buzz, and its buffers -- twice the size of 16-bit ones -- overran ours. */
 static void b_AAudioStreamBuilder_setFormat(aa_builder *b, int f) { b->format = f; }
+/* ...and the rate and channels it will write at. FMOD in Unity 6 asks for its project's 24 kHz and writes 24 kHz; played at
+ * 48 kHz, that was everything twice as fast -- the music, and the game, which keeps time by it. */
+static void b_AAudioStreamBuilder_setSampleRate(aa_builder *b, int r) { b->rate = r; }
+static void b_AAudioStreamBuilder_setChannelCount(aa_builder *b, int c) { b->channels = c; }
 
 /* The bytes one sample of a stream's format takes; the host output takes 16-bit. */
 static int aa_sample_bytes(int format) { return format == AA_FORMAT_FLOAT || format == AA_FORMAT_I32 ? 4 : 2; }
 
 /* The game's samples, as the 16-bit ones the host output plays. */
+static const int16_t *aa_to_i16(int format, const void *src, int samples, int16_t *dst);
+
+/*
+ * The game's frames as the host plays them: 16-bit stereo at AA_RATE. A mono frame goes to both sides; another rate is
+ * resampled, by straight lines between neighbouring frames, carrying the position and the last frame from one buffer to
+ * the next so the joins are seamless. Returns the frames written to `out`, which has room for aa_out_room(s, frames).
+ */
+static int aa_out_room(const aa_stream *s, int frames) { return (int)((double)frames * AA_RATE / s->rate) + 4; }
+
+static int aa_to_host(aa_stream *s, const void *src, int frames, int16_t *scratch, int16_t *out)
+{
+    const int16_t *pcm = aa_to_i16(s->format, src, frames * s->channels, scratch);
+    /* stereo, in place in scratch when it is mono (scratch has room for frames * 2) */
+    const int16_t *st = pcm;
+    if (s->channels == 1) {
+        if (pcm != scratch) { memcpy(scratch, pcm, (size_t)frames * sizeof(int16_t)); }
+        for (int i = frames - 1; i >= 0; i--) { scratch[2 * i + 1] = scratch[i]; scratch[2 * i] = scratch[i]; }
+        st = scratch;
+    }
+    if (s->rate == AA_RATE) {
+        if (st != out) memcpy(out, st, (size_t)frames * 2 * sizeof(int16_t));
+        return frames;
+    }
+    if (!s->have_last) { s->last[0] = st[0]; s->last[1] = st[1]; s->have_last = true; s->phase = 0; }
+    double step = (double)s->rate / AA_RATE;          /* the game's frames per host frame */
+    double p = s->phase;
+    int n = 0, room = aa_out_room(s, frames);
+    while (p < frames - 1 && n < room) {
+        int i = (int)(p < 0 ? -1 : p);
+        double t = p - i;
+        for (int c = 0; c < 2; c++) {
+            double a = i < 0 ? s->last[c] : st[2 * i + c], b = st[2 * (i + 1) + c];
+            out[2 * n + c] = (int16_t)(a + (b - a) * t);
+        }
+        n++;
+        p += step;
+    }
+    s->last[0] = st[2 * (frames - 1)]; s->last[1] = st[2 * (frames - 1) + 1];
+    s->phase = p - frames;
+    return n;
+}
+
 static const int16_t *aa_to_i16(int format, const void *src, int samples, int16_t *dst)
 {
     if (format == AA_FORMAT_FLOAT) {
@@ -282,9 +332,11 @@ static int b_AAudioStreamBuilder_openStream(aa_builder *b, aa_stream **out)
     s->cb = b->cb; s->user = b->user;
     s->burst = b->frames_per_cb > 0 && b->frames_per_cb <= 8192 ? b->frames_per_cb : AA_BURST;
     s->format = b->format == AA_FORMAT_FLOAT || b->format == AA_FORMAT_I32 ? b->format : AA_FORMAT_I16;
+    s->rate = b->rate >= 8000 && b->rate <= 192000 ? b->rate : AA_RATE;
+    s->channels = b->channels == 1 ? 1 : AA_CHANNELS;
     atomic_store(&s->state, AA_STATE_OPEN); atomic_store(&s->buffer_size, s->burst * 2);
     *out = s;
-    tl_log_line("aaudio: stream opened (%d Hz, %d channels, burst %d, %s samples, %s)", AA_RATE, AA_CHANNELS, s->burst,
+    tl_log_line("aaudio: stream opened (%d Hz, %d channel(s), burst %d, %s samples, %s)", s->rate, s->channels, s->burst,
                 s->format == AA_FORMAT_FLOAT ? "float" : s->format == AA_FORMAT_I32 ? "32-bit" : "16-bit",
                 s->cb ? "data callback" : "blocking writes");
     return AA_OK;
@@ -294,24 +346,26 @@ static void *aa_pump(void *arg)
 {
     aa_stream *s = arg;
     pthread_setname_np("aaudio-pump");
-    /* What the game writes, in its format, and the same burst as 16-bit for the host. */
-    size_t samples = (size_t)s->burst * AA_CHANNELS;
+    /* What the game writes, in its format, rate and channels; the same as 16-bit; and as the host plays it. */
+    size_t samples = (size_t)s->burst * (size_t)s->channels;
     void *buf = malloc(samples * (size_t)aa_sample_bytes(s->format));
-    int16_t *out = malloc(samples * sizeof(int16_t));
+    int16_t *scratch = malloc((size_t)s->burst * 2 * sizeof(int16_t));
+    int16_t *out = malloc((size_t)aa_out_room(s, s->burst) * 2 * sizeof(int16_t));
     bool answered = false;
     while (atomic_load(&s->run)) {
         memset(buf, 0, samples * (size_t)aa_sample_bytes(s->format));
         int r = s->cb(s, s->user, buf, s->burst);
         if (!answered) { answered = true; tl_log_line("aaudio: the game's mixer answered its first callback (%d)", r); }
         if (!atomic_load(&s->run)) break;
-        const int16_t *pcm = aa_to_i16(s->format, buf, (int)samples, out);
-        { static bool said; if (!said) { for (size_t i = 0; i < samples; i++) if (pcm[i]) { said = true; tl_log_line("aaudio: the game's first non-silent burst (sample %zu = %d)", i, pcm[i]); break; } } }
-        if (tl_cocos_audio_hook) tl_cocos_audio_hook(pcm, s->burst, AA_CHANNELS, AA_RATE);
-        else { struct timespec ts = { 0, (long)((double)s->burst * 1e9 / AA_RATE) }; nanosleep(&ts, NULL); }
+        int n = aa_to_host(s, buf, s->burst, scratch, out);
+        { static bool said; if (!said) { for (int i = 0; i < n * 2; i++) if (out[i]) { said = true; tl_log_line("aaudio: the game's first non-silent burst (sample %d = %d)", i, out[i]); break; } } }
+        if (tl_cocos_audio_hook) tl_cocos_audio_hook(out, n, AA_CHANNELS, AA_RATE);
+        else { struct timespec ts = { 0, (long)((double)s->burst * 1e9 / s->rate) }; nanosleep(&ts, NULL); }
         atomic_fetch_add(&s->frames, s->burst);
         if (r != 0) break;
     }
     free(buf);
+    free(scratch);
     free(out);
     return NULL;
 }
@@ -336,10 +390,12 @@ static int aa_stop(aa_stream *s, int state)
 static int b_AAudioStream_requestStop(aa_stream *s) { return aa_stop(s, AA_STATE_STOPPED); }
 static int b_AAudioStream_requestPause(aa_stream *s) { return aa_stop(s, AA_STATE_PAUSED); }
 static int b_AAudioStream_requestFlush(aa_stream *s) { atomic_store(&s->state, AA_STATE_FLUSHED); return AA_OK; }
-static int b_AAudioStream_close(aa_stream *s) { aa_stop(s, AA_STATE_CLOSED); free(s); return AA_OK; }
+static int b_AAudioStream_close(aa_stream *s) { aa_stop(s, AA_STATE_CLOSED); tl_log_line("aaudio: stream closed"); free(s); return AA_OK; }
 static int b_AAudioStream_release(aa_stream *s) { aa_stop(s, AA_STATE_CLOSED); return AA_OK; }
-static int b_AAudioStream_getSampleRate(aa_stream *s) { (void)s; return AA_RATE; }
-static int b_AAudioStream_getChannelCount(aa_stream *s) { (void)s; return AA_CHANNELS; }
+static int b_AAudioStream_getSampleRate(aa_stream *s) { return s->rate; }
+static int b_AAudioStream_getChannelCount(aa_stream *s) { return s->channels; }
+static int b_AAudioStream_getHardwareSampleRate(aa_stream *s) { (void)s; return AA_RATE; }
+static int b_AAudioStream_getHardwareChannelCount(aa_stream *s) { (void)s; return AA_CHANNELS; }
 static int b_AAudioStream_getFormat(aa_stream *s) { return s->format; }
 static int b_AAudioStream_getHardwareFormat(aa_stream *s) { (void)s; return AA_FORMAT_I16; }
 static int b_AAudioStream_getDeviceId(aa_stream *s) { (void)s; return 0; }
@@ -388,11 +444,13 @@ static int b_AAudioStream_write(aa_stream *s, const void *buf, int frames, int64
     (void)timeout_ns;
     if (!buf || frames <= 0) return 0;
     if (atomic_load(&s->state) != AA_STATE_STARTED) return AA_INVALID_STATE;
-    int16_t *tmp = s->format == AA_FORMAT_I16 ? NULL : malloc((size_t)frames * AA_CHANNELS * sizeof(int16_t));
-    const int16_t *pcm = tmp ? aa_to_i16(s->format, buf, frames * AA_CHANNELS, tmp) : buf;
-    if (tl_cocos_audio_hook) tl_cocos_audio_hook(pcm, frames, AA_CHANNELS, AA_RATE);
-    else { struct timespec ts = { 0, (long)((double)frames * 1e9 / AA_RATE) }; nanosleep(&ts, NULL); }
-    free(tmp);
+    int16_t *scratch = malloc((size_t)frames * 2 * sizeof(int16_t));
+    int16_t *out = malloc((size_t)aa_out_room(s, frames) * 2 * sizeof(int16_t));
+    int n = scratch && out ? aa_to_host(s, buf, frames, scratch, out) : 0;
+    if (tl_cocos_audio_hook) tl_cocos_audio_hook(out, n, AA_CHANNELS, AA_RATE);
+    else { struct timespec ts = { 0, (long)((double)frames * 1e9 / s->rate) }; nanosleep(&ts, NULL); }
+    free(scratch);
+    free(out);
     atomic_fetch_add(&s->frames, frames);
     return frames;
 }
@@ -689,7 +747,7 @@ const tl_bionic_entry tl_tab_ndk[] = {
     TL_WRAP("AAudioStreamBuilder_openStream", b_AAudioStreamBuilder_openStream), TL_WRAP("AAudioStreamBuilder_setDeviceId", b_AAudioStreamBuilder_ignore),
     TL_WRAP("AAudioStreamBuilder_setBufferCapacityInFrames", b_AAudioStreamBuilder_ignore), TL_WRAP("AAudioStreamBuilder_setInputPreset", b_AAudioStreamBuilder_ignore),
     TL_WRAP("AAudioStreamBuilder_setPerformanceMode", b_AAudioStreamBuilder_ignore), TL_WRAP("AAudioStreamBuilder_setUsage", b_AAudioStreamBuilder_ignore),
-    TL_WRAP("AAudioStreamBuilder_setSampleRate", b_AAudioStreamBuilder_ignore), TL_WRAP("AAudioStreamBuilder_setChannelCount", b_AAudioStreamBuilder_ignore),
+    TL_WRAP("AAudioStreamBuilder_setSampleRate", b_AAudioStreamBuilder_setSampleRate), TL_WRAP("AAudioStreamBuilder_setChannelCount", b_AAudioStreamBuilder_setChannelCount),
     TL_WRAP("AAudioStreamBuilder_setFormat", b_AAudioStreamBuilder_setFormat), TL_WRAP("AAudioStreamBuilder_setSharingMode", b_AAudioStreamBuilder_ignore),
     TL_WRAP("AAudioStream_requestStart", b_AAudioStream_requestStart), TL_WRAP("AAudioStream_requestStop", b_AAudioStream_requestStop),
     TL_WRAP("AAudioStream_close", b_AAudioStream_close), TL_WRAP("AAudioStream_getSampleRate", b_AAudioStream_getSampleRate),
@@ -700,7 +758,7 @@ const tl_bionic_entry tl_tab_ndk[] = {
     TL_WRAP("AAudioStream_getState", b_AAudioStream_getState), TL_WRAP("AAudioStream_read", b_AAudioStream_read),
     /* the rest of AAudio, which an engine that loads it with dlopen and dlsym (FMOD in Unity 6) looks up all of */
     TL_WRAP("AAudioStreamBuilder_setFramesPerDataCallback", b_AAudioStreamBuilder_setFramesPerDataCallback),
-    TL_WRAP("AAudioStreamBuilder_setSamplesPerFrame", b_AAudioStreamBuilder_ignore), TL_WRAP("AAudioStreamBuilder_setContentType", b_AAudioStreamBuilder_ignore),
+    TL_WRAP("AAudioStreamBuilder_setSamplesPerFrame", b_AAudioStreamBuilder_setChannelCount), TL_WRAP("AAudioStreamBuilder_setContentType", b_AAudioStreamBuilder_ignore),
     TL_WRAP("AAudioStreamBuilder_setSessionId", b_AAudioStreamBuilder_ignore), TL_WRAP("AAudioStreamBuilder_setAllowedCapturePolicy", b_AAudioStreamBuilder_ignore),
     TL_WRAP("AAudioStreamBuilder_setPrivacySensitive", b_AAudioStreamBuilder_ignore), TL_WRAP("AAudioStreamBuilder_setChannelMask", b_AAudioStreamBuilder_ignore),
     TL_WRAP("AAudioStreamBuilder_setSpatializationBehavior", b_AAudioStreamBuilder_ignore), TL_WRAP("AAudioStreamBuilder_setIsContentSpatialized", b_AAudioStreamBuilder_ignore),
@@ -715,7 +773,7 @@ const tl_bionic_entry tl_tab_ndk[] = {
     TL_WRAP("AAudioStream_getContentType", b_AAudioStream_getContentType), TL_WRAP("AAudioStream_getInputPreset", b_AAudioStream_getInputPreset),
     TL_WRAP("AAudioStream_getSessionId", b_AAudioStream_getSessionId), TL_WRAP("AAudioStream_getChannelMask", b_AAudioStream_getChannelMask),
     TL_WRAP("AAudioStream_isMMapUsed", b_AAudioStream_isMMapUsed), TL_WRAP("AAudio_convertStreamStateToText", b_AAudio_convertStreamStateToText),
-    TL_WRAP("AAudioStream_getHardwareSampleRate", b_AAudioStream_getSampleRate), TL_WRAP("AAudioStream_getHardwareChannelCount", b_AAudioStream_getChannelCount),
+    TL_WRAP("AAudioStream_getHardwareSampleRate", b_AAudioStream_getHardwareSampleRate), TL_WRAP("AAudioStream_getHardwareChannelCount", b_AAudioStream_getHardwareChannelCount),
     TL_WRAP("AAudioStream_getHardwareFormat", b_AAudioStream_getHardwareFormat),
     TL_WRAP("AAssetManager_openDir", b_AAssetManager_openDir), TL_WRAP("AAssetDir_getNextFileName", b_AAssetDir_getNextFileName),
     TL_WRAP("AAssetDir_close", b_AAssetDir_close), TL_WRAP("deflateBound", b_deflateBound),
