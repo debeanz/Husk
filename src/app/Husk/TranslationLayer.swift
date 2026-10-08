@@ -713,14 +713,13 @@ struct TLClassicAttemptView: View {
     @StateObject private var runner = TLAttemptRunner()
     @StateObject private var monitor = PerformanceMonitor()
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("husk.tl.showLog") private var showLogSetting = false
-    @AppStorage(TranslationLayer.devInfoKey) private var devInfo = false
+    /// The run log over the game, opened from the toolbar.
+    @State private var showLog = false
     @State private var settings: TLAppSettings
     /// Whether the toolbar is down.
     @State private var chrome = false
     /// Laid out over the whole screen, the area around the camera included (the game's Full Screen setting).
     private let fullBleed: Bool
-    private var showLog: Bool { get { showLogSetting && devInfo } nonmutating set { showLogSetting = newValue } }
 
     init(app: TLApp) {
         self.app = app
@@ -762,8 +761,8 @@ struct TLClassicAttemptView: View {
             .ignoresSafeArea(.container, edges: fullBleed ? .all : [.horizontal, .bottom])
 
             if showLog {
-                logPanel
-                    .frame(maxWidth: 560, maxHeight: 260)
+                GameLogPanel(text: runner.logText) { withAnimation(.snappy(duration: 0.25)) { showLog = false } }
+                    .frame(maxWidth: 560, maxHeight: 300)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                     .padding(10)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -773,11 +772,9 @@ struct TLClassicAttemptView: View {
                         statusColor: runner.statusColor, shown: $chrome, pinned: showLog || runner.isDone,
                         monitor: monitor, onClose: { runner.stop(); dismiss() }) {
                 PerfOverlayButton()
-                if devInfo {
-                    OverlayButton(systemImage: "doc.text.magnifyingglass", label: showLog ? "Hide Log" : "Show Log",
-                                  active: showLog) {
-                        withAnimation(.snappy(duration: 0.25)) { showLog.toggle() }
-                    }
+                OverlayButton(systemImage: "doc.text.magnifyingglass", label: showLog ? "Hide Log" : "Show Log",
+                              active: showLog) {
+                    withAnimation(.snappy(duration: 0.25)) { showLog.toggle() }
                 }
             }
         }
@@ -799,22 +796,5 @@ struct TLClassicAttemptView: View {
             UIApplication.shared.isIdleTimerDisabled = false
             HuskOrientation.set(HuskOrientation.standard)
         }
-    }
-
-    private var logPanel: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                Text(runner.logText.isEmpty ? "Starting…" : runner.logText)
-                    .font(.technical(10))
-                    .foregroundStyle(.white.opacity(0.85))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-                    .textSelection(.enabled)
-                    .id("bottom")
-            }
-            .onChange(of: runner.logText) { _ in proxy.scrollTo("bottom", anchor: .bottom) }
-        }
-        .huskPanel(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 }

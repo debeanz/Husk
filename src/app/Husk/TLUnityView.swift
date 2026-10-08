@@ -440,8 +440,8 @@ struct TLCocosAttemptView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var model = TLUnityModel()
     @StateObject private var monitor = PerformanceMonitor()
-    @AppStorage("husk.tl.unity.showLog") private var showLogSetting = false
-    @AppStorage(TranslationLayer.devInfoKey) private var devInfo = false
+    /// The run log over the game, opened from the toolbar.
+    @State private var showLog = false
     @ObservedObject private var pads = HuskGamepads.shared
     @StateObject private var virtualPad = VirtualPad()
     /// Where the player has put the pad's controls in this game, and whether they are moving them now.
@@ -455,7 +455,6 @@ struct TLCocosAttemptView: View {
     /// Whether the game was laid out over the whole screen, the area around the camera included (the game's Full Screen
     /// setting). The game's surface is sized once at launch, so this cannot change while it runs.
     private let fullBleed: Bool
-    private var showLog: Bool { get { showLogSetting && devInfo } nonmutating set { showLogSetting = newValue } }
 
     init(app: TLApp) {
         self.app = app
@@ -559,8 +558,8 @@ struct TLCocosAttemptView: View {
             }
 
             if showLog {
-                logPanel
-                    .frame(width: 340)
+                GameLogPanel(text: model.logText) { withAnimation(.snappy(duration: 0.25)) { showLog = false } }
+                    .frame(maxWidth: 360)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
                     .padding(.top, 64).padding(.trailing, 10).padding(.bottom, 10)
                     .transition(.move(edge: .trailing).combined(with: .opacity))
@@ -581,11 +580,9 @@ struct TLCocosAttemptView: View {
                     }
                 }
                 PerfOverlayButton()
-                if devInfo {
-                    OverlayButton(systemImage: "doc.text.magnifyingglass", label: showLog ? "Hide Log" : "Show Log",
-                                  active: showLog) {
-                        withAnimation(.snappy(duration: 0.25)) { showLog.toggle() }
-                    }
+                OverlayButton(systemImage: "doc.text.magnifyingglass", label: showLog ? "Hide Log" : "Show Log",
+                              active: showLog) {
+                    withAnimation(.snappy(duration: 0.25)) { showLog.toggle() }
                 }
             }
         }
@@ -652,33 +649,5 @@ struct TLCocosAttemptView: View {
         .padding(18)
         .huskPanel(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .font(.system(size: 13, weight: .semibold))
-    }
-
-    private var logPanel: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("RUN LOG").font(.technical(10, weight: .bold)).foregroundStyle(.white.opacity(0.6))
-                Spacer()
-                Button { UIPasteboard.general.string = model.logText } label: {
-                    Label("Copy", systemImage: "doc.on.doc").font(.system(size: 11, weight: .semibold))
-                }
-                .tint(.white)
-            }
-            .padding(.horizontal, 12).padding(.vertical, 8)
-            ScrollViewReader { proxy in
-                ScrollView {
-                    Text(model.logText.isEmpty ? "Starting…" : model.logText)
-                        .font(.technical(10))
-                        .foregroundStyle(.white.opacity(0.85))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(10)
-                        .textSelection(.enabled)
-                        .id("bottom")
-                }
-                .onChange(of: model.logText) { _ in proxy.scrollTo("bottom", anchor: .bottom) }
-            }
-        }
-        .huskPanel(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 }

@@ -274,3 +274,62 @@ struct PerfOverlayButton: View {
                       active: perfOn) { perfOn.toggle() }
     }
 }
+
+/// The game's run log over the game: what the runtime did to start it, live, with ways to copy or share it. Opened from the
+/// game's toolbar.
+struct GameLogPanel: View {
+    let text: String
+    let onClose: () -> Void
+    @State private var copied = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Text("Log")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                Spacer()
+                Button {
+                    UIPasteboard.general.string = text
+                    copied = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+                } label: {
+                    Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .tint(.white)
+                ShareLink(item: text) {
+                    Label("Share", systemImage: "square.and.arrow.up")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .tint(.white)
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 26, height: 26)
+                        .background(Color.white.opacity(0.12), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Close Log")
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            Rectangle().fill(Color.white.opacity(0.12)).frame(height: 0.5)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    Text(text.isEmpty ? "Starting…" : text)
+                        .font(.technical(10))
+                        .foregroundStyle(.white.opacity(0.85))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                        .textSelection(.enabled)
+                        .id("bottom")
+                }
+                .onChange(of: text) { _ in proxy.scrollTo("bottom", anchor: .bottom) }
+                .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
+            }
+        }
+        .huskPanel(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+}

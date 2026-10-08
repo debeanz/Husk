@@ -41,7 +41,7 @@ struct SettingsTab: View {
                          ? "Shows the frame rate over every game\(perfDetailed ? ", with the time a frame takes, the memory Husk uses and a warning when the iPhone runs hot" : "")."
                            + " Tap the top of the screen in a game to bring up its controls."
                          : "Tap the top of the screen in a game to bring up its controls: close the game, the on-screen "
-                           + "controller, and this overlay.")
+                           + "controller, this overlay and the game's log.")
                 }
 
                 Section {
@@ -60,9 +60,8 @@ struct SettingsTab: View {
                 } header: {
                     Text("Troubleshooting")
                 } footer: {
-                    Text(devInfo
-                         ? "Games show a run log in their toolbar, and each game's page has its full technical report."
-                         : "The console is Husk's live log — what to share when something goes wrong.")
+                    Text("The console is Husk's live log. In a game, the log button in its toolbar shows that game's own run log. "
+                       + "Both are what to share when something goes wrong.")
                 }
             }
             .listStyle(.insetGrouped)
