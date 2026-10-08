@@ -23,7 +23,11 @@ enum TLNativeEngine {
 /// game draws and presents on its own thread. This view's jobs are the layer's size, the pause that
 /// goes with leaving the screen, and turning touches into the pixel coordinates Android reports.
 final class TLUnityUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
-    override class var layerClass: AnyClass { CAMetalLayer.self }
+    /// What the game draws into. A layer of its own rather than the view's, so that it can keep the game's shape: once the
+    /// game has started it is the largest rectangle of that shape that fits the view, centred, with black around it. ANGLE
+    /// sizes its surface from the layer's bounds, so a layer the shape of the screen rather than of the game would crop the
+    /// game's picture whenever the two differ -- a landscape game on a screen that stayed portrait.
+    private let metal = CAMetalLayer()
 
     /// The cocos2d-x or SDL game on screen, which the game's keyboard requests (they arrive on its own thread) are routed to.
     nonisolated(unsafe) static weak var cocosView: TLUnityUIView?
@@ -59,12 +63,14 @@ final class TLUnityUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         // Two pixels per point unless the game's settings say otherwise: sharp enough, and a third of the pixels a 3x phone would
         // ask the game for -- a 3D game is limited by fill rate, and ANGLE's translation costs on top.
         contentScaleFactor = scale
-        if let metal = layer as? CAMetalLayer {
-            metal.pixelFormat = .bgra8Unorm
-            metal.framebufferOnly = true
-            metal.contentsScale = scale
-            metal.isOpaque = true
-        }
+        metal.pixelFormat = .bgra8Unorm
+        metal.framebufferOnly = true
+        metal.contentsScale = scale
+        metal.isOpaque = true
+        metal.backgroundColor = UIColor.black.cgColor
+        // Moved and resized only by layout, never animated.
+        metal.actions = ["bounds": NSNull(), "position": NSNull(), "frame": NSNull(), "contentsScale": NSNull()]
+        layer.addSublayer(metal)
         let threeFingers = UITapGestureRecognizer(target: self, action: #selector(threeFingerTapped))
         threeFingers.numberOfTouchesRequired = 3
         threeFingers.cancelsTouchesInView = false
@@ -119,17 +125,21 @@ final class TLUnityUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     override func layoutSubviews() {
         super.layoutSubviews()
         guard bounds.width > 0, bounds.height > 0 else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
         if let size = launchedSize {
-            // The game was told its size once, at launch, and draws at that size for good. The drawable keeps that size
-            // whatever this view does meanwhile -- the screen turning, the game being shown again -- or the game's picture
-            // covers only part of it and the rest is black. An Unreal game draws with MoltenVK, which sizes this layer
-            // itself to the swapchain it made.
-            if engine != .ue4 { (layer as? CAMetalLayer)?.drawableSize = size }
+            // The game was told its size once, at launch, and draws at that size for good. Its layer keeps that shape and
+            // that many pixels whatever this view does meanwhile -- the screen turning, or not turning, or the game being
+            // shown again -- fitted into the view with black around it when the shapes differ.
+            fit(size)
             return
         }
+        metal.frame = bounds
+        metal.contentsScale = contentScaleFactor
         let w = Int((bounds.width * contentScaleFactor).rounded())
         let h = Int((bounds.height * contentScaleFactor).rounded())
-        (layer as? CAMetalLayer)?.drawableSize = CGSize(width: w, height: h)
+        metal.drawableSize = CGSize(width: w, height: h)
         // A landscape game is told its size once, when it starts, so it must not start while the screen is still
         // turning: wait for a surface that is wider than it is tall (Unity games too: Fruit Ninja is a landscape one).
         if firstLayout == nil, window != nil {
@@ -146,9 +156,27 @@ final class TLUnityUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         let (gw, gh) = turned ? (w, h) : (h, w)
         if !turned { HuskLog.log("tl", "native: the screen has not turned yet; starting the game \(portrait ? "portrait" : "landscape") at \(gw)x\(gh) anyway") }
         let size = CGSize(width: gw, height: gh)
-        (layer as? CAMetalLayer)?.drawableSize = size
         launchedSize = size
+        fit(size)
         if !launched { launch(width: gw, height: gh) }
+    }
+
+    /// The largest rectangle with the game's shape that fits in this view, centred: all of the game, with black around it
+    /// when the view is another shape.
+    private func gameRect(for size: CGSize) -> CGRect {
+        let aspect = size.width / max(size.height, 1)
+        var w = bounds.width, h = bounds.height
+        if w / max(h, 1) > aspect { w = h * aspect } else { h = w / aspect }
+        return CGRect(x: (bounds.width - w) / 2, y: (bounds.height - h) / 2, width: w, height: h)
+    }
+
+    /// Put the game's layer in its rectangle, with exactly the pixels the game was told it has. An Unreal game draws with
+    /// MoltenVK, which sets the drawable's size itself from the swapchain it made.
+    private func fit(_ size: CGSize) {
+        let r = gameRect(for: size)
+        metal.frame = r
+        metal.contentsScale = size.width / max(r.width, 1)
+        if engine != .ue4 { metal.drawableSize = size }
     }
 
     private var firstLayout: Date?
@@ -171,7 +199,7 @@ final class TLUnityUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         let angle = (Bundle.main.privateFrameworksPath ?? "") + "/libANGLE-shared.dylib"
         let ca = Bundle.main.path(forResource: "cacert", ofType: "pem") ?? ""
         try? FileManager.default.createDirectory(atPath: dataDir, withIntermediateDirectories: true)
-        let layerPtr = Unmanaged.passUnretained(layer).toOpaque()
+        let layerPtr = Unmanaged.passUnretained(metal).toOpaque()
         if husk_unity_state() != Int32(HUSK_UNITY_IDLE) {
             // Already started this run: the engine cannot be loaded twice, so just show it again.
             HuskLog.log("tl", "unity: already started; resuming")
@@ -346,13 +374,16 @@ final class TLUnityUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         return next
     }
 
-    /// Where a point in this view is in the game's own pixels: scaled onto the size the game was told at launch, which is
-    /// this view's size in pixels once the screen has turned.
+    /// Where a point in this view is in the game's own pixels: its place in the game's rectangle, scaled onto the size the
+    /// game was told at launch. A touch on the black around the game counts as one at the game's nearest edge.
     private func gamePoint(_ p: CGPoint) -> (Float, Float) {
         guard let size = launchedSize, bounds.width > 0, bounds.height > 0 else {
             return (Float(p.x * contentScaleFactor), Float(p.y * contentScaleFactor))
         }
-        return (Float(p.x / bounds.width * size.width), Float(p.y / bounds.height * size.height))
+        let r = gameRect(for: size)
+        let x = max(0, min(1, (p.x - r.minX) / max(r.width, 1)))
+        let y = max(0, min(1, (p.y - r.minY) / max(r.height, 1)))
+        return (Float(x * size.width), Float(y * size.height))
     }
 
     private func send(_ touches: Set<UITouch>, phase: Int32) {
