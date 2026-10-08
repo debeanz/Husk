@@ -861,6 +861,28 @@ static size_t phantom_clamp(uintptr_t a, size_t l)
     return l;
 }
 
+/* The highest address iOS lets this process map: low without the extended-virtual-addressing entitlement, which the signing may not honour. */
+static uint64_t vm_max_address(void)
+{
+    task_vm_info_data_t info;
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    return task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) == KERN_SUCCESS ? info.max_address : 0;
+}
+
+/* A game that needs its memory at one address (a static recompilation keeps the console's addresses: Hades wants 0x4000000000) and did not get it. */
+static void note_wrong_place(void *want, size_t len, void *got)
+{
+    static int said;
+    if (said++ >= 4) return;
+    uint64_t max = vm_max_address();
+    if (max && (uint64_t)(uintptr_t)want + len > max)
+        tl_log_line("mm: the game needs %#zx bytes at exactly %p, but iOS lets this app use addresses only up to %#llx -- it would need the "
+                    "extended-virtual-addressing entitlement honoured (got %p instead)", len, want, (unsigned long long)max, got);
+    else
+        tl_log_line("mm: the game needs %#zx bytes at exactly %p and got %p (something else is there; addresses go up to %#llx)", len, want, got,
+                    (unsigned long long)max);
+}
+
 static void *b_mmap(void *addr, size_t len, int prot, int flags, int fd, long off)
 {
     /* A hooking library's trampolines (Geode): executable memory is a piece of the JIT region, written through the other view. */
@@ -886,6 +908,11 @@ static void *b_mmap(void *addr, size_t len, int prot, int flags, int fd, long of
     void *r = refuse || (force_phantom && len == 2 * PHANTOM_HALF && prot == 0 && (flags & 0x20) && !(flags & 0x10)) ? MAP_FAILED
             : mmap(addr, len, prot_filter(prot, "mmap"), df, (flags & 0x20) ? -1 : fd, off);
     if (r == MAP_FAILED && (errno == ENOMEM || force_phantom) && prot == 0 && (flags & 0x20) && !(flags & 0x10)) { r = phantom_reserve(len); if (r != MAP_FAILED) errno = 0; }
+    /* Asked for one place, given another. MAP_FIXED_NOREPLACE (Linux 0x100000) means exactly there or not at all: EEXIST, as Linux says. */
+    if (addr && !(flags & 0x10) && r != MAP_FAILED && r != addr) {
+        note_wrong_place(addr, len, r);
+        if (flags & 0x100000) { munmap(r, len); r = MAP_FAILED; errno = EEXIST; }
+    } else if (addr && (flags & 0x10) && r == MAP_FAILED) note_wrong_place(addr, len, r);
     TL_ERRNO_END();
     if (r != MAP_FAILED && (flags & 0x20)) anon_add(r, len);
     mm_trace("mmap", r, len, prot, flags);

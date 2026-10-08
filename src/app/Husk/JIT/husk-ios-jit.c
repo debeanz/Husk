@@ -175,11 +175,14 @@ void husk_ios_jit_log_footprint(const char *tag)
     size_t avail = os_proc_available_memory();
 
     HUSK_LOG("footprint[%s]: phys=%.1f MiB  resident=%.1f MiB  "
-             "available-before-jetsam=%.1f MiB",
+             "available-before-jetsam=%.1f MiB  addresses up to %#llx",
              tag ? tag : "",
              info.phys_footprint / (1024.0 * 1024.0),
              info.resident_size  / (1024.0 * 1024.0),
-             avail / (1024.0 * 1024.0));
+             avail / (1024.0 * 1024.0),
+             /* how far this process's address space reaches: much higher with the
+              * extended-virtual-addressing entitlement, when the signing honours it */
+             (unsigned long long)info.max_address);
 }
 
 size_t husk_ios_available_memory(void)
