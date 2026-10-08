@@ -18,6 +18,8 @@ on:
       - 'Screenshots/**'
       - 'showcase/**'
       - 'research/**'
+      # Generated from project.yml at the start of every build, so a change to it alone builds nothing new.
+      - 'src/app/Husk.xcodeproj/**'
 
 concurrency:
   group: build-ipa-${{ github.ref }}
