@@ -267,9 +267,11 @@ static void *aa_pump(void *arg)
     aa_stream *s = arg;
     pthread_setname_np("aaudio-pump");
     int16_t *buf = malloc((size_t)s->burst * AA_CHANNELS * sizeof(int16_t));
+    bool answered = false;
     while (atomic_load(&s->run)) {
         memset(buf, 0, (size_t)s->burst * AA_CHANNELS * sizeof(int16_t));
         int r = s->cb(s, s->user, buf, s->burst);
+        if (!answered) { answered = true; tl_log_line("aaudio: the game's mixer answered its first callback (%d)", r); }
         if (!atomic_load(&s->run)) break;
         { static bool said; if (!said) { for (int i = 0; i < s->burst * AA_CHANNELS; i++) if (buf[i]) { said = true; tl_log_line("aaudio: the game's first non-silent burst (sample %d = %d)", i, buf[i]); break; } } }
         if (tl_cocos_audio_hook) tl_cocos_audio_hook(buf, s->burst, AA_CHANNELS, AA_RATE);
@@ -285,6 +287,7 @@ static int b_AAudioStream_requestStart(aa_stream *s)
 {
     if (atomic_exchange(&s->run, true)) return AA_OK;
     atomic_store(&s->state, AA_STATE_STARTED);
+    tl_log_line("aaudio: stream started");
     if (!s->cb) return AA_OK;                                          /* blocking writes: nothing to pump */
     pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 1u << 20);
     s->thread_started = pthread_create(&s->thread, &a, aa_pump, s) == 0;

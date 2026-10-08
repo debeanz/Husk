@@ -377,6 +377,33 @@ void tl_jni_clear(void) { t_pending = NULL; }
 
 static jvalue g_zero;
 
+/*
+ * A static getInstance() of the class's own type that nothing implements is the singleton pattern: answer it with one
+ * object of the class, the same every time, rather than null. An engine that asked for its helper this way (FMOD 2.03's
+ * org.fmod.FmodAndroidAudioManager) goes on to call methods on it, and those are then logged one by one like any other
+ * method that is not implemented, instead of the engine stopping on a null it did not expect.
+ */
+static jobj *singleton_for(const tl_jmeth *m)
+{
+    if (!m->is_static || m->retk != 'L' || strcmp(m->name, "getInstance") != 0) return NULL;
+    char want[300];
+    snprintf(want, sizeof(want), "()L%s;", m->cls->name);
+    if (strcmp(m->sig, want) != 0) return NULL;
+    static struct { tl_jclass *cls; jobj *obj; } made[32];
+    static int nmade;
+    jobj *obj = NULL;
+    pthread_mutex_lock(&g_lock);
+    for (int i = 0; i < nmade && !obj; i++) if (made[i].cls == m->cls) obj = made[i].obj;
+    pthread_mutex_unlock(&g_lock);
+    if (obj) return obj;
+    obj = tl_jni_new_object(m->cls);
+    pthread_mutex_lock(&g_lock);
+    if (nmade < 32) { made[nmade].cls = m->cls; made[nmade].obj = obj; nmade++; }
+    pthread_mutex_unlock(&g_lock);
+    tl_log_line("jni: %s.getInstance() is not implemented; answering with one object of the class", m->cls->name);
+    return obj;
+}
+
 static jvalue invoke(jobj *self, tl_jmeth *m, bool nonvirtual, const jvalue *args)
 {
     tl_jcall c = { .self = self, .cls = m->cls, .args = args };
@@ -397,6 +424,14 @@ static jvalue invoke(jobj *self, tl_jmeth *m, bool nonvirtual, const jvalue *arg
          * reference would free an object that is still in use. */
         if (m->retk == 'L' && c.ret.l && ((jobj *)c.ret.l)->kind != TL_K_CLASS) tl_jni_ref(c.ret.l);
         return c.ret;
+    }
+    {
+        jobj *one = singleton_for(m);
+        if (one) {
+            jvalue r; r.j = 0; r.l = one;
+            tl_jni_ref(one);                    /* the caller's local reference; the object itself stays */
+            return r;
+        }
     }
     if (!m->warned) {
         m->warned = true;
