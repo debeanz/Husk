@@ -812,12 +812,54 @@ static void mm_trace(const char *what, void *a, size_t l, long x, long y)
  * start of an 8 GiB range it believes it owns; what it then gives back -- the half that was never mapped -- is ignored.
  */
 #define PHANTOM_HALF ((size_t)4 << 30)
-static struct { uintptr_t base; size_t len, real; } g_phantom[4];
+#define MAX_PHANTOM 64
+static struct { uintptr_t base; size_t len, real; } g_phantom[MAX_PHANTOM];
 static int g_nphantom;
+static uint64_t vm_max_address(void);
+
+static bool is_pow2(size_t n) { return n && !(n & (n - 1)); }
+
+/* A block of `a` bytes aligned to `a`, reserved (PROT_NONE), wherever one is still free; MAP_FAILED if none is. */
+static void *aligned_block(size_t a)
+{
+    void *p = mmap(NULL, a, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (p != MAP_FAILED && !((uintptr_t)p & (a - 1))) return p;
+    if (p != MAP_FAILED) munmap(p, a);
+    uint64_t max = vm_max_address();
+    if (!max) max = (uint64_t)1 << 36;
+    for (uintptr_t hint = (uintptr_t)1 << 32; (uint64_t)hint + a <= max; hint += a) {
+        void *q = mmap((void *)hint, a, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (q == (void *)hint) return q;
+        if (q != MAP_FAILED) munmap(q, a);
+    }
+    return MAP_FAILED;
+}
+
+/*
+ * The same for any allocator that wants one block aligned to its own size: it reserves twice the block (or twice less a page) and
+ * keeps the aligned block inside. Unity's heap takes 256 MiB blocks so, with a 512 MiB reservation each, and an iPhone app's
+ * addresses run out long before an Android one's (Dave the Diver: six blocks, then no 512 MiB stretch left). The block is what is
+ * used, and an aligned one can still be free when a stretch twice its size is not: the caller is given the block at the start of a
+ * range it believes it owns, and what it gives back past the block is ignored.
+ */
+static void *aligned_phantom(size_t len)
+{
+    size_t a = 0;
+    if (is_pow2(len)) a = len / 2;
+    else for (size_t pg = 4096; pg <= 65536 && !a; pg *= 2) if (is_pow2(len + pg)) a = (len + pg) / 2;
+    if (a < ((size_t)32 << 20) || g_nphantom >= MAX_PHANTOM) return MAP_FAILED;
+    void *b = aligned_block(a);
+    if (b == MAP_FAILED) { tl_log_line("mm: no free %zu MiB block aligned to its size is left either", a >> 20); return MAP_FAILED; }
+    g_phantom[g_nphantom].base = (uintptr_t)b; g_phantom[g_nphantom].len = len; g_phantom[g_nphantom].real = a;
+    g_nphantom++;
+    tl_log_line("mm: %zu MiB to get an aligned %zu MiB block was refused; gave the aligned block at %p instead", len >> 20, a >> 20, b);
+    return b;
+}
 
 static void *phantom_reserve(size_t len)
 {
-    if (len != 2 * PHANTOM_HALF || g_nphantom >= 4) return MAP_FAILED;
+    if (len != 2 * PHANTOM_HALF) return aligned_phantom(len);
+    if (g_nphantom >= MAX_PHANTOM) return MAP_FAILED;
     void *res = MAP_FAILED;
     /* Reserve 5 GiB, which holds an aligned 4 GiB only when it starts in the first GiB of an alignment period. Mappings come one after
      * another, so a miss is kept (it moves the next one on by a GiB) and given back once there is a hit. */
@@ -856,7 +898,11 @@ static size_t phantom_clamp(uintptr_t a, size_t l)
 {
     for (int i = 0; i < g_nphantom; i++) {
         uintptr_t b = g_phantom[i].base, real_end = b + g_phantom[i].real, end = b + g_phantom[i].len;
-        if (a >= b && a < end) return a >= real_end ? 0 : (a + l > real_end ? real_end - a : l);
+        if (a >= b && a < end) {
+            /* The part past the real block, given back: from now on those addresses are anyone's, and their own unmaps are real ones. */
+            if (a >= real_end) { if (a + l >= end) g_phantom[i].len = (size_t)(a - b); return 0; }
+            return a + l > real_end ? real_end - a : l;
+        }
     }
     return l;
 }
@@ -891,6 +937,7 @@ static void vm_report(size_t wanted)
         vm_region_submap_info_data_64_t info;
         mach_msg_type_number_t cnt = VM_REGION_SUBMAP_INFO_COUNT_64;
         if (vm_region_recurse_64(mach_task_self(), &a, &sz, &depth, (vm_region_recurse_info_t)&info, &cnt) != KERN_SUCCESS) break;
+        if (max && a >= max) break;                          /* past what the app may use: the kernel's own reservations */
         if (a > prev_end) {
             uint64_t g = a - prev_end;
             free_total += g;
