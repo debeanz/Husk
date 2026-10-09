@@ -65,21 +65,46 @@ static bool es31_varying(char *out, size_t *o, const char *decl, size_t dl, cons
     return true;
 }
 
-/* The 300 es text of a 310 es shader (malloc'd), with the bindings it dropped in rec[0..*nrec). Anything else is returned as it came. */
+/*
+ * The 300 es text of a 310 es shader (malloc'd), with the bindings it dropped in rec[0..*nrec). A 300 es shader is given the same
+ * treatment but keeps its version line: an engine that took the driver for 3.1 writes 3.1's qualifiers into the 300 es shaders it
+ * makes too. Anything else is returned as it came.
+ */
 static char *es31_downgrade(const char *src, size_t n, es31_bind *rec, int *nrec)
 {
     char *out = malloc(2 * n + 8192); size_t o = 0;
     *nrec = 0;
     const char *ver = strstr(src, "#version 310 es");
-    if (!ver) { memcpy(out, src, n); out[n] = 0; return out; }
+    if (!ver && !strstr(src, "#version 300 es")) { memcpy(out, src, n); out[n] = 0; return out; }
     const bool vertex = strstr(src, "gl_Position") != NULL;     /* only a vertex shader writes it */
     for (size_t i = 0; i < n;) {
-        if (src + i == ver) { memcpy(out + o, "#version 300 es", 15); o += 15; i += 15; continue; }
-        if (i + 7 <= n && !strncmp(src + i, "layout(", 7) && (i == 0 || !es31_ident(src[i - 1]))) {
-            size_t j = i + 7; int depth = 1;
+        if (ver && src + i == ver) { memcpy(out + o, "#version 300 es", 15); o += 15; i += 15; continue; }
+        /* A preprocessor line is the preprocessor's (a #define of a layout is not a declaration): as it is. */
+        if ((i == 0 || src[i - 1] == '\n') && src[i] == '#') {
+            while (i < n && src[i] != '\n') out[o++] = src[i++];
+            continue;
+        }
+        /* Unreal's INTERFACE_LOCATION(N): its shaders' #define makes it layout(location = N) when the driver has separate shader
+         * objects, which 3.1 does. On a varying it gets what a written-out layout(location = N) gets; anywhere else it stays. */
+        if (i + 19 <= n && !strncmp(src + i, "INTERFACE_LOCATION(", 19) && (i == 0 || !es31_ident(src[i - 1]))) {
+            size_t j = i + 19; while (j < n && src[j] != ')') j++;
+            if (j < n) {
+                char q[48]; size_t ql = j - (i + 19); if (ql > 30) ql = 30;
+                int ql_n = snprintf(q, sizeof(q), "location=%.*s", (int)ql, src + i + 19); (void)ql_n;
+                size_t d = j + 1; while (d < n && src[d] != ';' && src[d] != '{') d++;
+                char decl[200]; size_t dl = d - (j + 1); if (dl >= sizeof(decl)) dl = sizeof(decl) - 1;
+                memcpy(decl, src + j + 1, dl); decl[dl] = 0;
+                if (d < n && src[d] == ';' && es31_has_word(decl, vertex ? "out" : "in") && es31_varying(out, &o, decl, dl, q)) { i = d + 1; continue; }
+            }
+        }
+        size_t lp = i + 6;                                          /* "layout" (and any spaces) then "(" */
+        while (lp < n && src[lp] == ' ') lp++;
+        if (i + 7 <= n && !strncmp(src + i, "layout", 6) && lp < n && src[lp] == '(' && (i == 0 || !es31_ident(src[i - 1]))) {
+            lp++;                                                   /* just after the "(" */
+            size_t j = lp; int depth = 1;
             while (j < n && depth) { if (src[j] == '(') depth++; else if (src[j] == ')') depth--; j++; }
-            char q[160]; size_t ql = j - 1 - (i + 7); if (ql >= sizeof(q)) ql = sizeof(q) - 1;
-            memcpy(q, src + i + 7, ql); q[ql] = 0;
+            char q[160]; size_t ql = j - 1 - lp; if (ql >= sizeof(q)) ql = sizeof(q) - 1;
+            memcpy(q, src + lp, ql); q[ql] = 0;
             char *b = strstr(q, "binding");
             size_t d = j; while (d < n && src[d] != ';' && src[d] != '{') d++;
             char decl[200]; size_t dl = d - j; if (dl >= sizeof(decl)) dl = sizeof(decl) - 1;

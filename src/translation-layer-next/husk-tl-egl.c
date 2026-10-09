@@ -463,6 +463,33 @@ static const unsigned char *w_glGetStringi(unsigned name, unsigned index)
     return s;
 }
 
+/* Line `want` (from 1) of `src`, into out. */
+static void source_line(const char *src, int want, char *out, size_t cap)
+{
+    int line = 1;
+    const char *p = src;
+    while (*p && line < want) { if (*p == '\n') line++; p++; }
+    size_t k = 0;
+    while (*p && *p != '\n' && k + 1 < cap) out[k++] = *p++;
+    out[k] = 0;
+}
+
+/* What the driver compiled, where it complained: the first line (the version) and the lines the first errors name. */
+static void log_source_lines(unsigned sh, const char *src, const char *log)
+{
+    char text[240];
+    source_line(src, 1, text, sizeof(text));
+    tl_log_line("gl: shader %u, line 1: %s", sh, text);
+    int said = 0, last = -1;
+    for (const char *e = strstr(log, "ERROR: 0:"); e && said < 4; e = strstr(e + 9, "ERROR: 0:")) {
+        int line = atoi(e + 9);
+        if (line <= 0 || line == last) continue;
+        source_line(src, line, text, sizeof(text));
+        tl_log_line("gl: shader %u, line %d: %s", sh, line, text);
+        last = line; said++;
+    }
+}
+
 /* A shader that does not compile is the commonest reason an engine draws nothing and says nothing: say why, for the first few. */
 static void (*r_glCompileShader)(unsigned);
 static void w_glCompileShader(unsigned sh)
@@ -485,6 +512,7 @@ static void w_glCompileShader(unsigned sh)
     if (slen > 0) getsrc(sh, slen, &got, src);
     for (char *q = log; *q; q++) if (*q == '\n') *q = '|';
     tl_log_line("gl: shader %u failed to compile (%d bytes of source): %.380s", sh, slen, log);
+    if (n < 2) log_source_lines(sh, src, log);
     const char *dir = getenv("TL_GL_SHADER_DUMP");
     if (dir) {
         char path[600]; snprintf(path, sizeof(path), "%s/shader-%d.txt", dir, n);
