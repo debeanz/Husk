@@ -310,31 +310,14 @@ static void watch_nullable_throws(void)
  * A game that stops without an error -- a loading screen that never ends -- is waiting on something, and its log does not
  * say what. So a few C# methods are watched (found through IL2CPP's API: a game without them is not touched) and their calls
  * logged: for a coroutine's step (MoveNext) the step it is about to take, so the last step logged is where the game waits.
- * For any game, the scenes it loads; the rest is Dave the Diver's way from its intro to its title screen.
+ * For any game, the scenes it loads.
  */
 enum { TR_CALLS, TR_STEPS, TR_ASYNC, TR_SCENE, TR_TWO_INTS };
 typedef struct { const char *assembly, *cls, *method; int argc, kind; } traced;
 static const traced k_traced[] = {
     { "UnityEngine.CoreModule", "UnityEngine.SceneManagement.SceneManagerAPIInternal", "LoadSceneAsyncNameIndexInternal", 4, TR_SCENE },
-    { "Assembly-CSharp", "LogoManager", "OnLoadingStepUpdate", 2, TR_TWO_INTS },
-    { "Assembly-CSharp", "LogoManager/<AgeGradeEvent>d__14", "MoveNext", 0, TR_STEPS },
-    { "Assembly-CSharp", "SceneLoader", "GoToTitle", 1, TR_CALLS },
-    { "Assembly-CSharp", "SceneLoader/<SyncPrepareTitleAndLoad>d__132", "MoveNext", 0, TR_ASYNC },
-    { "Assembly-CSharp", "SceneLoader/<CoChangeSceneAsync>d__116", "MoveNext", 0, TR_STEPS },
-    { "Assembly-CSharp", "SceneLoader/<CoLoadSceneAsync>d__113", "MoveNext", 0, TR_STEPS },
-    { "Assembly-CSharp", "Dave.SDK.SDKManager/<InitializeAsync>d__28", "MoveNext", 0, TR_ASYNC },
-    { "Assembly-CSharp", "Dave.SDK.SDKManager/<InitializeInternalAsync>d__29", "MoveNext", 0, TR_ASYNC },
-    { "Assembly-CSharp", "Dave.SDK.GlobalSDK", "InitAsync", 0, TR_CALLS },
-    { "Assembly-CSharp", "Dave.SDK.GlobalSDK/<InitializeIapAsync>d__56", "MoveNext", 0, TR_ASYNC },
-    { "Assembly-CSharp", "Dave.SDK.GlobalSDK", "OnInitialized", 2, TR_CALLS },
-    { "Assembly-CSharp", "Dave.SDK.GlobalSDK", "OnInitializeFailed", 2, TR_CALLS },
-    { "Assembly-CSharp", "Dave.SDK.GlobalSDK", "CompleteInitialization", 2, TR_CALLS },
-    { "Unity.Services.Core", "Unity.Services.Core.UnityServices", "InitializeAsync", 0, TR_CALLS },
-    { "Unity.Purchasing", "UnityEngine.Purchasing.UnityPurchasing", "Initialize", 2, TR_CALLS },
-    { "Unity.Purchasing.Stores", "UnityEngine.Purchasing.BillingClientStateListener", "HandleBillingSetupFinished", 1, TR_CALLS },
-    { "Unity.Purchasing.Stores", "UnityEngine.Purchasing.GooglePlayStoreConnectionService", "OnConnected", 0, TR_CALLS },
-    { "Unity.Purchasing.Stores", "UnityEngine.Purchasing.GooglePlayStoreConnectionService", "OnDisconnected", 1, TR_CALLS },
-    { "Unity.Purchasing.Stores", "UnityEngine.Purchasing.GooglePurchaseService", "OnQueryProductDetailsResponse", 4, TR_CALLS },
+    /* A game being brought up gets its own entries here: its coroutines (TR_STEPS), its async methods (TR_ASYNC) and the
+     * callbacks it waits for (TR_CALLS), by "Namespace.Class/Nested" and method. Dave the Diver's were taken out once it ran. */
 };
 #define TRACED (sizeof(k_traced) / sizeof(k_traced[0]))
 static struct { atomic_uint calls, lines; const void *obj[4]; int step[4]; } g_tr[TRACED];

@@ -12,7 +12,8 @@
  *     on first use.
  *   - A Handler posts Runnables and Messages to its Looper; the Looper delivers a
  *     Message to the Handler's Callback and runs a Runnable.
- *   - A Choreographer posts a frame callback for the next 60 Hz boundary.
+ *   - A Choreographer posts a frame callback for the next vsync boundary, at the frame rate games are held to (60 or
+ *     120 Hz, husk-tl-egl.c).
  *   - Callbacks are Java proxies made by JNIBridge for C# delegates. Calling one means
  *     calling the native JNIBridge.invoke the library registered, with a java.lang.reflect.Method
  *     for the interface method, and the arguments boxed.
@@ -30,7 +31,8 @@
 void tl_log_line(const char *fmt, ...);
 
 #define NS 1000000000ll
-#define VSYNC_NS (NS / 60)
+int tl_frame_hz(void);
+#define VSYNC_NS (NS / tl_frame_hz())
 
 static jvalue vl(void *p) { jvalue v; v.j = 0; v.l = p; return v; }
 static jvalue vi(int i) { jvalue v; v.j = 0; v.i = i; return v; }
@@ -532,7 +534,8 @@ static void post_frame(jobj *self, jobj *cb, int64_t delay_ns)
     if (!l || !cb) return;
     int64_t t = now_ns() + delay_ns;
     ev *e = calloc(1, sizeof(*e));
-    e->when = (t / VSYNC_NS + 1) * VSYNC_NS;       /* the next 60 Hz boundary after t */
+    int64_t vsync = VSYNC_NS;
+    e->when = (t / vsync + 1) * vsync;             /* the next vsync boundary after t */
     e->frame = tl_jni_ref(cb);
     enqueue(l, e);
 }

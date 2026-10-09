@@ -193,7 +193,8 @@ static void Bitmap_createText(tl_jcall *c)
 /* ----------------------------------------------------- the game's activity */
 
 static void Act_userId(tl_jcall *c) { c->ret = vl(STR("husk0000000000000")); }
-static void Act_refreshRate(tl_jcall *c) { c->ret = vf(60.f); }
+int tl_frame_hz(void);
+static void Act_refreshRate(tl_jcall *c) { c->ret = vf((float)tl_frame_hz()); }    /* the frame rate games are held to */
 static void Act_openURL(tl_jcall *c) { tl_log_line("cocos: openURL %s", S(c->args[0].l)); if (tl_cocos_open_url_hook) tl_cocos_open_url_hook(S(c->args[0].l)); }
 static void Act_loadingFinished(tl_jcall *c) { (void)c; tl_log_line("cocos: the game finished loading"); }
 static void Act_tryRate(tl_jcall *c) { (void)c; }

@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include "husk-tl-bionic.h"
+#include "husk-tl-egl.h"
 
 void *tl_nwindow_native(void *window);
 int tl_nwindow_width(void *window);
@@ -338,6 +339,7 @@ static int w_vkQueuePresentKHR(void *queue, const void *info)
             uint64_t zero = 0; memcpy(times + i * 16 + 8, &zero, 8);
         }
     }
+    if (!V.frame_dir[0]) tl_hold_to_frame_rate();          /* no faster than the frame rate games are held to (husk-tl-egl.c) */
     int r = real ? real(queue, info) : -3;
     { static atomic_int bad; if (r != VK_SUCCESS && atomic_fetch_add(&bad, 1) < 20) tl_log_line("vulkan: vkQueuePresentKHR #%lu -> %d", n, r); }
     { static int tr = -1; if (tr < 0) tr = getenv("TL_VK_TRACE") ? 1 : 0; if (tr && n <= 5) tl_log_line("vulkan: vkQueuePresentKHR #%lu -> %d", n, r); }

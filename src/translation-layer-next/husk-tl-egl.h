@@ -36,6 +36,10 @@ void *tl_egl_resolve(const char *name);
 
 unsigned long tl_egl_frames_presented(void);
 
+/* The frame rate games are held to, 60 or 120 (husk_tl_set_frame_rate), and the wait that holds a presenting thread to it. */
+int tl_frame_hz(void);
+void tl_hold_to_frame_rate(void);
+
 #ifdef __cplusplus
 }
 #endif

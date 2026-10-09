@@ -38,6 +38,8 @@ struct TLAppSettings: Codable, Equatable {
     var resolution: String = GameDisplay.followDefault
     /// How the game's picture fills the screen: "default" (Settings'), or a GameScaling.
     var scaling: String = GameDisplay.followDefault
+    /// The frame rate the game is held to: "default" (Settings'), "60" or "120" (GameDisplay).
+    var frameRate: String = GameDisplay.followDefault
     /// Full screen: the game draws over the whole display, the area around the camera included. Off, it keeps clear of the
     /// camera. (Stored under its old name, from when it was "Hide the interface", so the choice carries over.)
     var cleanView = false
@@ -65,6 +67,7 @@ struct TLAppSettings: Codable, Equatable {
         default: resolution = GameDisplay.followDefault
         }
         scaling = try c.decodeIfPresent(String.self, forKey: .scaling) ?? GameDisplay.followDefault
+        frameRate = try c.decodeIfPresent(String.self, forKey: .frameRate) ?? GameDisplay.followDefault
         cleanView = try c.decodeIfPresent(Bool.self, forKey: .cleanView) ?? false
         keepAwake = try c.decodeIfPresent(Bool.self, forKey: .keepAwake) ?? true
         pad = try c.decodeIfPresent(PadMode.self, forKey: .pad) ?? .auto
@@ -158,10 +161,16 @@ struct TLAppSettingsView: View {
                 } label: {
                     customLabel("Screen Scaling", custom: scalingIsCustom)
                 }
-                if resolutionIsCustom || scalingIsCustom {
+                Picker(selection: frameRateChoice) {
+                    ForEach(GameDisplay.frameRates, id: \.self) { Text(GameDisplay.frameRateTitle($0)).tag($0) }
+                } label: {
+                    customLabel("Frame Rate", custom: frameRateIsCustom)
+                }
+                if resolutionIsCustom || scalingIsCustom || frameRateIsCustom {
                     Button("Use Husk's Settings") {
                         settings.resolution = GameDisplay.followDefault
                         settings.scaling = GameDisplay.followDefault
+                        settings.frameRate = GameDisplay.followDefault
                     }
                 }
                 Toggle("Full Screen", isOn: $settings.cleanView)
@@ -170,7 +179,8 @@ struct TLAppSettingsView: View {
                 Text("Display")
             } footer: {
                 Text("\(GameDisplay.detail(GameDisplay.resolution(for: settings))) \(GameDisplay.scaling(for: settings).detail) "
-                   + (resolutionIsCustom || scalingIsCustom
+                   + "\(GameDisplay.frameRateDetail(GameDisplay.frameRate(for: settings))) "
+                   + (resolutionIsCustom || scalingIsCustom || frameRateIsCustom
                       ? "Custom is this game's own choice; the others follow Husk's Settings. "
                       : "These follow Husk's Settings until you choose something else here. ")
                    + "Full Screen draws the game around the camera too. These apply the next time the game starts; a game "
@@ -254,6 +264,7 @@ struct TLAppSettingsView: View {
     /// Whether this game has its own resolution or scaling rather than Husk's.
     private var resolutionIsCustom: Bool { GameDisplay.resolutions.contains(settings.resolution) }
     private var scalingIsCustom: Bool { GameScaling(rawValue: settings.scaling) != nil }
+    private var frameRateIsCustom: Bool { GameDisplay.frameRates.contains(settings.frameRate) }
 
     /// The pickers show what the game will use. Choosing what Husk's Settings already say goes back to following them, so a
     /// later change there reaches this game too; choosing anything else makes it this game's own.
@@ -264,6 +275,10 @@ struct TLAppSettingsView: View {
     private var scalingChoice: Binding<GameScaling> {
         Binding(get: { GameDisplay.scaling(for: settings) },
                 set: { settings.scaling = $0 == GameDisplay.savedScaling ? GameDisplay.followDefault : $0.rawValue })
+    }
+    private var frameRateChoice: Binding<String> {
+        Binding(get: { GameDisplay.frameRate(for: settings) },
+                set: { settings.frameRate = $0 == GameDisplay.savedFrameRate ? GameDisplay.followDefault : $0 })
     }
 
     /// A row's name, with a tag when the game's choice differs from Husk's Settings.

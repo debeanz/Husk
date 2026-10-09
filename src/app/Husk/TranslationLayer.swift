@@ -743,7 +743,8 @@ struct TLClassicAttemptView: View {
             Color.black.ignoresSafeArea()
 
             ZStack {
-                TLScreenView(scaling: GameDisplay.scaling(for: settings), onThreeFingerTap: { toggleChrome() })
+                TLScreenView(scaling: GameDisplay.scaling(for: settings), frameRate: GameDisplay.frameRateHz(for: settings),
+                             onThreeFingerTap: { toggleChrome() })
                 if !runner.isRunning, runner.frameCount == 0 {
                     VStack(spacing: 12) {
                         if runner.isDone {

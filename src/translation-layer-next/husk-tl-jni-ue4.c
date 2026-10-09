@@ -42,6 +42,7 @@ static const struct { const char *key, *value; } k_meta[] = {
     { "com.epicgames.ue4.GameActivity.StartupPermissions", "" },
 };
 const char *tl_hle_manifest_meta(const char *key);
+int tl_frame_hz(void);         /* the frame rate games are held to, 60 or 120 (husk-tl-egl.c) */
 const char *tl_ue4_meta(const char *key)
 {
     /* Not in the manifest: GameActivity computes it from the display's metrics. x dpi, y dpi. */
@@ -50,7 +51,7 @@ const char *tl_ue4_meta(const char *key)
      * answer the engine can survive: it rounds its callback buffer up to a multiple of it, and a multiple of zero is never reached. */
     if (!strcmp(key, "audiomanager.framesPerBuffer")) return "256";
     if (!strcmp(key, "audiomanager.optimalSampleRate")) return "48000";
-    if (!strcmp(key, "ue4.display.getRefreshRate")) return "60";
+    if (!strcmp(key, "ue4.display.getRefreshRate")) return tl_frame_hz() > 60 ? "120" : "60";
     /* A setting forced from the environment ("key=value;key=value", keys without the com.epicgames.ue4.GameActivity. prefix), for trying things. */
     const char *force = getenv("TL_UE4_META");
     if (force) {
@@ -162,8 +163,16 @@ static void GA_commandLine(tl_jcall *c) { c->ret = vl(tl_jni_new_string(getenv("
 static void GA_fontDir(tl_jcall *c) { c->ret = vl(tl_jni_new_string("/system/fonts/")); }
 const char *tl_hle_android_id(void);
 static void GA_androidId(tl_jcall *c) { c->ret = vl(tl_jni_new_string(tl_hle_android_id())); }
-static void GA_refresh(tl_jcall *c) { c->ret = vi(60); }
-static void GA_refreshRates(tl_jcall *c) { jobj *a = tl_jni_new_prim_array('I', 1); ((int *)a->arr.data)[0] = 60; c->ret = vl(a); }
+static void GA_refresh(tl_jcall *c) { c->ret = vi(tl_frame_hz()); }
+/* The rates the screen offers: 60, and 120 when games may have it. */
+static void GA_refreshRates(tl_jcall *c)
+{
+    int n = tl_frame_hz() > 60 ? 2 : 1;
+    jobj *a = tl_jni_new_prim_array('I', (uint32_t)n);
+    ((int *)a->arr.data)[0] = 60;
+    if (n > 1) ((int *)a->arr.data)[1] = 120;
+    c->ret = vl(a);
+}
 static void GA_orientation(tl_jcall *c) { c->ret = vi(1); }                    /* landscape */
 static void GA_netType(tl_jcall *c) { c->ret = vi(1); }                        /* Wi-Fi */
 static void GA_netTime(tl_jcall *c) { c->ret = vj(0); }

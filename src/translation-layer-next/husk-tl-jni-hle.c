@@ -204,7 +204,10 @@ static void fill_metrics(jobj *m)
 }
 static void Display_getMetrics(tl_jcall *c) { fill_metrics(c->args[0].l); }
 static void Display_getRotation(tl_jcall *c) { c->ret = vi(0); }
-static void Display_getRefreshRate(tl_jcall *c) { c->ret = vf(60.f); }
+/* The frame rate games are held to (60 or 120, husk-tl-egl.c): a game paces itself by it, and one that offers a rate above
+ * the screen's keeps to the screen's. */
+int tl_frame_hz(void);
+static void Display_getRefreshRate(tl_jcall *c) { c->ret = vf((float)tl_frame_hz()); }
 static void Display_getDisplayId(tl_jcall *c) { c->ret = vi(0); }
 static void Display_getWidth(tl_jcall *c) { c->ret = vi(H.width); }
 static void Display_getHeight(tl_jcall *c) { c->ret = vi(H.height); }

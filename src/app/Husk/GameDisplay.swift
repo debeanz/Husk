@@ -97,4 +97,38 @@ enum GameDisplay {
     @MainActor static func pointScale(for resolution: String) -> CGFloat {
         resolution == screen ? UIScreen.main.scale : 2
     }
+
+    // MARK: frame rate
+
+    /// The frame rates a game can be held to: the screen's refresh as the game is told it, and the most frames a second it
+    /// shows. 60 is what Husk always did; 120 is a ProMotion screen's full rate.
+    static let frameRateKey = "husk.game.framerate"
+    static let frameRates = ["60", "120"]
+
+    static func frameRateTitle(_ rate: String) -> String {
+        rate == followDefault ? "Default" : "\(rate) Hz"
+    }
+
+    static func frameRateDetail(_ rate: String) -> String {
+        rate == "120"
+            ? "120 Hz lets a game run at up to 120 frames a second, where its own settings allow: smoother, and more battery "
+              + "and heat. On a screen without ProMotion it is 60."
+            : "60 Hz holds a game to 60 frames a second: what most Android games are made for, and easier on the battery."
+    }
+
+    /// The Settings default.
+    static var savedFrameRate: String {
+        let r = UserDefaults.standard.string(forKey: frameRateKey) ?? "60"
+        return frameRates.contains(r) ? r : "60"
+    }
+
+    /// What a game runs with: its own choice, or Settings'.
+    static func frameRate(for s: TLAppSettings) -> String {
+        frameRates.contains(s.frameRate) ? s.frameRate : savedFrameRate
+    }
+
+    /// The rate a game is held to, in Hz: its choice, but no more than this screen shows.
+    @MainActor static func frameRateHz(for s: TLAppSettings) -> Int {
+        min(Int(frameRate(for: s)) ?? 60, max(UIScreen.main.maximumFramesPerSecond, 60))
+    }
 }

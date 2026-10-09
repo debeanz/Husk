@@ -10,6 +10,7 @@ struct SettingsTab: View {
     @AppStorage(PerfOverlay.detailedKey) private var perfDetailed = true
     @AppStorage(GameDisplay.resolutionKey) private var resolution = GameDisplay.automatic
     @AppStorage(GameDisplay.scalingKey) private var scaling = GameScaling.fit.rawValue
+    @AppStorage(GameDisplay.frameRateKey) private var frameRate = "60"
     @AppStorage(TranslationLayer.devInfoKey) private var devInfo = false
     @State private var showLogs = false
 
@@ -44,10 +45,14 @@ struct SettingsTab: View {
                     Picker(selection: $scaling) {
                         ForEach(GameScaling.allCases) { Text($0.title).tag($0.rawValue) }
                     } label: { row("arrow.up.left.and.down.right.magnifyingglass", .purple, "Screen Scaling") }
+                    Picker(selection: $frameRate) {
+                        ForEach(GameDisplay.frameRates, id: \.self) { Text(GameDisplay.frameRateTitle($0)).tag($0) }
+                    } label: { row("gauge.with.dots.needle.67percent", .red, "Frame Rate") }
                 } header: {
                     Text("Display")
                 } footer: {
                     Text("\(GameDisplay.detail(resolution)) \((GameScaling(rawValue: scaling) ?? .fit).detail) "
+                       + "\(GameDisplay.frameRateDetail(frameRate)) "
                        + "These are the defaults; each game can have its own in its settings.")
                 }
 

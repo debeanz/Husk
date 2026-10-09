@@ -520,6 +520,8 @@ struct TLUnityScreen: UIViewRepresentable {
     var scale: CGFloat = 2
     var fixedSize: CGSize? = nil
     var scaling: GameScaling = .fit
+    /// The frame rate the game is held to (GameDisplay.frameRateHz).
+    var frameRate = 60
     var onThreeFingerTap: (() -> Void)? = nil
     /// One view per game for the life of the process. The engine's GPU surface belongs to this view's layer and an
     /// engine cannot be started twice, so coming back to the game must show the same layer, not a new one.
@@ -536,6 +538,9 @@ struct TLUnityScreen: UIViewRepresentable {
 
     func updateUIView(_ view: TLUnityUIView, context: Context) {
         view.onThreeFingerTap = onThreeFingerTap
+        // Before the engine starts (it starts once the view has its size), and again on coming back to a game whose
+        // settings changed meanwhile: its frame clock and cap follow at once.
+        husk_tl_set_frame_rate(Int32(frameRate))
     }
 }
 
@@ -713,6 +718,7 @@ struct TLCocosAttemptView: View {
                               scale: GameDisplay.pointScale(for: GameDisplay.resolution(for: settings)),
                               fixedSize: GameDisplay.size(GameDisplay.resolution(for: settings)),
                               scaling: GameDisplay.scaling(for: settings),
+                              frameRate: GameDisplay.frameRateHz(for: settings),
                               onThreeFingerTap: { toggleChrome() })
                     .background(Color.black)
                     .overlay {

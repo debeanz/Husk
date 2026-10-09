@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "husk-tl-bionic.h"
 #include "husk-tl-ld.h"
@@ -272,6 +273,31 @@ static void save_frame(EGLDisplay d, EGLSurface s, unsigned long n)
     free(rgba);
 }
 
+/*
+ * The frame rate games are held to: 60 or 120 (Settings, and each game's own settings). It is the refresh rate games are
+ * told the screen has, the rate of the frame clock they pace themselves by (Choreographer), and the most frames a second a
+ * game may show: a game that draws as fast as its frames are taken would otherwise follow a ProMotion screen to 120.
+ */
+static atomic_int g_frame_hz = 60;
+void husk_tl_set_frame_rate(int hz) { atomic_store(&g_frame_hz, hz > 60 ? 120 : 60); }
+int tl_frame_hz(void) { return atomic_load(&g_frame_hz); }
+
+/* Hold a presenting thread to the frame rate: a frame comes no sooner than one frame's time after the one before it. A
+ * game slower than that is not held at all, and one that fell behind is not made to catch up. */
+void tl_hold_to_frame_rate(void)
+{
+    static _Thread_local int64_t next;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t now = (int64_t)ts.tv_sec * 1000000000ll + ts.tv_nsec, period = 1000000000ll / tl_frame_hz();
+    if (next - now > 500000) {          /* more than half a millisecond early */
+        struct timespec d = { (time_t)((next - now) / 1000000000ll), (long)((next - now) % 1000000000ll) };
+        nanosleep(&d, NULL);
+        now = next;
+    }
+    next = (next > now - period ? next : now) + period;
+}
+
 #define GLT_RING 256
 static atomic_ulong g_glt_n, g_glt_draws, g_glt_uploads;
 void tl_egl_gl_histogram(char *out, size_t cap);
@@ -292,7 +318,9 @@ static EGLBoolean w_eglSwapBuffers(EGLDisplay d, EGLSurface s)
         fprintf(stderr, "egl: calls so far, by function: %s\n", hist);
     }
     if (E.frame_dir[0] && (n % (unsigned long)E.frame_every == 0 || n <= 3)) save_frame(d, s, n);
-    return E.frame_dir[0] ? EGL_TRUE : a_eglSwapBuffers(d, s);
+    if (E.frame_dir[0]) return EGL_TRUE;
+    tl_hold_to_frame_rate();
+    return a_eglSwapBuffers(d, s);
 }
 
 /* Android extensions this ANGLE does not have: Swappy and Unity probe for them. */

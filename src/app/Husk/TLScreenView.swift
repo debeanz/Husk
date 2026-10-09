@@ -25,6 +25,13 @@ final class TLScreenUIView: UIView, UIGestureRecognizerDelegate {
     private let guestSize = CGSize(width: 540, height: 960)
     /// How the frame fills the view.
     var scaling: GameScaling = .fit { didSet { if scaling != oldValue { setNeedsLayout() } } }
+    /// The most frames a second shown (GameDisplay.frameRateHz).
+    var frameRate = 60 {
+        didSet { if frameRate != oldValue { link?.preferredFrameRateRange = Self.range(frameRate) } }
+    }
+    private static func range(_ hz: Int) -> CAFrameRateRange {
+        CAFrameRateRange(minimum: 30, maximum: Float(hz), preferred: Float(hz))
+    }
 
     /// Three fingers tapped at once: the way to bring the game's toolbar up and put it away.
     var onThreeFingerTap: (() -> Void)?
@@ -86,10 +93,10 @@ final class TLScreenUIView: UIView, UIGestureRecognizerDelegate {
         guard window != nil else { return }
 
         // Tied to the display, not to a timer: a frame is shown on a refresh or
-        // not at all. Sixty is the game's own rate, and asking for no more lets a
+        // not at all. The game's frame rate (60 or 120), and no more, lets a
         // ProMotion screen settle at a rate that divides evenly into it.
         let l = CADisplayLink(target: self, selector: #selector(refresh))
-        l.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
+        l.preferredFrameRateRange = Self.range(frameRate)
         l.add(to: .main, forMode: .common)
         link = l
     }
@@ -177,6 +184,7 @@ final class TLScreenUIView: UIView, UIGestureRecognizerDelegate {
 
 struct TLScreenView: UIViewRepresentable {
     var scaling: GameScaling = .fit
+    var frameRate = 60
     var onThreeFingerTap: (() -> Void)? = nil
 
     func makeUIView(context: Context) -> TLScreenUIView {
@@ -186,6 +194,7 @@ struct TLScreenView: UIViewRepresentable {
     }
     func updateUIView(_ view: TLScreenUIView, context: Context) {
         view.scaling = scaling
+        view.frameRate = frameRate
         view.onThreeFingerTap = onThreeFingerTap
     }
 }
