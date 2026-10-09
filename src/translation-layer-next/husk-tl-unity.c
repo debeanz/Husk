@@ -17,6 +17,7 @@
 #include "husk-tl-gamepad.h"
 #include "husk-tl-jni.h"
 #include "husk-tl-ld.h"
+#include "husk-tl-xmem.h"
 
 void tl_jni_hle_install(void);
 void tl_hle_configure(const char *pkg, const char *apk, const char *data, int w, int h);
@@ -179,6 +180,44 @@ static void call_native(const char *name, const char *sig, uintptr_t a, uintptr_
 
 static void kb_drain(void);
 
+/* How far a loaded library's segments reach (in its own addresses), so that nothing past its end is read. */
+static int lib_extent_cb(uintptr_t bias, const char *name, const void *phdr, unsigned phnum, void *user)
+{
+    (void)bias;
+    const char *slash = name ? strrchr(name, '/') : NULL;
+    if (!name || strcmp(slash ? slash + 1 : name, "libunity.so")) return 0;
+    uint64_t end = 0;
+    for (unsigned i = 0; i < phnum; i++) {
+        const uint8_t *p = (const uint8_t *)phdr + 56u * i;
+        uint32_t type; uint64_t vaddr, memsz;
+        memcpy(&type, p, 4); memcpy(&vaddr, p + 16, 8); memcpy(&memsz, p + 40, 8);
+        if (type == 1 && vaddr + memsz > end) end = vaddr + memsz;                  /* PT_LOAD */
+    }
+    *(uint64_t *)user = end;
+    return 1;
+}
+
+/*
+ * Unity 6 does not answer for SetStackTraceLogType by name. For its 6000.0.78f1 player (recognised by the code of the setter
+ * itself) the settings are set where the engine keeps them, overrides included, so the game's own setting cannot take them back.
+ */
+static bool stacks_by_table(void)
+{
+    static const uint32_t setter_tail[] = { 0xb8605908, 0x3100051f, 0x1a880028, 0xb8205928, 0xd65f03c0 };  /* ldr; cmn; csel; str; ret */
+    enum { SETTER_TAIL = 0x1274eb0, OVERRIDES = 0x1a057e8, TYPES = 0x1a05800 };                              /* 6000.0.78f1, arm64 */
+    tl_lib *u = tl_ld_find_lib("libunity.so");
+    uint8_t *base = u ? tl_ld_lib_base(u) : NULL;
+    uint64_t extent = 0;
+    tl_ld_iterate(lib_extent_cb, &extent);
+    if (!base || extent < TYPES + 24 || memcmp(base + SETTER_TAIL, setter_tail, sizeof(setter_tail))) return false;
+    uint8_t *rx = base + OVERRIDES;
+    ptrdiff_t to_rw = tl_xmem_contains(rx) && tl_xmem_is_rx(rx) ? tl_xmem_delta() : 0;
+    int32_t *overrides = (int32_t *)(rx + to_rw), *types = (int32_t *)(base + TYPES + to_rw);
+    overrides[0] = overrides[4] = 1;            /* LogType.Error and LogType.Exception: StackTraceLogType.ScriptOnly, whatever is asked later */
+    types[0] = types[4] = 1;
+    return true;
+}
+
 /*
  * A shipped game usually tells Unity to log a C# exception without its stack, so the log says what went wrong but not where
  * ("InvalidOperationException: Nullable object must have a value." and nothing else). Asking for the script part of the stack
@@ -191,6 +230,12 @@ static void want_script_stacks(void)
     typedef void (*set_fn)(int log_type, int stack_type);
     static set_fn set;
     static int tries;
+    static bool by_table;
+    if (!by_table && !tries) {
+        by_table = stacks_by_table();
+        if (by_table) { tl_log_line("unity: C# exceptions will be logged with the methods they went through (Unity 6000.0.78f1)"); return; }
+    }
+    if (by_table) return;
     if (!set && tries < 200) {
         tries++;
         resolve_fn resolve = (resolve_fn)tl_ld_sym(NULL, "il2cpp_resolve_icall");

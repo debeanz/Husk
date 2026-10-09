@@ -1007,7 +1007,59 @@ static void AudioManager_getProperty(tl_jcall *c)
 static void AudioManager_getStreamVolume(tl_jcall *c) { c->ret = vi(7); }
 static void AudioManager_getStreamMaxVolume(tl_jcall *c) { c->ret = vi(15); }
 static void AudioManager_requestAudioFocus(tl_jcall *c) { c->ret = vi(1); /* AUDIOFOCUS_REQUEST_GRANTED */ }
-static void Uri_encode(tl_jcall *c) { c->ret = vl(STR(S(c->args[0].l))); }
+/*
+ * Uri.encode and Uri.decode: percent-encoding of UTF-8, as Android does it (letters, digits and _-!.~'()* stay, and whatever the
+ * caller allows). Unity's PlayerPrefs store keys and values encoded and decode a value as it reads it back, so a decode that
+ * answered null lost every string a game saved.
+ */
+static void uri_encode(const char *in, const char *allow, char *out, size_t n)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    size_t k = 0;
+    for (const unsigned char *p = (const unsigned char *)in; *p && k + 3 < n; p++) {
+        bool keep = (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') || strchr("_-!.~'()*", *p)
+                 || (allow && *p < 0x80 && strchr(allow, *p));
+        if (keep) out[k++] = (char)*p;
+        else { out[k++] = '%'; out[k++] = hex[*p >> 4]; out[k++] = hex[*p & 15]; }
+    }
+    out[k] = 0;
+}
+static void Uri_encode(tl_jcall *c)
+{
+    const char *in = tl_jni_string(c->args[0].l);
+    if (!in) { c->ret = vl(NULL); return; }
+    size_t n = strlen(in) * 3 + 1;
+    char *out = malloc(n);
+    uri_encode(in, NULL, out, n);
+    c->ret = vl(STR(out));
+    free(out);
+}
+static void Uri_encodeAllow(tl_jcall *c)
+{
+    const char *in = tl_jni_string(c->args[0].l);
+    if (!in) { c->ret = vl(NULL); return; }
+    size_t n = strlen(in) * 3 + 1;
+    char *out = malloc(n);
+    uri_encode(in, tl_jni_string(c->args[1].l), out, n);
+    c->ret = vl(STR(out));
+    free(out);
+}
+static int hexval(char ch) { return ch >= '0' && ch <= '9' ? ch - '0' : ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : ch >= 'A' && ch <= 'F' ? ch - 'A' + 10 : -1; }
+static void Uri_decode(tl_jcall *c)
+{
+    const char *in = tl_jni_string(c->args[0].l);
+    if (!in) { c->ret = vl(NULL); return; }
+    char *out = malloc(strlen(in) + 1);
+    size_t k = 0;
+    for (const char *p = in; *p; p++) {
+        int hi, lo;
+        if (*p == '%' && (hi = hexval(p[1])) >= 0 && (lo = hexval(p[2])) >= 0) { out[k++] = (char)(hi * 16 + lo); p += 2; }
+        else out[k++] = *p;
+    }
+    out[k] = 0;
+    c->ret = vl(STR(out));
+    free(out);
+}
 static void PAD_init(tl_jcall *c) { c->ret = vl(make("com/unity3d/player/PlayAssetDeliveryUnityWrapper")); }
 static void PAD_playCoreApiMissing(tl_jcall *c) { c->ret = vz(1); }
 /* "All files access" (MANAGE_EXTERNAL_STORAGE): a game has its whole /sdcard here, so it has it. Asked no, a game opens Settings to ask for it
@@ -1413,6 +1465,8 @@ static const tl_jhle k_hle[] = {
     M("android/media/AudioManager", "getStreamVolume", "(I)I", AudioManager_getStreamVolume), M("android/media/AudioManager", "getStreamMaxVolume", "(I)I", AudioManager_getStreamMaxVolume),
     M("android/media/AudioManager", "requestAudioFocus", "(Landroid/media/AudioManager$OnAudioFocusChangeListener;II)I", AudioManager_requestAudioFocus),
     M("android/net/Uri", "encode", "(Ljava/lang/String;)Ljava/lang/String;", Uri_encode),
+    M("android/net/Uri", "encode", "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;", Uri_encodeAllow),
+    M("android/net/Uri", "decode", "(Ljava/lang/String;)Ljava/lang/String;", Uri_decode),
     M("com/unity3d/player/PlayAssetDeliveryUnityWrapper", "init", "(Landroid/content/Context;)Lcom/unity3d/player/PlayAssetDeliveryUnityWrapper;", PAD_init),
     M("com/unity3d/player/PlayAssetDeliveryUnityWrapper", "playCoreApiMissing", "()Z", PAD_playCoreApiMissing),
     M("com/unity3d/player/UnityCoreAssetPacksStatusCallbacks", "<init>", "()V", Noop),

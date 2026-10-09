@@ -191,6 +191,17 @@ static int b_connect(int fd, const void *g, socklen_t glen)
     if (!n) { tl_set_guest_errno(G_EAFNOSUPPORT); return -1; }
     TL_ERRNO_BEGIN(); int r = connect(fd, (struct sockaddr *)&s, n); int e = errno; TL_ERRNO_END();
     { char ip[64] = "?"; if (s.ss_family == AF_INET) inet_ntop(AF_INET, &((struct sockaddr_in *)&s)->sin_addr, ip, sizeof(ip)); NTRACE("connect(fd %d, %s) -> %d errno %d", fd, ip, r, e); }
+    /* A connection that fails outright (not one still on its way) is worth a line whatever the trace level: a game that waits
+     * on a server it cannot reach looks, from the outside, like one that hangs. */
+    if (r < 0 && e != EINPROGRESS && e != EINTR && e != EWOULDBLOCK) {
+        static int said;
+        if (said++ < 8) {
+            char ip[64] = "?"; int port = 0;
+            if (s.ss_family == AF_INET) { inet_ntop(AF_INET, &((struct sockaddr_in *)&s)->sin_addr, ip, sizeof(ip)); port = ntohs(((struct sockaddr_in *)&s)->sin_port); }
+            else if (s.ss_family == AF_INET6) { inet_ntop(AF_INET6, &((struct sockaddr_in6 *)&s)->sin6_addr, ip, sizeof(ip)); port = ntohs(((struct sockaddr_in6 *)&s)->sin6_port); }
+            tl_log_line("net: could not connect to %s port %d: %s", ip, port, strerror(e));
+        }
+    }
     return r;
 }
 
@@ -378,6 +389,12 @@ static int b_getaddrinfo(const char *node, const char *service, const guest_addr
     }
     int r = getaddrinfo(node, service, hp, &dres);
     NTRACE("getaddrinfo(%s, %s) -> %d", node ? node : "(null)", service ? service : "(null)", r);
+    /* The servers a game looks up first say what it is talking to, and a failed lookup why it gets no answer. */
+    {
+        static int said;
+        bool numeric = node && strspn(node, "0123456789.:abcdefABCDEF") == strlen(node);
+        if (node && !numeric && said++ < 20) tl_log_line("net: looked up %s: %s", node, r ? gai_strerror(r) : "found");
+    }
     if (r) return r;                                                /* EAI_* values agree with bionic's */
     guest_addrinfo *head = NULL, **tail = &head;
     for (struct addrinfo *a = dres; a; a = a->ai_next) {
