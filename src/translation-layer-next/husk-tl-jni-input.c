@@ -66,6 +66,9 @@ static void ME_getDownTime(tl_jcall *c) { const motion *m = M_(c); c->ret = vj(m
 static void ME_getSource(tl_jcall *c)   { const motion *m = M_(c); c->ret = vi(m && m->source ? m->source : SOURCE_TOUCHSCREEN); }
 static void ME_zeroI(tl_jcall *c)       { c->ret = vi(0); }
 static void ME_getDeviceId(tl_jcall *c) { const motion *m = M_(c); c->ret = vi(m ? m->device : 0); }
+/* The InputDevice an event came from: the touch screen for a touch, the controller for a controller (husk-tl-gamepad.c). */
+jobj *tl_input_device_object(int id);
+static void ME_getDevice(tl_jcall *c) { const motion *m = M_(c); c->ret.l = tl_input_device_object(m ? m->device : 0); }
 static void ME_getKeyCode(tl_jcall *c)  { const motion *m = M_(c); c->ret = vi(m ? m->keycode : 0); }
 static void ME_getRepeat(tl_jcall *c)   { const motion *m = M_(c); c->ret = vi(m ? m->repeat : 0); }
 static void ME_getMeta(tl_jcall *c)     { const motion *m = M_(c); c->ret = vi(m ? m->meta : 0); }
@@ -197,6 +200,8 @@ static const tl_jhle k_input_hle[] = {
     K("android/view/MotionEvent", "getSource", "()I", ME_getSource),
     K("android/view/InputEvent", "getSource", "()I", ME_getSource),
     K("android/view/MotionEvent", "getDeviceId", "()I", ME_getDeviceId), K("android/view/InputEvent", "getDeviceId", "()I", ME_getDeviceId),
+    K("android/view/MotionEvent", "getDevice", "()Landroid/view/InputDevice;", ME_getDevice), K("android/view/InputEvent", "getDevice", "()Landroid/view/InputDevice;", ME_getDevice),
+    K("android/view/KeyEvent", "getDevice", "()Landroid/view/InputDevice;", ME_getDevice),
     /* a controller's buttons */
     K("android/view/KeyEvent", "getAction", "()I", ME_getAction), K("android/view/KeyEvent", "getKeyCode", "()I", ME_getKeyCode),
     K("android/view/KeyEvent", "getRepeatCount", "()I", ME_getRepeat), K("android/view/KeyEvent", "getMetaState", "()I", ME_getMeta),

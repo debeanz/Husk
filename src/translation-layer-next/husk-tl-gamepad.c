@@ -15,6 +15,7 @@
 #define DEVICE_BASE 41                    /* Android device ids of the controllers: 41, 42, ... */
 #define SOURCE_GAMEPAD_STICKS 0x01000411  /* SOURCE_GAMEPAD | SOURCE_JOYSTICK */
 #define SOURCE_ALL 0x01000611             /* ... and SOURCE_DPAD: everything the device offers */
+#define SOURCE_TOUCH 0x1002               /* SOURCE_TOUCHSCREEN */
 
 enum { AXIS_X = 0, AXIS_Y = 1, AXIS_Z = 11, AXIS_RZ = 14, AXIS_HAT_X = 15, AXIS_HAT_Y = 16, AXIS_LTRIGGER = 17, AXIS_RTRIGGER = 18, AXIS_GAS = 22, AXIS_BRAKE = 23 };
 
@@ -125,8 +126,17 @@ static jvalue vi(int i) { jvalue v; v.j = 0; v.i = i; return v; }
 static jvalue vz(int z) { jvalue v; v.j = 0; v.z = z != 0; return v; }
 static jvalue vf(float f) { jvalue v; v.j = 0; v.f = f; return v; }
 
-static jobj *g_dev[TL_PADS];
+/*
+ * The devices a phone lists: its touch screen (device 0, the device the screen's touches come from), then any controller.
+ * A game's input system is built from this list as it starts -- Unity's registers a Touchscreen for a device whose sources
+ * say touch screen -- and a game that picks its control scheme from the devices it has (Dave the Diver) had none until the
+ * first touch: its first frames ran with no scheme, and the code that wanted one failed.
+ */
+#define TOUCH_ID 0
+#define TOUCH_SLOT 1000                   /* what slot_of() says for the touch screen's object */
+static jobj *g_dev[TL_PADS], *g_touch;
 static int slot_of(const jobj *o) { return o && o->native ? (int)(intptr_t)o->native - 1 : -1; }
+static bool is_touch(const jobj *o) { return slot_of(o) == TOUCH_SLOT; }
 
 static jobj *device_object(int slot)
 {
@@ -134,37 +144,52 @@ static jobj *device_object(int slot)
     if (!g_dev[slot]) { g_dev[slot] = tl_jni_new_object(tl_jni_class("android/view/InputDevice")); g_dev[slot]->native = (void *)(intptr_t)(slot + 1); }
     return tl_jni_ref(g_dev[slot]);
 }
+static jobj *touch_object(void)
+{
+    if (!g_touch) { g_touch = tl_jni_new_object(tl_jni_class("android/view/InputDevice")); g_touch->native = (void *)(intptr_t)(TOUCH_SLOT + 1); }
+    return tl_jni_ref(g_touch);
+}
+/* The InputDevice an event came from, by its device id (InputEvent.getDevice). */
+jobj *tl_input_device_object(int id) { return id == TOUCH_ID ? touch_object() : device_object(id - DEVICE_BASE); }
 
 static void ID_getDeviceIds(tl_jcall *c)
 {
-    int ids[TL_PADS], n = 0;
+    int ids[TL_PADS + 1], n = 0;
+    ids[n++] = TOUCH_ID;
     for (int s = 0; s < TL_PADS; s++) if (P.connected[s]) ids[n++] = DEVICE_BASE + s;
     jobj *a = tl_jni_new_prim_array('I', (uint32_t)n);
-    if (n) memcpy(a->arr.data, ids, (size_t)n * sizeof(int));
+    memcpy(a->arr.data, ids, (size_t)n * sizeof(int));
     c->ret = vl(a);
 }
-static void ID_getDevice(tl_jcall *c) { c->ret = vl(device_object(c->args[0].i - DEVICE_BASE)); }
-static void ID_getId(tl_jcall *c) { int s = slot_of(c->self); c->ret = vi(s >= 0 ? DEVICE_BASE + s : -1); }
+static void ID_getDevice(tl_jcall *c) { c->ret = vl(tl_input_device_object(c->args[0].i)); }
+static void ID_getId(tl_jcall *c) { int s = slot_of(c->self); c->ret = vi(is_touch(c->self) ? TOUCH_ID : s >= 0 ? DEVICE_BASE + s : -1); }
 /* Whatever it really is (a DualSense, a Switch Pro Controller...), a game is told it is an Xbox controller: the layout the games know. */
-static void ID_getName(tl_jcall *c) { int s = slot_of(c->self); c->ret = vl(s >= 0 ? tl_jni_new_string("Xbox Wireless Controller") : NULL); }
-static void ID_getDescriptor(tl_jcall *c) { char d[40]; snprintf(d, sizeof(d), "husk-controller-%d", slot_of(c->self)); c->ret = vl(tl_jni_new_string(d)); }
-static void ID_getSources(tl_jcall *c) { c->ret = vi(SOURCE_ALL); }
-static void ID_vendor(tl_jcall *c) { c->ret = vi(0x045e); }          /* Microsoft */
-static void ID_product(tl_jcall *c) { c->ret = vi(0x02e0); }         /* Xbox Wireless Controller, over Bluetooth */
-static void ID_one(tl_jcall *c) { c->ret = vi(slot_of(c->self) + 1); }
+static void ID_getName(tl_jcall *c) { int s = slot_of(c->self); c->ret = vl(is_touch(c->self) ? tl_jni_new_string("touchscreen") : s >= 0 ? tl_jni_new_string("Xbox Wireless Controller") : NULL); }
+static void ID_getDescriptor(tl_jcall *c)
+{
+    char d[40];
+    if (is_touch(c->self)) snprintf(d, sizeof(d), "husk-touchscreen"); else snprintf(d, sizeof(d), "husk-controller-%d", slot_of(c->self));
+    c->ret = vl(tl_jni_new_string(d));
+}
+static int sources_of(const jobj *o) { return is_touch(o) ? SOURCE_TOUCH : SOURCE_ALL; }
+static void ID_getSources(tl_jcall *c) { c->ret = vi(sources_of(c->self)); }
+static void ID_vendor(tl_jcall *c) { c->ret = vi(is_touch(c->self) ? 0 : 0x045e); }          /* Microsoft */
+static void ID_product(tl_jcall *c) { c->ret = vi(is_touch(c->self) ? 0 : 0x02e0); }         /* Xbox Wireless Controller, over Bluetooth */
+static void ID_one(tl_jcall *c) { c->ret = vi(is_touch(c->self) ? 0 : slot_of(c->self) + 1); }
 static void ID_zero(tl_jcall *c) { c->ret = vi(0); }
 static void ID_false(tl_jcall *c) { c->ret = vz(0); }
-static void ID_true(tl_jcall *c) { c->ret = vz(1); }
+static void ID_isExternal(tl_jcall *c) { c->ret = vz(!is_touch(c->self)); }
 static void ID_null(tl_jcall *c) { c->ret.l = NULL; }
-static void ID_supportsSource(tl_jcall *c) { int m = c->args[0].i; c->ret = vz((SOURCE_ALL & m) == m); }
+static void ID_supportsSource(tl_jcall *c) { int m = c->args[0].i, have = sources_of(c->self); c->ret = vz((have & m) == m); }
 static void ID_hasKeys(tl_jcall *c)
 {
     jobj *keys = c->args[0].l;
     uint32_t n = keys && keys->kind == TL_K_PRIM_ARRAY ? keys->arr.len : 0;
     jobj *out = tl_jni_new_prim_array('Z', n);
+    bool touch = is_touch(c->self);
     for (uint32_t i = 0; i < n; i++) {
         int k = ((int *)keys->arr.data)[i];
-        ((uint8_t *)out->arr.data)[i] = (k >= 96 && k <= 110) || (k >= 19 && k <= 23) || k == 4;
+        ((uint8_t *)out->arr.data)[i] = !touch && ((k >= 96 && k <= 110) || (k >= 19 && k <= 23) || k == 4);
     }
     c->ret = vl(out);
 }
@@ -189,7 +214,7 @@ static jobj *make_range(int axis)
     r->native = m;
     return r;
 }
-static void ID_getMotionRange(tl_jcall *c) { c->ret = vl(make_range(c->args[0].i)); }
+static void ID_getMotionRange(tl_jcall *c) { c->ret = vl(is_touch(c->self) ? NULL : make_range(c->args[0].i)); }
 
 /* getMotionRanges(): a List of MotionRange, one for each axis the controller has. */
 typedef struct { jobj **items; uint32_t n; } alist;
@@ -236,7 +261,7 @@ static const tl_jhle k_pad_hle[] = {
     K("android/view/InputDevice", "getDescriptor", "()Ljava/lang/String;", ID_getDescriptor), K("android/view/InputDevice", "getSources", "()I", ID_getSources),
     K("android/view/InputDevice", "getVendorId", "()I", ID_vendor), K("android/view/InputDevice", "getProductId", "()I", ID_product),
     K("android/view/InputDevice", "getControllerNumber", "()I", ID_one), K("android/view/InputDevice", "getKeyboardType", "()I", ID_zero),
-    K("android/view/InputDevice", "isVirtual", "()Z", ID_false), K("android/view/InputDevice", "isExternal", "()Z", ID_true),
+    K("android/view/InputDevice", "isVirtual", "()Z", ID_false), K("android/view/InputDevice", "isExternal", "()Z", ID_isExternal),
     K("android/view/InputDevice", "supportsSource", "(I)Z", ID_supportsSource), K("android/view/InputDevice", "hasKeys", "([I)[Z", ID_hasKeys),
     K("android/view/InputDevice", "getMotionRange", "(I)Landroid/view/InputDevice$MotionRange;", ID_getMotionRange),
     K("android/view/InputDevice", "getMotionRange", "(II)Landroid/view/InputDevice$MotionRange;", ID_getMotionRange),
