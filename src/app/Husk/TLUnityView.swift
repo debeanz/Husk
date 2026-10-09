@@ -479,11 +479,34 @@ final class TLUnityUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         }
     }
 
-    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?)     { send(touches, phase: 0) }
-    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?)     { send(touches, phase: 1) }
-    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?)     { send(touches, phase: 2) }
+    /// Touches that put the keyboard away: they are not the game's, from start to end.
+    private var keyboardTouches: Set<ObjectIdentifier> = []
+    private func gameTouches(_ touches: Set<UITouch>) -> Set<UITouch> { touches.filter { !keyboardTouches.contains(ObjectIdentifier($0)) } }
+
+    /// A tap on the game while the keyboard is up puts the keyboard away, keeping what was typed (a Unity field takes it as Done).
+    private func dismissKeyboard() {
+        if engine == .unity { husk_unity_keyboard_done(false) }
+        resignFirstResponder()
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if isFirstResponder {
+            for t in touches { keyboardTouches.insert(ObjectIdentifier(t)) }
+            dismissKeyboard()
+            return
+        }
+        send(touches, phase: 0)
+    }
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?)     { send(gameTouches(touches), phase: 1) }
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        let game = gameTouches(touches)
+        for t in touches { keyboardTouches.remove(ObjectIdentifier(t)) }
+        send(game, phase: 2)
+    }
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        send(touches, phase: 2)
+        let game = gameTouches(touches)
+        for t in touches { keyboardTouches.remove(ObjectIdentifier(t)) }
+        send(game, phase: 2)
         pointers.removeAll()
     }
 }
