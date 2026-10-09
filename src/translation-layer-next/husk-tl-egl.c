@@ -174,7 +174,13 @@ static EGLBoolean w_eglMakeCurrent(EGLDisplay d, EGLSurface dr, EGLSurface rd, E
     }
     return ok;
 }
-PASS_BOOL(eglSwapInterval, (EGLDisplay d, EGLint i), (d, i))
+/* A game's vsync: 1 waits for the screen's refresh, 0 does not. Said when it changes. */
+static EGLBoolean w_eglSwapInterval(EGLDisplay d, EGLint i)
+{
+    static atomic_int last = -1;
+    if (atomic_exchange(&last, (int)i) != (int)i) tl_log_line("egl: the game asks for swap interval %d", (int)i);
+    return a_eglSwapInterval(d, i);
+}
 PASS_BOOL(eglBindAPI, (EGLenum api), (api))
 PASS_BOOL(eglWaitGL, (void), ())
 PASS_BOOL(eglWaitNative, (EGLint e), (e))
@@ -279,17 +285,21 @@ static void save_frame(EGLDisplay d, EGLSurface s, unsigned long n)
  * game may show: a game that draws as fast as its frames are taken would otherwise follow a ProMotion screen to 120.
  */
 static atomic_int g_frame_hz = 60;
-void husk_tl_set_frame_rate(int hz) { atomic_store(&g_frame_hz, hz > 60 ? 120 : 60); }
+void husk_tl_set_frame_rate(int hz)
+{
+    int v = hz > 60 ? 120 : 60;
+    if (atomic_exchange(&g_frame_hz, v) != v || !atomic_load(&E.presented)) tl_log_line("display: games are held to %d Hz", v);
+}
 int tl_frame_hz(void) { return atomic_load(&g_frame_hz); }
+
+static int64_t mono_ns(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (int64_t)ts.tv_sec * 1000000000ll + ts.tv_nsec; }
 
 /* Hold a presenting thread to the frame rate: a frame comes no sooner than one frame's time after the one before it. A
  * game slower than that is not held at all, and one that fell behind is not made to catch up. */
 void tl_hold_to_frame_rate(void)
 {
     static _Thread_local int64_t next;
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    int64_t now = (int64_t)ts.tv_sec * 1000000000ll + ts.tv_nsec, period = 1000000000ll / tl_frame_hz();
+    int64_t now = mono_ns(), period = 1000000000ll / tl_frame_hz();
     if (next - now > 500000) {          /* more than half a millisecond early */
         struct timespec d = { (time_t)((next - now) / 1000000000ll), (long)((next - now) % 1000000000ll) };
         nanosleep(&d, NULL);
@@ -297,6 +307,11 @@ void tl_hold_to_frame_rate(void)
     }
     next = (next > now - period ? next : now) + period;
 }
+
+/* Where a frame's time goes, said every 600 frames: how many frames a second, and how long each waited to be held to the
+ * frame rate and inside the swap itself. A swap that takes a refresh's time is the screen holding the game back; one that
+ * returns at once leaves the game's own pacing. */
+static struct { int64_t start, held, swap; } g_swapstat;
 
 #define GLT_RING 256
 static atomic_ulong g_glt_n, g_glt_draws, g_glt_uploads;
@@ -306,8 +321,13 @@ static EGLBoolean w_eglSwapBuffers(EGLDisplay d, EGLSurface s)
 {
     unsigned long n = atomic_fetch_add(&E.presented, 1) + 1;
     if (n <= 3 || n % 600 == 0) {
+        int64_t now = mono_ns(), span = now - g_swapstat.start;
         if (getenv("TL_GL_TRACE")) tl_log_line("egl: swap #%lu (%lu GL calls, %lu draws, %lu uploads so far)", n, (unsigned long)atomic_load(&g_glt_n), (unsigned long)atomic_load(&g_glt_draws), (unsigned long)atomic_load(&g_glt_uploads));
+        else if (n % 600 == 0 && g_swapstat.start && span > 0)
+            tl_log_line("egl: swap #%lu: %.1f frames a second over the last 600 (held to %d Hz); per frame %.2f ms waiting to keep to it, %.2f ms in the swap",
+                        n, 600e9 / (double)span, tl_frame_hz(), (double)g_swapstat.held / 600e6, (double)g_swapstat.swap / 600e6);
         else tl_log_line("egl: swap #%lu", n);
+        if (n % 600 == 0 || n == 3) { g_swapstat.start = now; g_swapstat.held = g_swapstat.swap = 0; }
     }
     if ((n == 300 || n == 3000) && getenv("TL_GL_TRACE")) {
         static char gl[GLT_RING * 40];
@@ -319,8 +339,13 @@ static EGLBoolean w_eglSwapBuffers(EGLDisplay d, EGLSurface s)
     }
     if (E.frame_dir[0] && (n % (unsigned long)E.frame_every == 0 || n <= 3)) save_frame(d, s, n);
     if (E.frame_dir[0]) return EGL_TRUE;
+    int64_t t0 = mono_ns();
     tl_hold_to_frame_rate();
-    return a_eglSwapBuffers(d, s);
+    int64_t t1 = mono_ns();
+    EGLBoolean r = a_eglSwapBuffers(d, s);
+    g_swapstat.held += t1 - t0;
+    g_swapstat.swap += mono_ns() - t1;
+    return r;
 }
 
 /* Android extensions this ANGLE does not have: Swappy and Unity probe for them. */

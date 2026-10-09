@@ -189,11 +189,37 @@ final class TLUnityUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         super.didMoveToWindow()
         if window != nil {
             husk_unity_set_paused(false)
+            startPacer()
         } else {
             husk_unity_set_paused(true)
             if isFirstResponder { resignFirstResponder() }
+            pacer?.invalidate()
+            pacer = nil
         }
         setNeedsLayout()
+    }
+
+    // MARK: the screen's refresh rate
+
+    /// The frame rate the game is held to (GameDisplay.frameRateHz): 60, or 120 on a ProMotion screen.
+    var frameRate = 60 {
+        didSet { if frameRate != oldValue { pacer?.preferredFrameRateRange = Self.pacerRange(frameRate) } }
+    }
+    /// A display link that does nothing but ask for the game's frame rate. The game presents into the Metal layer on its own
+    /// thread, and Core Animation picks a ProMotion screen's refresh rate from what the app asks for: with nothing asking,
+    /// it kept the screen at 60 and every frame waited for the next of those refreshes, whatever rate the game was told.
+    private var pacer: CADisplayLink?
+    private final class PacerTarget: NSObject { @objc func tick() {} }
+    private static func pacerRange(_ hz: Int) -> CAFrameRateRange {
+        CAFrameRateRange(minimum: Float(hz) / 2, maximum: Float(hz), preferred: Float(hz))
+    }
+    private func startPacer() {
+        guard pacer == nil else { return }
+        let link = CADisplayLink(target: PacerTarget(), selector: #selector(PacerTarget.tick))
+        link.preferredFrameRateRange = Self.pacerRange(frameRate)
+        link.add(to: .main, forMode: .common)
+        pacer = link
+        HuskLog.log("tl", "display: asking for \(frameRate) Hz (the screen does up to \(UIScreen.main.maximumFramesPerSecond))")
     }
 
     private func launch(width: Int, height: Int) {
@@ -541,6 +567,7 @@ struct TLUnityScreen: UIViewRepresentable {
         // Before the engine starts (it starts once the view has its size), and again on coming back to a game whose
         // settings changed meanwhile: its frame clock and cap follow at once.
         husk_tl_set_frame_rate(Int32(frameRate))
+        view.frameRate = frameRate
     }
 }
 
