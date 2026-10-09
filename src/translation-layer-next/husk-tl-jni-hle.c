@@ -837,6 +837,92 @@ static void FMODEx_stop(tl_jcall *c)
 
 static void FMOD_isRunning(tl_jcall *c) { c->ret = vz(g_fmodex.running != 0); }
 
+/*
+ * android.graphics.SurfaceTexture, and the Surface made over one: what a video decoder draws into. Unity's VideoPlayer (on
+ * OpenGL ES) makes a SurfaceTexture over an external texture of its own, a Surface over that, and gives the Surface to the
+ * decoder. Husk decodes no video (the media section of husk-tl-bionic-ndk.c), so nothing is ever drawn; what matters is the
+ * handshake around a frame. When the decoder says it drew one, the SurfaceTexture's listener hears onFrameAvailable, from a
+ * thread of its own as on Android, and the game's render thread then latches the frame with updateTexImage, which here leaves
+ * the texture as it was. Without that, Unity waits for its video's last frame forever.
+ */
+jobj *tl_proxy_call(jobj *proxy, const char *iface, const char *name, const char *sig, jobj **args, int nargs);
+#define ST_LISTENER "Landroid/graphics/SurfaceTexture$OnFrameAvailableListener;"
+#define ST_IFACE "android/graphics/SurfaceTexture$OnFrameAvailableListener"
+
+static void ST_init(tl_jcall *c)
+{
+    static int said;
+    set_int(c->self, "mTexName", c->args[0].i);
+    if (said++ < 4) tl_log_line("media: the game made a SurfaceTexture over texture %d for a video", c->args[0].i);
+}
+static void ST_setListener(tl_jcall *c)
+{
+    jobj *l = c->args[0].l, *old = tl_jni_get_field(c->self, "mListener", ST_LISTENER).l;
+    tl_jni_set_field(c->self, "mListener", ST_LISTENER, vl(l ? tl_jni_ref(l) : NULL));
+    if (old) tl_jni_unref(old);
+}
+static void ST_getTransformMatrix(tl_jcall *c)
+{
+    jobj *a = c->args[0].l;
+    static const float identity[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    if (a && a->kind == TL_K_PRIM_ARRAY && a->arr.etype == 'F' && a->arr.len >= 16) memcpy(a->arr.data, identity, sizeof(identity));
+}
+static void ST_getTimestamp(tl_jcall *c) { c->ret = tl_jni_get_field(c->self, "mTimestamp", "J"); }
+static void Surface_fromSurfaceTexture(tl_jcall *c)
+{
+    jobj *st = c->args[0].l;
+    tl_jni_set_field(c->self, "mSurfaceTexture", "Landroid/graphics/SurfaceTexture;", vl(st ? tl_jni_ref(st) : NULL));
+}
+
+/* The SurfaceTexture a Surface was made over, or NULL for any other Surface (the game's own window). */
+void *tl_surface_texture_of(void *surface)
+{
+    jobj *s = surface;
+    if (!s || s->kind != TL_K_OBJECT || strcmp(tl_jni_class_name(s), "android/view/Surface")) return NULL;
+    return tl_jni_get_field(s, "mSurfaceTexture", "Landroid/graphics/SurfaceTexture;").l;
+}
+
+typedef struct { jobj *st, *listener; } frame_note;
+static void *frame_available_main(void *arg)
+{
+    frame_note n = *(frame_note *)arg;
+    free(arg);
+    pthread_setname_np("husk-surfacetexture");
+    usleep(1000);                                   /* after the decoder's release has returned, as on a phone */
+    static int said;
+    if (!strcmp(tl_jni_class_name(n.listener), "java/lang/reflect/Proxy")) {
+        jobj *r = tl_proxy_call(n.listener, ST_IFACE, "onFrameAvailable", "(Landroid/graphics/SurfaceTexture;)V", &n.st, 1);
+        tl_jni_unref(r);
+        if (said++ < 4) tl_log_line("media: the video's frame was announced to the game (onFrameAvailable)");
+    } else if (said++ < 4) {
+        tl_log_line("media: a video frame's listener is a %s, which has no code here; the game is not told the frame came", tl_jni_class_name(n.listener));
+    }
+    tl_jni_unref(n.listener);
+    tl_jni_unref(n.st);
+    return NULL;
+}
+
+/* The decoder drew a frame (timestamp in nanoseconds) into this SurfaceTexture: tell its listener. */
+void tl_surface_texture_frame(void *surface_texture, int64_t timestamp_ns)
+{
+    jobj *st = surface_texture;
+    if (!st) return;
+    jvalue ts; ts.j = timestamp_ns;
+    tl_jni_set_field(st, "mTimestamp", "J", ts);
+    jobj *l = tl_jni_get_field(st, "mListener", ST_LISTENER).l;
+    if (!l) return;
+    frame_note *n = malloc(sizeof(*n));
+    if (!n) return;
+    n->st = tl_jni_ref(st); n->listener = tl_jni_ref(l);
+    pthread_attr_t a;
+    pthread_attr_init(&a);
+    pthread_attr_setstacksize(&a, 4u << 20);
+    pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+    pthread_t t;
+    if (pthread_create(&t, &a, frame_available_main, n) != 0) { tl_jni_unref(n->listener); tl_jni_unref(n->st); free(n); }
+    pthread_attr_destroy(&a);
+}
+
 /* ------------------------------------------------------------------ tables */
 
 static const struct { const char *name, *super; } k_classes[] = {
@@ -873,6 +959,7 @@ static const struct { const char *name, *super; } k_classes[] = {
     { "android/media/AudioDeviceInfo", "java/lang/Object" }, { "android/net/Uri", "java/lang/Object" },
     { "org/fmod/FMODAudioDevice", "java/lang/Object" }, { "android/app/AlertDialog$Builder", "java/lang/Object" }, { "android/app/Dialog", "java/lang/Object" }, { "android/app/AlertDialog", "android/app/Dialog" },
     { "android/content/SharedPreferences$Editor", "java/lang/Object" }, { "java/util/Iterator", "java/lang/Object" },
+    { "android/graphics/SurfaceTexture", "java/lang/Object" }, { ST_IFACE, "java/lang/Object" },
 };
 
 /*
@@ -1069,6 +1156,16 @@ static const tl_jhle k_hle[] = {
     M("java/lang/reflect/Field", "getDeclaringClass", "()Ljava/lang/Class;", Member_getDeclaringClass),
     M("java/lang/reflect/Method", "getDeclaringClass", "()Ljava/lang/Class;", Member_getDeclaringClass),
     M("java/lang/reflect/Constructor", "getDeclaringClass", "()Ljava/lang/Class;", Member_getDeclaringClass),
+    M("android/graphics/SurfaceTexture", "<init>", "(I)V", ST_init), M("android/graphics/SurfaceTexture", "<init>", "(IZ)V", ST_init),
+    M("android/graphics/SurfaceTexture", "setOnFrameAvailableListener", "(" ST_LISTENER ")V", ST_setListener),
+    M("android/graphics/SurfaceTexture", "setOnFrameAvailableListener", "(" ST_LISTENER "Landroid/os/Handler;)V", ST_setListener),
+    M("android/graphics/SurfaceTexture", "updateTexImage", "()V", Noop), M("android/graphics/SurfaceTexture", "releaseTexImage", "()V", Noop),
+    M("android/graphics/SurfaceTexture", "getTransformMatrix", "([F)V", ST_getTransformMatrix),
+    M("android/graphics/SurfaceTexture", "getTimestamp", "()J", ST_getTimestamp),
+    M("android/graphics/SurfaceTexture", "setDefaultBufferSize", "(II)V", Noop), M("android/graphics/SurfaceTexture", "release", "()V", Noop),
+    M("android/graphics/SurfaceTexture", "attachToGLContext", "(I)V", Noop), M("android/graphics/SurfaceTexture", "detachFromGLContext", "()V", Noop),
+    M("android/view/Surface", "<init>", "(Landroid/graphics/SurfaceTexture;)V", Surface_fromSurfaceTexture),
+    M("android/view/Surface", "release", "()V", Noop),
     { NULL, NULL, NULL, NULL }
 };
 

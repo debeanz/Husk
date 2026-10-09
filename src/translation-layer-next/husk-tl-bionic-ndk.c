@@ -655,8 +655,11 @@ static void b_ANativeActivity_flags(void *a, uint32_t add, uint32_t remove) { (v
 static void b_ANativeActivity_input(void *a, uint32_t flags) { (void)a; (void)flags; }
 
 
-typedef struct tl_nwindow { atomic_int refs; int width, height, format; void *layer; } tl_nwindow;
-static tl_nwindow g_window = { 1, 1080, 2400, 1, NULL };
+/* texture: for a video decoder's window, the SurfaceTexture its Surface was made over (husk-tl-jni-hle.c); NULL for the screen. */
+typedef struct tl_nwindow { atomic_int refs; int width, height, format; void *layer; void *texture; } tl_nwindow;
+static tl_nwindow g_window = { 1, 1080, 2400, 1, NULL, NULL };
+void *tl_surface_texture_of(void *surface);
+void tl_surface_texture_frame(void *surface_texture, int64_t timestamp_ns);
 
 void tl_nwindow_configure(int w, int h, void *layer) { g_window.width = w; g_window.height = h; g_window.layer = layer; }
 void *tl_nwindow_get(void) { atomic_fetch_add(&g_window.refs, 1); return &g_window; }
@@ -664,7 +667,20 @@ void *tl_nwindow_native(void *window) { return window ? ((tl_nwindow *)window)->
 int tl_nwindow_width(void *window) { return window ? ((tl_nwindow *)window)->width : 0; }
 int tl_nwindow_height(void *window) { return window ? ((tl_nwindow *)window)->height : 0; }
 
-static void *b_ANativeWindow_fromSurface(void *env, void *surface) { (void)env; (void)surface; atomic_fetch_add(&g_window.refs, 1); return &g_window; }
+static void *b_ANativeWindow_fromSurface(void *env, void *surface)
+{
+    (void)env;
+    /* A Surface over a SurfaceTexture is where a video decoder draws, not the screen: a window of its own, which says where its frames go. */
+    void *st = tl_surface_texture_of(surface);
+    tl_nwindow *w = st ? calloc(1, sizeof(*w)) : NULL;
+    if (w) {
+        atomic_init(&w->refs, 1);
+        w->width = 16; w->height = 16; w->format = 1; w->texture = st;
+        return w;
+    }
+    atomic_fetch_add(&g_window.refs, 1);
+    return &g_window;
+}
 static void b_ANativeWindow_acquire(tl_nwindow *w) { if (w) atomic_fetch_add(&w->refs, 1); }
 static void b_ANativeWindow_release(tl_nwindow *w) { if (w) atomic_fetch_sub(&w->refs, 1); }
 static int b_ANativeWindow_getWidth(tl_nwindow *w) { return w ? w->width : 0; }
@@ -704,8 +720,14 @@ static int b_ASensor_getMinDelay(void *s) { (void)s; return 0; }
 /*
  * Husk decodes no video. A game that plays one through the NDK's media API -- Unity's VideoPlayer, for an intro or a cutscene --
  * was refused outright, and a game that waits for its intro to finish waited on a black screen forever (Dave the Diver). Now it
- * is given what a finished video looks like: an extractor with one video track that has no samples, and a decoder that answers
- * with the end of the stream. The video "plays" and ends at once, and the game goes on as it does when a video finishes.
+ * is given the shortest video there is: an extractor with one video track that has no samples, and a decoder whose only frame
+ * comes with the end of the stream. The video "plays" one blank frame and ends, and the game goes on as it does when a video
+ * finishes.
+ *
+ * Unity 6 checks a video before it plays it: it decodes the first frames to measure the frame rate, and a video whose only frame
+ * is its last must last one frame -- a duration of 0 fails that check, and Unity drops the video without a word. So the track
+ * lasts one frame at 30 frames a second. On OpenGL ES the frame goes to a SurfaceTexture, and Unity waits until it hears the
+ * frame arrived (onFrameAvailable) before it takes the next step; releasing a frame to the screen announces it.
  */
 #define MEDIA_OK 0
 #define MEDIA_ERR (-10000)
@@ -732,7 +754,9 @@ static mf_entry *mf_find(mformat *f, const char *key, int make)
 static void mf_set_i(mformat *f, const char *k, int kind, int64_t v) { mf_entry *e = mf_find(f, k, 1); if (e) { e->kind = kind; e->i = v; } }
 static void mf_set_s(mformat *f, const char *k, const char *v) { mf_entry *e = mf_find(f, k, 1); if (e) { e->kind = MF_STRING; snprintf(e->s, sizeof(e->s), "%s", v ? v : ""); } }
 
-/* What a finished video's track says: tiny, empty, over. */
+/* What the track says: tiny, one frame long. */
+#define MEDIA_FPS 30
+#define MEDIA_FRAME_US (1000000 / MEDIA_FPS)
 static mformat *mf_video(void)
 {
     mformat *f = mf_new();
@@ -740,8 +764,8 @@ static mformat *mf_video(void)
     mf_set_i(f, "width", MF_INT32, 16); mf_set_i(f, "height", MF_INT32, 16);
     mf_set_i(f, "stride", MF_INT32, 16); mf_set_i(f, "slice-height", MF_INT32, 16);
     mf_set_i(f, "color-format", MF_INT32, 21);                /* COLOR_FormatYUV420SemiPlanar */
-    mf_set_i(f, "durationUs", MF_INT64, 0);
-    mf_set_i(f, "frame-rate", MF_INT32, 30);
+    mf_set_i(f, "durationUs", MF_INT64, MEDIA_FRAME_US);
+    mf_set_i(f, "frame-rate", MF_INT32, MEDIA_FPS);
     mf_set_i(f, "max-input-size", MF_INT32, 4096);
     return f;
 }
@@ -760,7 +784,7 @@ static void b_AMediaFormat_setInt32(mformat *f, const char *k, int32_t v) { mf_s
 static void b_AMediaFormat_setInt64(mformat *f, const char *k, int64_t v) { mf_set_i(f, k, MF_INT64, v); }
 static void b_AMediaFormat_setFloat(mformat *f, const char *k, float v) { mf_entry *e = mf_find(f, k, 1); if (e) { e->kind = MF_FLOAT; e->f = v; } }
 static void b_AMediaFormat_setString(mformat *f, const char *k, const char *v) { mf_set_s(f, k, v); }
-static const char *b_AMediaFormat_toString(mformat *f) { (void)f; return "{mime=video/avc, durationUs=0}"; }
+static const char *b_AMediaFormat_toString(mformat *f) { (void)f; return "{mime=video/avc, width=16, height=16, durationUs=33333, frame-rate=30}"; }
 
 /* AMediaExtractor: one video track, no samples. */
 typedef struct { uint32_t magic; } mextractor;
@@ -794,19 +818,44 @@ static int b_AMediaExtractor_seekTo(mextractor *x, int64_t t, int mode) { (void)
 
 /* AMediaCodec: takes what it is given, and answers with the end of the stream. */
 typedef struct { int32_t offset, size; int64_t presentationTimeUs; uint32_t flags; } mbufinfo;
-typedef struct { uint32_t magic; bool eos_in, eos_out; int waits; uint8_t buf[4096]; } mcodec;
+typedef struct { uint32_t magic; bool eos_in, eos_out; atomic_bool configured; int waits; int64_t out_pts; tl_nwindow *window; uint8_t buf[4096]; } mcodec;
 #define MC_MAGIC 0x434d4448u
+
+/* A decoder the game made and never set up is one whose game is stuck before playing: say so, once, a few seconds on. */
+static void *codec_watch(void *arg)
+{
+    mcodec *c = arg;
+    pthread_setname_np("husk-media-watch");
+    sleep(4);
+    if (c->magic == MC_MAGIC && !atomic_load(&c->configured))
+        tl_log_line("media: a decoder made 4 s ago was never set up; the game is stuck before its video plays (waiting for the video's surface?)");
+    return NULL;
+}
 static void *b_AMediaCodec_create(const char *what)
 {
     static int said;
-    if (said++ < 4) tl_log_line("media: a %s decoder was asked for; it will report the end of the stream", what ? what : "video");
+    bool tell = said++ < 4;
+    if (tell) tl_log_line("media: a %s decoder was asked for; it will report the end of the stream", what ? what : "video");
     mcodec *c = calloc(1, sizeof(*c));
     if (c) c->magic = MC_MAGIC;
+    if (c && tell) { pthread_t t; if (pthread_create(&t, NULL, codec_watch, c) == 0) pthread_detach(t); }
     return c;
 }
 /* Marked dead and kept: a decoder's own thread (asynchronous mode) may still look at it after the game has deleted it. */
 static int b_AMediaCodec_delete(mcodec *c) { if (c && c->magic == MC_MAGIC) c->magic = 0; return MEDIA_OK; }
 static int b_AMediaCodec_ok(void) { return MEDIA_OK; }
+/* The window is where frames go: the screen of a video's SurfaceTexture, or none when the game takes the frames back in memory. */
+static int b_AMediaCodec_configure(mcodec *c, mformat *f, tl_nwindow *w, void *crypto, uint32_t flags)
+{
+    (void)f; (void)crypto; (void)flags;
+    if (!c || c->magic != MC_MAGIC) return MEDIA_ERR;
+    if (w) atomic_fetch_add(&w->refs, 1);               /* kept for as long as the decoder: windows here are never freed */
+    c->window = w && w->texture ? w : NULL;
+    atomic_store(&c->configured, true);
+    static int said;
+    if (said++ < 6) tl_log_line("media: the decoder was set up %s", c->window ? "to draw into the video's SurfaceTexture" : w ? "to draw into a window" : "to hand frames back in memory");
+    return MEDIA_OK;
+}
 static int b_AMediaCodec_flush(mcodec *c) { if (c && c->magic == MC_MAGIC) { c->eos_in = c->eos_out = false; c->waits = 0; } return MEDIA_OK; }
 static ssize_t b_AMediaCodec_dequeueInputBuffer(mcodec *c, int64_t timeout) { (void)c; (void)timeout; return 0; }
 static uint8_t *b_AMediaCodec_getBuffer(mcodec *c, size_t i, size_t *size)
@@ -828,14 +877,25 @@ static ssize_t b_AMediaCodec_dequeueOutputBuffer(mcodec *c, mbufinfo *info, int6
     /* The end, once: as soon as the end of the input has come, or after a few waits if the game never sends it. */
     if (!c->eos_out && (c->eos_in || ++c->waits > 3)) {
         c->eos_out = true;
-        if (info) { info->offset = 0; info->size = 0; info->presentationTimeUs = 0; info->flags = MEDIA_FLAG_EOS; }
+        c->out_pts = 0;
+        if (info) { info->offset = 0; info->size = 0; info->presentationTimeUs = c->out_pts; info->flags = MEDIA_FLAG_EOS; }
+        static int said;
+        if (said++ < 6) tl_log_line("media: the decoder handed back the video's only frame, with the end of the stream");
         return 0;
     }
     if (timeout > 0) usleep((useconds_t)(timeout < 10000 ? timeout : 10000));
     return MEDIA_TRY_AGAIN;
 }
-static int b_AMediaCodec_releaseOutputBuffer(mcodec *c, size_t i, bool render) { (void)c; (void)i; (void)render; return MEDIA_OK; }
-static int b_AMediaCodec_releaseOutputBufferAtTime(mcodec *c, size_t i, int64_t t) { (void)c; (void)i; (void)t; return MEDIA_OK; }
+/* A frame released to the screen is drawn into the video's SurfaceTexture, and its listener hears of it. */
+static void codec_drew(mcodec *c)
+{
+    if (!c || c->magic != MC_MAGIC || !c->window) return;
+    static int said;
+    if (said++ < 4) tl_log_line("media: the game showed the video's frame; telling it the frame arrived");
+    tl_surface_texture_frame(c->window->texture, c->out_pts * 1000);
+}
+static int b_AMediaCodec_releaseOutputBuffer(mcodec *c, size_t i, bool render) { (void)i; if (render) codec_drew(c); return MEDIA_OK; }
+static int b_AMediaCodec_releaseOutputBufferAtTime(mcodec *c, size_t i, int64_t t) { (void)i; (void)t; codec_drew(c); return MEDIA_OK; }
 static void *b_AMediaCodec_getOutputFormat(mcodec *c) { (void)c; return mf_video(); }
 static int b_AMediaCodec_getName(mcodec *c, char **out) { (void)c; if (out) *out = strdup("c2.husk.none"); return MEDIA_OK; }
 static void *b_AMediaCodec_getInputFormat(mcodec *c) { (void)c; return mf_video(); }
@@ -1053,7 +1113,7 @@ const tl_bionic_entry tl_tab_ndk[] = {
     TL_WRAP("ASensor_getResolution", b_ASensor_getResolution), TL_WRAP("ASensor_getMinDelay", b_ASensor_getMinDelay),
     /* media */
     TL_WRAP("AMediaCodec_createDecoderByType", b_AMediaCodec_create), TL_WRAP("AMediaCodec_createCodecByName", b_AMediaCodec_create),
-    TL_WRAP("AMediaCodec_configure", b_AMediaCodec_ok), TL_WRAP("AMediaCodec_start", b_AMediaCodec_start), TL_WRAP("AMediaCodec_stop", b_AMediaCodec_ok),
+    TL_WRAP("AMediaCodec_configure", b_AMediaCodec_configure), TL_WRAP("AMediaCodec_start", b_AMediaCodec_start), TL_WRAP("AMediaCodec_stop", b_AMediaCodec_ok),
     TL_WRAP("AMediaCodec_flush", b_AMediaCodec_flush), TL_WRAP("AMediaCodec_delete", b_AMediaCodec_delete),
     TL_WRAP("AMediaCodec_createEncoderByType", b_media_none), TL_WRAP("AMediaCodec_getInputFormat", b_AMediaCodec_getInputFormat),
     TL_WRAP("AMediaCodec_getBufferFormat", b_AMediaCodec_getInputFormat), TL_WRAP("AMediaCodec_setParameters", b_AMediaCodec_ok),
