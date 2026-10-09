@@ -869,6 +869,66 @@ static uint64_t vm_max_address(void)
     return task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) == KERN_SUCCESS ? info.max_address : 0;
 }
 
+/*
+ * Where the address space has gone, when a large mapping is refused: iOS gives an app far less of it than Android does, and a
+ * game (Unity's allocators) reserves big stretches up front. Each region by its kind (the tag iOS keeps: the game's own mmaps
+ * are untagged), the largest ones, and the largest stretch still free.
+ */
+static void vm_report(size_t wanted)
+{
+    static int said;
+    if (said++ >= 2) return;
+    uint64_t max = vm_max_address(), used = 0, free_total = 0, gap_max = 0, gap_at = 0, shared = 0;
+    static uint64_t by_tag[256];
+    memset(by_tag, 0, sizeof(by_tag));
+    struct { uint64_t a, s; int tag, prot; bool sub; } top[6];
+    memset(top, 0, sizeof(top));
+    vm_address_t a = 0;
+    uint64_t prev_end = 0;
+    for (int guard = 0; guard < 200000; guard++) {
+        vm_size_t sz = 0;
+        natural_t depth = 0;
+        vm_region_submap_info_data_64_t info;
+        mach_msg_type_number_t cnt = VM_REGION_SUBMAP_INFO_COUNT_64;
+        if (vm_region_recurse_64(mach_task_self(), &a, &sz, &depth, (vm_region_recurse_info_t)&info, &cnt) != KERN_SUCCESS) break;
+        if (a > prev_end) {
+            uint64_t g = a - prev_end;
+            free_total += g;
+            if (g > gap_max) { gap_max = g; gap_at = prev_end; }
+        }
+        used += sz;
+        if (info.is_submap) shared += sz; else by_tag[info.user_tag & 255] += sz;
+        for (int i = 0; i < 6; i++) if (sz > top[i].s) {
+            memmove(&top[i + 1], &top[i], (size_t)(5 - i) * sizeof(top[0]));
+            top[i].a = a; top[i].s = sz; top[i].tag = info.user_tag; top[i].prot = info.protection; top[i].sub = info.is_submap;
+            break;
+        }
+        prev_end = a + sz;
+        a += sz;
+    }
+    if (max > prev_end) { uint64_t g = max - prev_end; free_total += g; if (g > gap_max) { gap_max = g; gap_at = prev_end; } }
+    const double GiB = 1024.0 * 1024.0 * 1024.0;
+    tl_log_line("vm: %.0f MiB was refused. Addresses up to %#llx: %.2f GiB in use, %.2f GiB free, the largest free stretch %.2f GiB at %#llx",
+                wanted / 1048576.0, (unsigned long long)max, used / GiB, free_total / GiB, gap_max / GiB, (unsigned long long)gap_at);
+    uint64_t malloc_b = 0;
+    for (int t = 1; t <= 12; t++) malloc_b += by_tag[t];
+    tl_log_line("vm: by kind: the system's shared code %.2f GiB, untagged (the game's own mmaps, the 4 GiB zero page) %.2f GiB, malloc %.2f GiB, "
+                "stacks %.2f GiB, IOKit %.2f GiB", shared / GiB, by_tag[0] / GiB, malloc_b / GiB, by_tag[30] / GiB, by_tag[21] / GiB);
+    char line[600]; size_t n = 0;
+    for (int pass = 0; pass < 6; pass++) {                    /* the six largest other kinds, by tag number */
+        int best = -1;
+        for (int t = 13; t < 256; t++) if (t != 21 && t != 30 && by_tag[t] && (best < 0 || by_tag[t] > by_tag[best])) best = t;
+        if (best < 0) break;
+        n += (size_t)snprintf(line + n, sizeof(line) - n, "%stag %d %.2f GiB", n ? ", " : "", best, by_tag[best] / GiB);
+        by_tag[best] = 0;
+        if (n >= sizeof(line) - 40) break;
+    }
+    if (n) tl_log_line("vm: other kinds: %s", line);
+    for (int i = 0; i < 6 && top[i].s; i++)
+        tl_log_line("vm: large region %#llx, %.2f GiB, %s %d, prot %d", (unsigned long long)top[i].a, top[i].s / GiB,
+                    top[i].sub ? "shared, depth" : "tag", top[i].sub ? 0 : top[i].tag, top[i].prot);
+}
+
 /* A game that needs its memory at one address (a static recompilation keeps the console's addresses: Hades wants 0x4000000000) and did not get it. */
 static void note_wrong_place(void *want, size_t len, void *got)
 {
@@ -917,6 +977,12 @@ static void *b_mmap(void *addr, size_t len, int prot, int flags, int fd, long of
     if (r != MAP_FAILED && (flags & 0x20)) anon_add(r, len);
     mm_trace("mmap", r, len, prot, flags);
     if (r == MAP_FAILED) tl_log_line("mm: mmap FAILED len=%#zx prot=%d flags=%#x errno=%d", len, prot, flags, errno);
+    if (r == MAP_FAILED && len >= ((size_t)64 << 20)) vm_report(len);
+    /* The big ones, as they happen: what a refusal later is measured against. */
+    if (r != MAP_FAILED && (flags & 0x20) && len >= ((size_t)256 << 20)) {
+        static int big;
+        if (big++ < 24) tl_log_line("mm: the game %s %.0f MiB at %p", prot == 0 ? "reserved" : "mapped", len / 1048576.0, r);
+    }
     return r;
 }
 static int b_munmap(void *a, size_t l)
