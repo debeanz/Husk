@@ -97,14 +97,24 @@ static void CL_findClass(tl_jcall *c)
 }
 
 /*
- * AndroidThunkJava_ForceQuit: the engine has met something it cannot go on after. Its log is compiled out of a shipping build, so the call chain is
- * the only account of why; it is printed, and the thread stops (on Android the process would be gone in a moment).
+ * AndroidThunkJava_ForceQuit: the engine has met something it cannot go on after. Its log is compiled out of a shipping build, but a failed check or a
+ * fatal error still writes its message into GErrorHist (FDebug::AssertFailed, before it reports the error and the error device quits): that message,
+ * when the engine exports the array, and the call chain are printed, and the thread stops (on Android the process would be gone in a moment).
  */
 #include <unistd.h>
 #include "husk-tl-ld.h"
 static void GA_forceQuit(tl_jcall *c)
 {
     (void)c;
+    tl_lib *ue = tl_ld_find_lib("libUE4.so");
+    const uint16_t *hist = ue ? (const uint16_t *)tl_ld_sym(ue, "GErrorHist") : NULL;      /* TCHAR is UTF-16 on Android */
+    if (hist && hist[0]) {
+        char msg[1200]; size_t k = 0;
+        for (size_t i = 0; hist[i] && i < 16384 && k + 1 < sizeof(msg); i++)
+            msg[k++] = hist[i] >= 0x20 && hist[i] < 0x7f ? (char)hist[i] : hist[i] < 0x20 ? ' ' : '?';     /* line breaks as spaces: one log line */
+        msg[k] = 0;
+        tl_log_line("ue4: the engine's error: %s", msg);
+    }
     tl_log_line("ue4: the engine asked to quit (AndroidThunkJava_ForceQuit). Called from:");
     void **fp = __builtin_frame_address(0);
     for (int i = 0; fp && i < 28; i++) {

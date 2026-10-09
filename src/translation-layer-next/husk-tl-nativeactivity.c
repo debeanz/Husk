@@ -3,6 +3,7 @@
 #include "husk-tl-nativeactivity.h"
 
 #include <dirent.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -72,6 +73,7 @@ static struct {
     ANativeActivity na;
     ANativeActivityCallbacks callbacks;
     bool generic;                          /* a NativeActivity game of its own (no libUE4): nothing of Unreal is set up for it */
+    bool vulkan, gl_only;                  /* Unreal: Vulkan (MoltenVK), or OpenGL ES because the game has shaders for nothing else */
     char main_lib[64];                     /* the library that exports ANativeActivity_onCreate */
     void *window;
     pthread_t ui;
@@ -106,6 +108,59 @@ static bool stored_range(const char *apk, const char *entry, unsigned long long 
     }
     tl_zip_close(&z);
     return ok;
+}
+
+/*
+ * Which graphics API a game's data has shaders for. A cooked Unreal game cannot compile shaders on the phone: it runs on an API its pak
+ * has shaders for, or it stops as it starts (CompileGlobalShaderMap fails the check, and the engine quits -- Little Nightmares, asked for
+ * Vulkan with shaders only for OpenGL ES). The pak's file index, after its data at the end of the file, names the shader files by format:
+ * ...GLSL_ES3_1_ANDROID... (or GLSL_ES2) for OpenGL ES, ...SF_VULKAN_ES31_ANDROID... for Vulkan. An encrypted index names neither.
+ * 'V' when there are Vulkan shaders, 'G' when only OpenGL ES ones, 0 when it cannot be told.
+ */
+static int pak_shader_api(void)
+{
+    const char *entry = getenv("TL_UE4_OBB_ENTRY") ? getenv("TL_UE4_OBB_ENTRY") : "assets/main.obb.png";
+    unsigned long long off = 0, size = 0;
+    const char *path = N.apk;
+    struct stat st;
+    if (!stored_range(N.apk, entry, &off, &size)) {
+        if (stat(N.obb_file, &st) != 0) return 0;
+        path = N.obb_file; off = 0; size = (unsigned long long)st.st_size;
+    }
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return 0;
+    const unsigned long long tail = size < (64ull << 20) ? size : (64ull << 20), chunk = 4ull << 20, overlap = 64;
+    char *buf = malloc((size_t)(chunk + overlap));
+    bool gl = false, vk = false;
+    for (unsigned long long pos = size - tail; buf && pos < size && !vk; pos += chunk) {
+        unsigned long long want = size - pos < chunk + overlap ? size - pos : chunk + overlap;
+        ssize_t got = pread(fd, buf, (size_t)want, (off_t)(off + pos));
+        if (got <= 0) break;
+        if (memmem(buf, (size_t)got, "SF_VULKAN", 9)) vk = true;
+        if (memmem(buf, (size_t)got, "GLSL_ES", 7)) gl = true;
+    }
+    free(buf);
+    close(fd);
+    return vk ? 'V' : gl ? 'G' : 0;
+}
+
+/* Vulkan when MoltenVK is there and the game's data allows it: ANGLE over Metal speaks OpenGL ES 3.0, and the engine's ES 3.1 shaders run on it
+ * only through the shim (tl_egl_es31_shim). TL_UE4_NO_VULKAN and TL_UE4_FORCE_VULKAN decide it outright. */
+static void choose_api(void)
+{
+    N.vulkan = N.gl_only = false;
+    if (getenv("TL_UE4_NO_VULKAN")) { N.gl_only = true; return; }
+    if (getenv("TL_UE4_FORCE_VULKAN")) { N.vulkan = true; return; }
+    if (!tl_vk_available()) return;
+    int api = pak_shader_api();
+    if (api == 'G') {
+        N.gl_only = true;
+        tl_log_line("ue4: the game's data has shaders for OpenGL ES and none for Vulkan: it runs on OpenGL ES (ANGLE)");
+        return;
+    }
+    N.vulkan = true;
+    tl_log_line(api == 'V' ? "ue4: the game's data has Vulkan shaders: it runs on Vulkan (MoltenVK)"
+                           : "ue4: which shaders the game's data has cannot be told (an encrypted index?): it runs on Vulkan (MoltenVK)");
 }
 
 /* A native of GameActivity: registered by the library, or found by its JNI name. */
@@ -236,7 +291,8 @@ bool tl_na_start(const tl_ga_config *cfg)
     N.generic = !tl_ld_has_lib("libUE4.so");
     if (!N.generic) {
         tl_egl_es31_shim(true);
-        tl_egl_offscreen_windows(!getenv("TL_UE4_NO_VULKAN") && (getenv("TL_UE4_FORCE_VULKAN") || tl_vk_available()));
+        choose_api();
+        tl_egl_offscreen_windows(N.vulkan);       /* with Vulkan, the layer is Vulkan's and GL draws off-screen */
     }
     if (cfg->angle_egl && !tl_egl_init(cfg->angle_egl, cfg->angle_gles, cfg->frame_dir, cfg->frame_every)) return false;
     tl_jni_init();
@@ -262,15 +318,12 @@ bool tl_na_start(const tl_ga_config *cfg)
         load_library(libs[i]);
         if (tl_jni_pending()) { tl_log_line("ue4: loading lib%s.so failed", libs[i]); return false; }
     }
-    if (getenv("TL_UE4_NO_VULKAN")) {
+    /* The API chosen above (choose_api), made the engine's: asked for Vulkan even by a project that defaults to OpenGL ES (bDetectVulkanByDefault off), which
+     * Minecraft Dungeons is; kept off it when the game has no Vulkan shaders, or TL_UE4_NO_VULKAN says so. */
+    {
         tl_lib *ue = tl_ld_find_lib("libUE4.so");
-        if (ue) { patch_return(ue, "_ZN12FAndroidMisc15ShouldUseVulkanEv", 0); patch_return(ue, "_ZN12FAndroidMisc22ShouldUseDesktopVulkanEv", 0); }
-    }
-    /* ANGLE over Metal speaks OpenGL ES 3.0 and the engine's ES 3.1 shaders will not compile on it, so when MoltenVK is there the engine is asked for Vulkan -- also for a project
-     * that defaults to OpenGL ES (bDetectVulkanByDefault off), which Minecraft Dungeons is. TL_UE4_NO_VULKAN opts out; TL_UE4_FORCE_VULKAN forces it even with no MoltenVK. */
-    if ((getenv("TL_UE4_FORCE_VULKAN") || (tl_vk_available() && !getenv("TL_UE4_NO_VULKAN")))) {
-        tl_lib *ue = tl_ld_find_lib("libUE4.so");
-        if (ue) { patch_return(ue, "_ZN12FAndroidMisc15ShouldUseVulkanEv", 1); patch_return(ue, "_ZN12FAndroidMisc17IsVulkanAvailableEv", 1); }
+        if (ue && N.vulkan) { patch_return(ue, "_ZN12FAndroidMisc15ShouldUseVulkanEv", 1); patch_return(ue, "_ZN12FAndroidMisc17IsVulkanAvailableEv", 1); }
+        if (ue && N.gl_only) { patch_return(ue, "_ZN12FAndroidMisc15ShouldUseVulkanEv", 0); patch_return(ue, "_ZN12FAndroidMisc22ShouldUseDesktopVulkanEv", 0); }
     }
     tl_log_line("ue4: libraries loaded");
     setenv("TL_PAD_DPAD", "keys", 0);          /* the D-pad as DPAD_* keys, which the engine maps like a stick's arrows */
