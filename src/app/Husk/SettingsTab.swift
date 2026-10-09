@@ -29,6 +29,15 @@ struct SettingsTab: View {
                 }
 
                 Section {
+                    row("memorychip", .green, "Increased Memory Limit", detail: MemoryStatus.increasedMemoryLimit ? "On" : "Off")
+                    row("square.stack.3d.up.fill", .cyan, "Extended Address Space", detail: MemoryStatus.extendedAddressing ? "On" : "Off")
+                } header: {
+                    Text("Memory")
+                } footer: {
+                    Text(memoryFooter)
+                }
+
+                Section {
                     Picker(selection: $resolution) {
                         ForEach(GameDisplay.resolutions, id: \.self) { Text(GameDisplay.title($0)).tag($0) }
                     } label: { row("square.resize", .blue, "Resolution") }
@@ -80,6 +89,15 @@ struct SettingsTab: View {
             .navigationTitle("Settings")
             .sheet(isPresented: $showLogs) { LogView() }
         }
+    }
+
+    /// What the Memory section says: the limits as they are now, and where the permissions come from.
+    private var memoryFooter: String {
+        var text = "iOS closes Husk at about \(MemoryStatus.gb(MemoryStatus.memoryLimit)) of memory, and lets it use addresses "
+        text += "up to \(MemoryStatus.gb(MemoryStatus.addressLimit)). Both permissions come from how the app is signed: inside "
+        text += "LiveContainer, from LiveContainer's signature. The memory limit lets big games use more RAM; the extended address "
+        text += "space is what the largest ones (Dave the Diver) need to start."
+        return text
     }
 
     /// What the In Game section says, built in steps: as one expression it is more than the type checker will take.

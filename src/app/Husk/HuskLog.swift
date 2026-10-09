@@ -335,6 +335,7 @@ enum HuskLog {
         log("boot", "device      : \(model)")
         log("boot", "system      : \(d.systemName) \(d.systemVersion)")
         log("boot", "physical RAM: \(mem) MiB")
+        log("boot", "memory      : \(MemoryStatus.summary)")
         log("boot", "processors  : \(ProcessInfo.processInfo.processorCount) "
                   + "(active \(ProcessInfo.processInfo.activeProcessorCount))")
         log("boot", "bundle      : \(Bundle.main.bundleIdentifier ?? "?")")
