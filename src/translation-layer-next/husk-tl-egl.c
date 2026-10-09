@@ -527,6 +527,9 @@ static const struct { const char *name; void *wrap; void **real; } k_adapt[] = {
     ADAPT(glBlitFramebuffer), ADAPT(glTexSubImage3D), ADAPT(glCompressedTexSubImage3D), ADAPT(glCopyImageSubData),
     ADAPT(glColorMask), ADAPT(glDepthMask), ADAPT(glVertexAttribPointer), ADAPT(glUniformMatrix2fv),
     ADAPT(glUniformMatrix3fv), ADAPT(glUniformMatrix4fv), ADAPT(glSampleCoverage), ADAPT(glGetString), ADAPT(glGetStringi), ADAPT(glCompileShader), ADAPT(glShaderSource), ADAPT(glAttachShader), ADAPT(glLinkProgram), ADAPT(glGetIntegerv), ADAPT(glBindBufferBase), ADAPT(glBindBuffer), ADAPT(glBufferData), ADAPT(glBufferSubData), ADAPT(glBindBufferRange),
+    /* buffer textures under the 3.1 shim (es31_tb) */
+    ADAPT(glUnmapBuffer), ADAPT(glMapBufferRange), ADAPT(glCopyBufferSubData), ADAPT(glBindTexture), ADAPT(glDeleteTextures),
+    ADAPT(glDrawArrays), ADAPT(glDrawElements), ADAPT(glDrawArraysInstanced), ADAPT(glDrawElementsInstanced), ADAPT(glDrawRangeElements),
 };
 
 static const struct { const char *name; void *fn; } k_egl[] = {
@@ -652,7 +655,6 @@ static const char *const k_noop_names[] = {
 /* ES 3.1 entry points an ES 3.0 context cannot honour. Under the 3.1 shim a game that asks for them is handed an empty function,
  * so that setup which merely creates the objects goes through; whatever really depends on them draws nothing. */
 static const char *const k_es31_stub_names[] = {
-    "glTexBufferEXT", "glTexBufferOES", "glTexBuffer", "glTexBufferRangeEXT", "glTexBufferRangeOES", "glTexBufferRange",
     "glBindImageTexture", "glDispatchCompute", "glDispatchComputeIndirect", "glMemoryBarrier", "glMemoryBarrierByRegion",
     "glFramebufferParameteri", "glGetFramebufferParameteriv", "glTexStorage2DMultisample", NULL
 };
@@ -660,6 +662,13 @@ static const char *const k_es31_stub_names[] = {
 void *tl_egl_resolve(const char *name)
 {
     for (int i = 0; k_noop_names[i]; i++) if (!strcmp(k_noop_names[i], name)) return (void *)w_gl_noop;
+    /* Buffer textures, made of array textures under the 3.1 shim (es31_tb) -- ANGLE's own entry points need a 3.2 context. */
+    if (g_es31_shim && !strncmp(name, "glTexBuffer", 11)) {
+        const char *rest = name + 11;
+        bool range = !strncmp(rest, "Range", 5);
+        if (range) rest += 5;
+        if (!*rest || !strcmp(rest, "EXT") || !strcmp(rest, "OES")) return range ? (void *)w_glTexBufferRange : (void *)w_glTexBuffer;
+    }
     if (g_es31_shim) for (int i = 0; k_es31_stub_names[i]; i++) if (!strcmp(k_es31_stub_names[i], name)) {
         void *real = E.ready && a_eglGetProcAddress ? a_eglGetProcAddress(name) : NULL;
         if (real) break;
