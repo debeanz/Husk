@@ -17,7 +17,6 @@
 #include "husk-tl-gamepad.h"
 #include "husk-tl-jni.h"
 #include "husk-tl-ld.h"
-#include "husk-tl-xmem.h"
 
 void tl_jni_hle_install(void);
 void tl_hle_configure(const char *pkg, const char *apk, const char *data, int w, int h);
@@ -180,39 +179,56 @@ static void call_native(const char *name, const char *sig, uintptr_t a, uintptr_
 
 static void kb_drain(void);
 
-/* How far a loaded library's segments reach (in its own addresses), so that nothing past its end is read. */
-static int lib_extent_cb(uintptr_t bias, const char *name, const void *phdr, unsigned phnum, void *user)
+/* libunity's executable segment, as the loader mapped it (its executable view). */
+typedef struct { const uint8_t *code; size_t size; } code_span;
+static int unity_code_cb(uintptr_t bias, const char *name, const void *phdr, unsigned phnum, void *user)
 {
-    (void)bias;
     const char *slash = name ? strrchr(name, '/') : NULL;
     if (!name || strcmp(slash ? slash + 1 : name, "libunity.so")) return 0;
-    uint64_t end = 0;
     for (unsigned i = 0; i < phnum; i++) {
         const uint8_t *p = (const uint8_t *)phdr + 56u * i;
-        uint32_t type; uint64_t vaddr, memsz;
-        memcpy(&type, p, 4); memcpy(&vaddr, p + 16, 8); memcpy(&memsz, p + 40, 8);
-        if (type == 1 && vaddr + memsz > end) end = vaddr + memsz;                  /* PT_LOAD */
+        uint32_t type, flags; uint64_t vaddr, filesz;
+        memcpy(&type, p, 4); memcpy(&flags, p + 4, 4); memcpy(&vaddr, p + 16, 8); memcpy(&filesz, p + 32, 8);
+        if (type == 1 && (flags & 1)) { ((code_span *)user)->code = (const uint8_t *)(bias + vaddr); ((code_span *)user)->size = filesz; }   /* PT_LOAD, PF_X */
     }
-    *(uint64_t *)user = end;
     return 1;
+}
+/* Where an adrp + add pair (in place, as the loader left it: aimed at the writable view) points. */
+static uint8_t *adrp_add_target(const uint32_t *w)
+{
+    int64_t imm = (int64_t)((((w[0] >> 5) & 0x7FFFF) << 2) | ((w[0] >> 29) & 3));
+    if (imm & (1 << 20)) imm -= 1 << 21;
+    uintptr_t page = ((uintptr_t)w & ~(uintptr_t)0xFFF) + (uintptr_t)(imm << 12);
+    return (uint8_t *)(page + ((w[1] >> 10) & 0xFFF));
 }
 
 /*
- * Unity 6 does not answer for SetStackTraceLogType by name. For its 6000.0.78f1 player (recognised by the code of the setter
- * itself) the settings are set where the engine keeps them, overrides included, so the game's own setting cannot take them back.
+ * Unity 6 does not answer for SetStackTraceLogType by name, and a stripped player (engine code stripping relinks libunity for each
+ * game) keeps its settings at addresses of its own. The setter is found by its code instead -- two adrp + add pairs that load the
+ * overrides and the settings, then "ldr; cmn #-1; csel; str; ret" -- and the settings are set where the engine keeps them, overrides
+ * included, so the game's own setting cannot take them back.
  */
 static bool stacks_by_table(void)
 {
-    static const uint32_t setter_tail[] = { 0xb8605908, 0x3100051f, 0x1a880028, 0xb8205928, 0xd65f03c0 };  /* ldr; cmn; csel; str; ret */
-    enum { SETTER_TAIL = 0x1274eb0, OVERRIDES = 0x1a057e8, TYPES = 0x1a05800 };                              /* 6000.0.78f1, arm64 */
-    tl_lib *u = tl_ld_find_lib("libunity.so");
-    uint8_t *base = u ? tl_ld_lib_base(u) : NULL;
-    uint64_t extent = 0;
-    tl_ld_iterate(lib_extent_cb, &extent);
-    if (!base || extent < TYPES + 24 || memcmp(base + SETTER_TAIL, setter_tail, sizeof(setter_tail))) return false;
-    uint8_t *rx = base + OVERRIDES;
-    ptrdiff_t to_rw = tl_xmem_contains(rx) && tl_xmem_is_rx(rx) ? tl_xmem_delta() : 0;
-    int32_t *overrides = (int32_t *)(rx + to_rw), *types = (int32_t *)(base + TYPES + to_rw);
+    static const uint32_t tail[] = { 0xb8605908, 0x3100051f, 0x1a880028, 0xb8205928, 0xd65f03c0 };  /* ldr w8,[x8,w0,uxtw#2]; cmn w8,#1; csel; str w8,[x9,..]; ret */
+    code_span cs = { 0 };
+    tl_ld_iterate(unity_code_cb, &cs);
+    if (!cs.code || cs.size < 64) return false;
+    const uint8_t *hit = NULL;
+    for (const uint8_t *p = cs.code + 16; p + sizeof(tail) <= cs.code + cs.size; p += 4) {
+        p = memmem(p, (size_t)(cs.code + cs.size - p), tail, sizeof(tail));
+        if (!p) break;
+        if (((uintptr_t)p & 3) || p < cs.code + 16) continue;
+        if (hit) return false;                                      /* more than one: not sure which */
+        hit = p;
+    }
+    if (!hit) return false;
+    const uint32_t *w = (const uint32_t *)hit - 4;
+    if ((w[0] & 0x9F00001Fu) != 0x90000008u || (w[1] & 0xFFC003FFu) != 0x91000108u
+        || (w[2] & 0x9F00001Fu) != 0x90000009u || (w[3] & 0xFFC003FFu) != 0x91000129u) return false;
+    int32_t *overrides = (int32_t *)adrp_add_target(w), *types = (int32_t *)adrp_add_target(w + 2);
+    for (int i = 0; i < 5; i++)                                     /* what they hold: StackTraceLogType values, -1 for no override */
+        if (overrides[i] < -1 || overrides[i] > 2 || types[i] < 0 || types[i] > 2) return false;
     overrides[0] = overrides[4] = 1;            /* LogType.Error and LogType.Exception: StackTraceLogType.ScriptOnly, whatever is asked later */
     types[0] = types[4] = 1;
     return true;
@@ -233,7 +249,7 @@ static void want_script_stacks(void)
     static bool by_table;
     if (!by_table && !tries) {
         by_table = stacks_by_table();
-        if (by_table) { tl_log_line("unity: C# exceptions will be logged with the methods they went through (Unity 6000.0.78f1)"); return; }
+        if (by_table) { tl_log_line("unity: C# exceptions will be logged with the methods they went through"); return; }
     }
     if (by_table) return;
     if (!set && tries < 200) {
