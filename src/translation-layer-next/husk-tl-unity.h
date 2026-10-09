@@ -53,6 +53,17 @@ void tl_unity_touch(int phase, int id, float x, float y);
 typedef struct tl_unity_perf { double fps, mean_ms, max_ms; } tl_unity_perf;
 void tl_unity_perf_snapshot(tl_unity_perf *out);
 
+/*
+ * The soft keyboard (TouchScreenKeyboard). The handler is told, on the engine's thread: 1 = show it (the field's text, its
+ * placeholder, Unity's keyboard type, the character limit or 0, flags 1 = secure and 2 = multi-line), 2 = hide it, 3 = the
+ * game set the text, 4 = the game set the character limit. What is typed goes back as the field's whole text; Done or Back
+ * ends it. Both are safe from any thread: they reach the engine before its next frame.
+ */
+typedef void (*tl_unity_keyboard_fn)(int action, const char *text, const char *placeholder, int type, int limit, int flags);
+void tl_unity_set_keyboard_handler(tl_unity_keyboard_fn fn);
+void tl_unity_keyboard_text(const char *utf8);
+void tl_unity_keyboard_done(bool cancelled);
+
 /* Pause the engine the way UnityPlayer.onPause does (and resume it). Safe from any thread. */
 void tl_unity_set_paused(bool paused);
 

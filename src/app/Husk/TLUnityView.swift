@@ -29,7 +29,7 @@ final class TLUnityUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     /// game's picture whenever the two differ -- a landscape game on a screen that stayed portrait.
     private let metal = CAMetalLayer()
 
-    /// The cocos2d-x or SDL game on screen, which the game's keyboard requests (they arrive on its own thread) are routed to.
+    /// The game on screen (cocos2d-x, SDL, GameActivity or Unity), which the game's keyboard requests (they arrive on its own thread) are routed to.
     nonisolated(unsafe) static weak var cocosView: TLUnityUIView?
 
     private let apk: String
@@ -92,6 +92,9 @@ final class TLUnityUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         } else if engine == .minecraft {
             TLUnityUIView.cocosView = self
             TLUnityUIView.installGameActivityKeyboardHandler()
+        } else if engine == .unity {
+            TLUnityUIView.cocosView = self
+            TLUnityUIView.installUnityKeyboardHandler()
         }
         // The GPU is not the app's while it is in the background: stop drawing, and carry on when it returns.
         NotificationCenter.default.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { _ in
@@ -243,11 +246,12 @@ final class TLUnityUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         if !started { HuskLog.log("tl", "native: launch refused") }
     }
 
-    // MARK: keyboard (cocos2d-x and SDL games)
+    // MARK: keyboard (cocos2d-x, SDL, GameActivity and Unity games)
 
     /// A game asks for the keyboard when its text field is tapped. The keyboard belongs to this view; what it types goes
     /// to the game, and a strip above the keyboard shows the text, because in landscape the keyboard covers the game's field.
-    override var canBecomeFirstResponder: Bool { engine == .cocos || engine == .sdl || engine == .minecraft }
+    private var takesKeyboard: Bool { engine == .cocos || engine == .sdl || engine == .minecraft || engine == .unity }
+    override var canBecomeFirstResponder: Bool { takesKeyboard }
     var hasText: Bool { true }
     var autocorrectionType: UITextAutocorrectionType = .no
     var autocapitalizationType: UITextAutocapitalizationType = .none
@@ -258,8 +262,13 @@ final class TLUnityUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     var keyboardType: UIKeyboardType = .default
     var keyboardAppearance: UIKeyboardAppearance = .dark
     var returnKeyType: UIReturnKeyType = .done
+    var isSecureTextEntry: Bool = false
 
     private var typed = ""
+    /// A Unity field's own settings: its placeholder, its character limit (0: none), and whether Return is a new line.
+    private var placeholder = ""
+    private var unityLimit = 0
+    private var unityMultiline = false
     private lazy var typedLabel: UILabel = {
         let l = UILabel()
         l.font = .systemFont(ofSize: 17, weight: .medium)
@@ -283,27 +292,54 @@ final class TLUnityUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         bar.addSubview(done)
         return bar
     }()
-    override var inputAccessoryView: UIView? { engine == .cocos || engine == .sdl || engine == .minecraft ? keyboardBar : nil }
+    override var inputAccessoryView: UIView? { takesKeyboard ? keyboardBar : nil }
+
+    /// The strip shows the text (as dots in a password field), or the field's placeholder while it is empty.
+    private func showTyped() {
+        if typed.isEmpty && !placeholder.isEmpty {
+            typedLabel.text = placeholder
+            typedLabel.textColor = UIColor(white: 1, alpha: 0.4)
+        } else {
+            typedLabel.text = isSecureTextEntry ? String(repeating: "\u{2022}", count: typed.count) : typed
+            typedLabel.textColor = .white
+        }
+    }
 
     func insertText(_ text: String) {
+        if engine == .unity {
+            // A Unity field is sent whole after each change, as Android's edit box sends it.
+            if text == "\n" && !unityMultiline { finishTyping(); return }
+            var add = text
+            if unityLimit > 0 {
+                let room = unityLimit - typed.count
+                if room <= 0 { return }
+                add = String(add.prefix(room))
+            }
+            typed += add
+            showTyped()
+            husk_unity_keyboard_text(typed)
+            return
+        }
         if text == "\n" { finishTyping(); return }
         typed += text
-        typedLabel.text = typed
+        showTyped()
         if engine == .sdl { husk_sdl_commit_text(text) } else if engine == .minecraft { husk_ga_insert_text(text) } else { husk_cocos_insert_text(text) }
     }
 
     func deleteBackward() {
         if !typed.isEmpty { typed.removeLast() }
-        typedLabel.text = typed
+        showTyped()
+        if engine == .unity { husk_unity_keyboard_text(typed); return }
         if engine == .sdl { husk_sdl_key(67, 1); husk_sdl_key(67, 0) }   // KEYCODE_DEL
         else if engine == .minecraft { husk_ga_delete_backward() }
         else { husk_cocos_delete_backward() }
     }
 
-    private func setTyped(_ text: String) { typed = text; typedLabel.text = text }
+    private func setTyped(_ text: String) { typed = text; showTyped() }
 
     /// Return, or the Done button: what Android's "done" action does -- the game gets a newline, and the keyboard goes.
     private func finishTyping() {
+        if engine == .unity { husk_unity_keyboard_done(false); resignFirstResponder(); return }
         if engine == .sdl { husk_sdl_key(66, 1); husk_sdl_key(66, 0) }   // KEYCODE_ENTER
         else if engine == .minecraft { husk_ga_editor_action() }        // the field's own action: send the chat, name the world
         else { husk_cocos_insert_text("\n") }
@@ -349,6 +385,54 @@ final class TLUnityUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
                     view.resignFirstResponder()
                 }
             }
+        }
+    }
+
+    /// A Unity game's requests (TouchScreenKeyboard, from UnityMain): 1 shows the keyboard for a field, 2 hides it, 3 sets
+    /// the field's text, 4 its character limit.
+    static func installUnityKeyboardHandler() {
+        husk_unity_set_keyboard_handler { action, text, placeholder, type, limit, flags in
+            let t = text.map { String(cString: $0) } ?? ""
+            let p = placeholder.map { String(cString: $0) } ?? ""
+            DispatchQueue.main.async {
+                guard let view = TLUnityUIView.cocosView else { return }
+                switch action {
+                case 1: view.beginUnityField(text: t, placeholder: p, type: Int(type), limit: Int(limit), flags: Int(flags))
+                case 2: view.resignFirstResponder()
+                case 3: view.setTyped(t)
+                case 4: view.unityLimit = Int(limit)
+                default: break
+                }
+            }
+        }
+    }
+
+    /// The keyboard for a Unity text field, set up the way the field asks: its kind of keyboard, a password's dots, a limit.
+    private func beginUnityField(text: String, placeholder: String, type: Int, limit: Int, flags: Int) {
+        unityLimit = limit
+        unityMultiline = flags & 2 != 0
+        isSecureTextEntry = flags & 1 != 0
+        self.placeholder = placeholder
+        keyboardType = TLUnityUIView.keyboardType(forUnity: type)
+        returnKeyType = unityMultiline ? .default : .done
+        setTyped(text)
+        if isFirstResponder { reloadInputViews() } else { becomeFirstResponder() }
+    }
+
+    /// Unity's TouchScreenKeyboardType, as the iPhone's keyboards.
+    private static func keyboardType(forUnity type: Int) -> UIKeyboardType {
+        switch type {
+        case 1: return .asciiCapable
+        case 2: return .numbersAndPunctuation
+        case 3: return .URL
+        case 4: return .numberPad
+        case 5: return .phonePad
+        case 6: return .namePhonePad
+        case 7: return .emailAddress
+        case 9: return .twitter
+        case 10: return .webSearch
+        case 11: return .decimalPad
+        default: return .default
         }
     }
 

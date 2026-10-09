@@ -101,6 +101,12 @@ typedef struct husk_unity_perf { double fps, mean_ms, max_ms; } husk_unity_perf;
 void husk_unity_perf_snapshot(husk_unity_perf *out);          /* since the last call */
 void husk_unity_touch(int phase, int id, float x, float y);   /* phase 0 down, 1 move, 2 up, 3 cancel */
 void husk_unity_set_paused(bool paused);
+/* Soft keyboard for a Unity game. The handler (on the engine's thread) is told 1 = show (text, placeholder, Unity's keyboard type,
+ * character limit or 0, flags 1 = secure, 2 = multi-line), 2 = hide, 3 = the game set the text, 4 = it set the limit. Send the
+ * field's whole text after each change, then Done (or cancelled). */
+void husk_unity_set_keyboard_handler(void (*handler)(int action, const char *text, const char *placeholder, int type, int limit, int flags));
+void husk_unity_keyboard_text(const char *utf8);
+void husk_unity_keyboard_done(bool cancelled);
 
 /* The app's package name from its manifest into `out`; false if it cannot be read. */
 bool husk_unity_package_name(const char *apk, char *out, unsigned long out_len);

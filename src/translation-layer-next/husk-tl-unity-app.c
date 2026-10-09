@@ -481,6 +481,9 @@ void husk_unity_touch(int phase, int id, float x, float y)
     else if (A.engine == ENGINE_GAMEACTIVITY) tl_ga_touch(phase, id, x, y);
     else if (A.engine == ENGINE_COCOS) tl_cocos_touch(phase, id, x, y); else tl_unity_touch(phase, id, x, y);
 }
+void husk_unity_set_keyboard_handler(void (*handler)(int, const char *, const char *, int, int, int)) { tl_unity_set_keyboard_handler(handler); }
+void husk_unity_keyboard_text(const char *utf8) { if (atomic_load(&A.state) == HUSK_UNITY_RUNNING && A.engine == ENGINE_UNITY) tl_unity_keyboard_text(utf8); }
+void husk_unity_keyboard_done(bool cancelled) { if (atomic_load(&A.state) == HUSK_UNITY_RUNNING && A.engine == ENGINE_UNITY) tl_unity_keyboard_done(cancelled); }
 void husk_unity_set_paused(bool paused)
 {
     if (atomic_load(&A.state) != HUSK_UNITY_RUNNING) return;

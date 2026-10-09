@@ -98,6 +98,8 @@ static bool newer_unity(void)
 
 bool tl_unity_ui_looper(void) { return U.ui_looper; }
 
+static void kb_install(void);
+
 bool tl_unity_start(const tl_unity_config *cfg)
 {
     U.cfg = *cfg;
@@ -118,6 +120,7 @@ bool tl_unity_start(const tl_unity_config *cfg)
     tl_jni_init();
     tl_hle_configure(cfg->package_name, cfg->apk_path, cfg->data_dir, cfg->width, cfg->height);
     tl_jni_hle_install();
+    kb_install();
 
     /* new UnityPlayer(activity): the Java side's own constructor calls loadNative(dir),
      * which is System.load(dir + "/libmain.so") followed by NativeLoader.load(dir). */
@@ -174,6 +177,8 @@ static void call_native(const char *name, const char *sig, uintptr_t a, uintptr_
 }
 #define NATIVE_VOID(name, sig, a, b) call_native(name, sig, (uintptr_t)(a), (uintptr_t)(b))
 
+static void kb_drain(void);
+
 static void *unity_main(void *arg)
 {
     (void)arg;
@@ -206,6 +211,7 @@ static void *unity_main(void *arg)
             continue;
         }
         if (was_paused) { NATIVE_VOID("nativeResume", "()V", 0, 0); NATIVE_VOID("nativeFocusChanged", "(Z)V", 1, 0); was_paused = false; tl_log_line("unity: resumed"); }
+        kb_drain();
         struct timespec t0, t1;
         clock_gettime(CLOCK_MONOTONIC, &t0);
         uint8_t keep = ((uint8_t (*)(void *, void *))render)(tl_jni_env(), U.player);
@@ -318,6 +324,117 @@ void tl_unity_touch(int phase, int id, float x, float y)
     fn(tl_jni_env(), U.player, ev, 0);
     if (tl_jni_pending()) tl_jni_clear();
     tl_jni_unref(ev);
+}
+
+/* ------------------------------------------------------------ soft keyboard */
+
+/*
+ * TouchScreenKeyboard. A tapped text field has the engine call UnityPlayer.showSoftInput(text, type, autocorrection, multiline,
+ * secure, alert, placeholder[, character limit[, hide the input field[, ...]]]) -- the arguments grew with Unity's versions -- and
+ * on Android a dialog with an edit box comes up. The dialog reports back on the engine's own thread: the text as it changes
+ * (nativeSetInputString), then Done (nativeSoftInputClosed) or Back (nativeSoftInputCanceled, then closed), with
+ * nativeSetKeyboardIsVisible around it. Here the app's keyboard is the dialog: it is told what to show, and its text comes back
+ * through a queue UnityMain empties before each frame.
+ */
+enum { KJ_TEXT, KJ_DONE, KJ_CANCEL, KJ_VISIBLE };
+typedef struct kjob { int kind; char *text; bool flag; struct kjob *next; } kjob;
+static struct {
+    pthread_mutex_t mu;
+    kjob *head, *tail;
+    tl_unity_keyboard_fn hook;
+    int limit;
+    bool shown;
+} KB = { .mu = PTHREAD_MUTEX_INITIALIZER };
+
+void tl_unity_set_keyboard_handler(tl_unity_keyboard_fn fn) { KB.hook = fn; }
+
+static void kb_queue(int kind, const char *text, bool flag)
+{
+    kjob *j = calloc(1, sizeof(*j));
+    if (!j) return;
+    j->kind = kind; j->text = text ? strdup(text) : NULL; j->flag = flag;
+    pthread_mutex_lock(&KB.mu);
+    if (KB.tail) KB.tail->next = j; else KB.head = j;
+    KB.tail = j;
+    pthread_mutex_unlock(&KB.mu);
+}
+
+/* On UnityMain, before a frame: what the keyboard did since the last one, in order. */
+static void kb_drain(void)
+{
+    pthread_mutex_lock(&KB.mu);
+    kjob *j = KB.head;
+    KB.head = KB.tail = NULL;
+    pthread_mutex_unlock(&KB.mu);
+    while (j) {
+        kjob *next = j->next;
+        switch (j->kind) {
+        case KJ_TEXT: NATIVE_VOID("nativeSetInputString", "(Ljava/lang/String;)V", tl_jni_new_string(j->text ? j->text : ""), 0); break;
+        case KJ_DONE: NATIVE_VOID("nativeSoftInputClosed", "()V", 0, 0); break;
+        case KJ_CANCEL: NATIVE_VOID("nativeSoftInputCanceled", "()V", 0, 0); NATIVE_VOID("nativeSoftInputClosed", "()V", 0, 0); break;
+        case KJ_VISIBLE: NATIVE_VOID("nativeSetKeyboardIsVisible", "(Z)V", j->flag, 0); break;
+        }
+        if (tl_jni_pending()) tl_jni_clear();
+        free(j->text);
+        free(j);
+        j = next;
+    }
+}
+
+void tl_unity_keyboard_text(const char *utf8) { kb_queue(KJ_TEXT, utf8 ? utf8 : "", false); }
+void tl_unity_keyboard_done(bool cancelled)
+{
+    KB.shown = false;
+    kb_queue(cancelled ? KJ_CANCEL : KJ_DONE, NULL, false);
+    kb_queue(KJ_VISIBLE, NULL, false);
+}
+
+static void kb_show(tl_jcall *c, int nargs)
+{
+    const char *text = tl_jni_string(c->args[0].l), *placeholder = nargs > 6 ? tl_jni_string(c->args[6].l) : NULL;
+    int type = c->args[1].i, limit = nargs > 7 ? c->args[7].i : 0;
+    bool multiline = c->args[3].z, secure = c->args[4].z;
+    KB.limit = limit > 0 ? limit : 0;
+    KB.shown = true;
+    tl_log_line("unity: the game asked for the keyboard (type %d%s%s, limit %d)", type, multiline ? ", multi-line" : "",
+                secure ? ", secure" : "", KB.limit);
+    kb_queue(KJ_VISIBLE, NULL, true);
+    if (KB.hook) KB.hook(1, text ? text : "", placeholder ? placeholder : "", type, KB.limit, (secure ? 1 : 0) | (multiline ? 2 : 0));
+    else tl_log_line("unity: no keyboard to show");
+}
+static void kb_show7(tl_jcall *c) { kb_show(c, 7); }
+static void kb_show8(tl_jcall *c) { kb_show(c, 8); }
+static void kb_show9(tl_jcall *c) { kb_show(c, 9); }
+static void kb_show10(tl_jcall *c) { kb_show(c, 10); }
+static void kb_hide(tl_jcall *c)
+{
+    (void)c;
+    if (!KB.shown) return;                       /* Unity hides a keyboard that was never shown as it starts */
+    KB.shown = false;
+    kb_queue(KJ_VISIBLE, NULL, false);
+    if (KB.hook) KB.hook(2, NULL, NULL, 0, 0, 0);
+}
+static void kb_set_text(tl_jcall *c) { const char *t = tl_jni_string(c->args[0].l); if (KB.hook) KB.hook(3, t ? t : "", NULL, 0, KB.limit, 0); }
+static void kb_set_limit(tl_jcall *c) { KB.limit = c->args[0].i > 0 ? c->args[0].i : 0; if (KB.hook) KB.hook(4, NULL, NULL, 0, KB.limit, 0); }
+static void kb_noop(tl_jcall *c) { (void)c; }
+
+static void kb_install(void)
+{
+    #define UP "com/unity3d/player/UnityPlayer"
+    static const tl_jhle hle[] = {
+        { UP, "showSoftInput", "(Ljava/lang/String;IZZZZLjava/lang/String;)V", kb_show7 },
+        { UP, "showSoftInput", "(Ljava/lang/String;IZZZZLjava/lang/String;I)V", kb_show8 },
+        { UP, "showSoftInput", "(Ljava/lang/String;IZZZZLjava/lang/String;IZ)V", kb_show9 },        /* 2020 */
+        { UP, "showSoftInput", "(Ljava/lang/String;IZZZZLjava/lang/String;IZZ)V", kb_show10 },
+        { UP, "hideSoftInput", "()V", kb_hide },
+        { UP, "setSoftInputStr", "(Ljava/lang/String;)V", kb_set_text },
+        { UP, "setCharacterLimit", "(I)V", kb_set_limit },
+        { UP, "setHideInputField", "(Z)V", kb_noop },
+        { UP, "setSelection", "(II)V", kb_noop },
+        { NULL, NULL, NULL, NULL }
+    };
+    #undef UP
+    tl_jni_register_hle(hle);
 }
 
 /* ------------------------------------------------------------ controller */
