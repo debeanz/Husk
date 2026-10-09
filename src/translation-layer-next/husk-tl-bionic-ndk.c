@@ -699,12 +699,144 @@ static int b_ASensor_getType(void *s) { (void)s; return 0; }
 static float b_ASensor_getResolution(void *s) { (void)s; return 0.f; }
 static int b_ASensor_getMinDelay(void *s) { (void)s; return 0; }
 
-/* ------------------------------------------------------------ media (none) */
+/* ------------------------------------------------------------ media: a video that is already over */
 
+/*
+ * Husk decodes no video. A game that plays one through the NDK's media API -- Unity's VideoPlayer, for an intro or a cutscene --
+ * was refused outright, and a game that waits for its intro to finish waited on a black screen forever (Dave the Diver). Now it
+ * is given what a finished video looks like: an extractor with one video track that has no samples, and a decoder that answers
+ * with the end of the stream. The video "plays" and ends at once, and the game goes on as it does when a video finishes.
+ */
+#define MEDIA_OK 0
 #define MEDIA_ERR (-10000)
-static void *b_media_null(void) { tl_note_once("libmediandk: media decoding is not provided (returning NULL)"); return NULL; }
-static int b_media_err(void) { return MEDIA_ERR; }
-static int b_media_zero(void) { return 0; }
+#define MEDIA_TRY_AGAIN (-1)            /* AMEDIACODEC_INFO_TRY_AGAIN_LATER */
+#define MEDIA_FLAG_EOS 4u               /* AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM */
+
+/* AMediaFormat: a few keys and their values. */
+enum { MF_INT32 = 1, MF_INT64, MF_FLOAT, MF_STRING };
+typedef struct { char key[40]; int kind; int64_t i; float f; char s[96]; } mf_entry;
+typedef struct { uint32_t magic; int n; mf_entry e[32]; } mformat;
+#define MF_MAGIC 0x464d4448u
+
+static mformat *mf_new(void) { mformat *f = calloc(1, sizeof(*f)); if (f) f->magic = MF_MAGIC; return f; }
+static mf_entry *mf_find(mformat *f, const char *key, int make)
+{
+    if (!f || f->magic != MF_MAGIC || !key) return NULL;
+    for (int i = 0; i < f->n; i++) if (!strcmp(f->e[i].key, key)) return &f->e[i];
+    if (!make || f->n >= 32) return NULL;
+    mf_entry *e = &f->e[f->n++];
+    memset(e, 0, sizeof(*e));
+    snprintf(e->key, sizeof(e->key), "%s", key);
+    return e;
+}
+static void mf_set_i(mformat *f, const char *k, int kind, int64_t v) { mf_entry *e = mf_find(f, k, 1); if (e) { e->kind = kind; e->i = v; } }
+static void mf_set_s(mformat *f, const char *k, const char *v) { mf_entry *e = mf_find(f, k, 1); if (e) { e->kind = MF_STRING; snprintf(e->s, sizeof(e->s), "%s", v ? v : ""); } }
+
+/* What a finished video's track says: tiny, empty, over. */
+static mformat *mf_video(void)
+{
+    mformat *f = mf_new();
+    mf_set_s(f, "mime", "video/avc");
+    mf_set_i(f, "width", MF_INT32, 16); mf_set_i(f, "height", MF_INT32, 16);
+    mf_set_i(f, "stride", MF_INT32, 16); mf_set_i(f, "slice-height", MF_INT32, 16);
+    mf_set_i(f, "color-format", MF_INT32, 21);                /* COLOR_FormatYUV420SemiPlanar */
+    mf_set_i(f, "durationUs", MF_INT64, 0);
+    mf_set_i(f, "frame-rate", MF_INT32, 30);
+    mf_set_i(f, "max-input-size", MF_INT32, 4096);
+    return f;
+}
+
+static void *b_AMediaFormat_new(void) { return mf_new(); }
+static int b_AMediaFormat_delete(mformat *f) { if (f && f->magic == MF_MAGIC) { f->magic = 0; free(f); } return MEDIA_OK; }
+static bool b_AMediaFormat_getInt32(mformat *f, const char *k, int32_t *out)
+{ mf_entry *e = mf_find(f, k, 0); if (!e || (e->kind != MF_INT32 && e->kind != MF_INT64)) return false; if (out) *out = (int32_t)e->i; return true; }
+static bool b_AMediaFormat_getInt64(mformat *f, const char *k, int64_t *out)
+{ mf_entry *e = mf_find(f, k, 0); if (!e || (e->kind != MF_INT32 && e->kind != MF_INT64)) return false; if (out) *out = e->i; return true; }
+static bool b_AMediaFormat_getFloat(mformat *f, const char *k, float *out)
+{ mf_entry *e = mf_find(f, k, 0); if (!e) return false; if (out) *out = e->kind == MF_FLOAT ? e->f : (float)e->i; return e->kind != MF_STRING; }
+static bool b_AMediaFormat_getString(mformat *f, const char *k, const char **out)
+{ mf_entry *e = mf_find(f, k, 0); if (!e || e->kind != MF_STRING) return false; if (out) *out = e->s; return true; }
+static void b_AMediaFormat_setInt32(mformat *f, const char *k, int32_t v) { mf_set_i(f, k, MF_INT32, v); }
+static void b_AMediaFormat_setInt64(mformat *f, const char *k, int64_t v) { mf_set_i(f, k, MF_INT64, v); }
+static void b_AMediaFormat_setFloat(mformat *f, const char *k, float v) { mf_entry *e = mf_find(f, k, 1); if (e) { e->kind = MF_FLOAT; e->f = v; } }
+static void b_AMediaFormat_setString(mformat *f, const char *k, const char *v) { mf_set_s(f, k, v); }
+static const char *b_AMediaFormat_toString(mformat *f) { (void)f; return "{mime=video/avc, durationUs=0}"; }
+
+/* AMediaExtractor: one video track, no samples. */
+typedef struct { uint32_t magic; } mextractor;
+#define MX_MAGIC 0x584d4448u
+static void *b_AMediaExtractor_new(void) { mextractor *x = calloc(1, sizeof(*x)); if (x) x->magic = MX_MAGIC; return x; }
+static int b_AMediaExtractor_delete(mextractor *x) { if (x && x->magic == MX_MAGIC) { x->magic = 0; free(x); } return MEDIA_OK; }
+static void media_note(const char *what)
+{
+    static int said;
+    if (said++ < 8) tl_log_line("media: the game opened a video (%s); Husk plays no video, so it is told the video is already over", what);
+}
+static int b_AMediaExtractor_setDataSourceFd(mextractor *x, int fd, int64_t off, int64_t len)
+{
+    (void)x; (void)fd;
+    char what[80]; snprintf(what, sizeof(what), "%lld bytes at %lld in a file", (long long)len, (long long)off);
+    media_note(what);
+    return MEDIA_OK;
+}
+static int b_AMediaExtractor_setDataSource(mextractor *x, const char *where) { (void)x; media_note(where ? where : "a location"); return MEDIA_OK; }
+static size_t b_AMediaExtractor_getTrackCount(mextractor *x) { (void)x; return 1; }
+static void *b_AMediaExtractor_getTrackFormat(mextractor *x, size_t i) { (void)x; (void)i; return mf_video(); }
+static void *b_AMediaExtractor_getFileFormat(mextractor *x) { (void)x; return mf_video(); }
+static int b_AMediaExtractor_selectTrack(mextractor *x, size_t i) { (void)x; (void)i; return MEDIA_OK; }
+static ssize_t b_AMediaExtractor_readSampleData(mextractor *x, uint8_t *buf, size_t cap) { (void)x; (void)buf; (void)cap; return -1; }
+static int64_t b_AMediaExtractor_getSampleTime(mextractor *x) { (void)x; return -1; }
+static int b_AMediaExtractor_getSampleTrackIndex(mextractor *x) { (void)x; return -1; }
+static uint32_t b_AMediaExtractor_getSampleFlags(mextractor *x) { (void)x; return 0; }
+static int64_t b_AMediaExtractor_getSampleSize(mextractor *x) { (void)x; return -1; }
+static bool b_AMediaExtractor_advance(mextractor *x) { (void)x; return false; }
+static int b_AMediaExtractor_seekTo(mextractor *x, int64_t t, int mode) { (void)x; (void)t; (void)mode; return MEDIA_OK; }
+
+/* AMediaCodec: takes what it is given, and answers with the end of the stream. */
+typedef struct { int32_t offset, size; int64_t presentationTimeUs; uint32_t flags; } mbufinfo;
+typedef struct { uint32_t magic; bool eos_in, eos_out; int waits; uint8_t buf[4096]; } mcodec;
+#define MC_MAGIC 0x434d4448u
+static void *b_AMediaCodec_create(const char *what)
+{
+    static int said;
+    if (said++ < 4) tl_log_line("media: a %s decoder was asked for; it will report the end of the stream", what ? what : "video");
+    mcodec *c = calloc(1, sizeof(*c));
+    if (c) c->magic = MC_MAGIC;
+    return c;
+}
+static int b_AMediaCodec_delete(mcodec *c) { if (c && c->magic == MC_MAGIC) { c->magic = 0; free(c); } return MEDIA_OK; }
+static int b_AMediaCodec_ok(void) { return MEDIA_OK; }
+static int b_AMediaCodec_flush(mcodec *c) { if (c && c->magic == MC_MAGIC) { c->eos_in = c->eos_out = false; c->waits = 0; } return MEDIA_OK; }
+static ssize_t b_AMediaCodec_dequeueInputBuffer(mcodec *c, int64_t timeout) { (void)c; (void)timeout; return 0; }
+static uint8_t *b_AMediaCodec_getBuffer(mcodec *c, size_t i, size_t *size)
+{
+    (void)i;
+    if (!c || c->magic != MC_MAGIC) { if (size) *size = 0; return NULL; }
+    if (size) *size = sizeof(c->buf);
+    return c->buf;
+}
+static int b_AMediaCodec_queueInputBuffer(mcodec *c, size_t i, int64_t off, size_t size, uint64_t t, uint32_t flags)
+{
+    (void)i; (void)off; (void)size; (void)t;
+    if (c && c->magic == MC_MAGIC && (flags & MEDIA_FLAG_EOS)) c->eos_in = true;
+    return MEDIA_OK;
+}
+static ssize_t b_AMediaCodec_dequeueOutputBuffer(mcodec *c, mbufinfo *info, int64_t timeout)
+{
+    if (!c || c->magic != MC_MAGIC) return MEDIA_TRY_AGAIN;
+    /* The end, once: as soon as the end of the input has come, or after a few waits if the game never sends it. */
+    if (!c->eos_out && (c->eos_in || ++c->waits > 3)) {
+        c->eos_out = true;
+        if (info) { info->offset = 0; info->size = 0; info->presentationTimeUs = 0; info->flags = MEDIA_FLAG_EOS; }
+        return 0;
+    }
+    if (timeout > 0) usleep((useconds_t)(timeout < 10000 ? timeout : 10000));
+    return MEDIA_TRY_AGAIN;
+}
+static int b_AMediaCodec_releaseOutputBuffer(mcodec *c, size_t i, bool render) { (void)c; (void)i; (void)render; return MEDIA_OK; }
+static int b_AMediaCodec_releaseOutputBufferAtTime(mcodec *c, size_t i, int64_t t) { (void)c; (void)i; (void)t; return MEDIA_OK; }
+static void *b_AMediaCodec_getOutputFormat(mcodec *c) { (void)c; return mf_video(); }
+static int b_AMediaCodec_getName(mcodec *c, char **out) { (void)c; if (out) *out = strdup("c2.husk.none"); return MEDIA_OK; }
 
 #define KEY(sym, text) static const char *g_##sym = text;
 KEY(AMEDIAFORMAT_KEY_CHANNEL_COUNT, "channel-count") KEY(AMEDIAFORMAT_KEY_COLOR_FORMAT, "color-format")
@@ -716,8 +848,6 @@ KEY(AMEDIAFORMAT_KEY_ROTATION, "rotation-degrees") KEY(AMEDIAFORMAT_KEY_SAMPLE_R
 KEY(AMEDIAFORMAT_KEY_SLICE_HEIGHT, "slice-height") KEY(AMEDIAFORMAT_KEY_STRIDE, "stride")
 KEY(AMEDIAFORMAT_KEY_WIDTH, "width")
 
-#define MEDIA_NULL(n)  TL_WRAP(n, b_media_null)
-#define MEDIA_ERRF(n)  TL_WRAP(n, b_media_err)
 #define MEDIA_DATA(n)  TL_DATA(#n, &g_##n)
 
 const tl_bionic_entry tl_tab_ndk[] = {
@@ -811,17 +941,29 @@ const tl_bionic_entry tl_tab_ndk[] = {
     TL_WRAP("ASensor_getName", b_ASensor_getName), TL_WRAP("ASensor_getVendor", b_ASensor_getVendor), TL_WRAP("ASensor_getType", b_ASensor_getType),
     TL_WRAP("ASensor_getResolution", b_ASensor_getResolution), TL_WRAP("ASensor_getMinDelay", b_ASensor_getMinDelay),
     /* media */
-    MEDIA_NULL("AMediaCodec_createDecoderByType"), MEDIA_NULL("AMediaExtractor_new"), MEDIA_NULL("AMediaCodec_getOutputFormat"),
-    MEDIA_NULL("AMediaExtractor_getTrackFormat"), MEDIA_NULL("AMediaCodec_getInputBuffer"), MEDIA_NULL("AMediaCodec_getOutputBuffer"),
-    MEDIA_ERRF("AMediaCodec_configure"), MEDIA_ERRF("AMediaCodec_start"), MEDIA_ERRF("AMediaCodec_stop"), MEDIA_ERRF("AMediaCodec_flush"),
-    MEDIA_ERRF("AMediaCodec_delete"), MEDIA_ERRF("AMediaCodec_dequeueInputBuffer"), MEDIA_ERRF("AMediaCodec_dequeueOutputBuffer"),
-    MEDIA_ERRF("AMediaCodec_queueInputBuffer"), MEDIA_ERRF("AMediaCodec_releaseOutputBuffer"),
-    MEDIA_ERRF("AMediaExtractor_setDataSource"), MEDIA_ERRF("AMediaExtractor_setDataSourceFd"), MEDIA_ERRF("AMediaExtractor_selectTrack"),
-    MEDIA_ERRF("AMediaExtractor_seekTo"), MEDIA_ERRF("AMediaExtractor_delete"), MEDIA_ERRF("AMediaExtractor_advance"),
-    MEDIA_ERRF("AMediaExtractor_readSampleData"), MEDIA_ERRF("AMediaExtractor_getSampleTime"), MEDIA_ERRF("AMediaExtractor_getSampleTrackIndex"),
-    TL_WRAP("AMediaExtractor_getTrackCount", b_media_zero), MEDIA_ERRF("AMediaFormat_delete"), MEDIA_ERRF("AMediaFormat_getFloat"),
-    MEDIA_ERRF("AMediaFormat_getInt32"), MEDIA_ERRF("AMediaFormat_getInt64"), MEDIA_ERRF("AMediaFormat_getString"),
-    MEDIA_ERRF("AMediaFormat_setInt32"),
+    TL_WRAP("AMediaCodec_createDecoderByType", b_AMediaCodec_create), TL_WRAP("AMediaCodec_createCodecByName", b_AMediaCodec_create),
+    TL_WRAP("AMediaCodec_configure", b_AMediaCodec_ok), TL_WRAP("AMediaCodec_start", b_AMediaCodec_ok), TL_WRAP("AMediaCodec_stop", b_AMediaCodec_ok),
+    TL_WRAP("AMediaCodec_flush", b_AMediaCodec_flush), TL_WRAP("AMediaCodec_delete", b_AMediaCodec_delete),
+    TL_WRAP("AMediaCodec_dequeueInputBuffer", b_AMediaCodec_dequeueInputBuffer), TL_WRAP("AMediaCodec_getInputBuffer", b_AMediaCodec_getBuffer),
+    TL_WRAP("AMediaCodec_queueInputBuffer", b_AMediaCodec_queueInputBuffer), TL_WRAP("AMediaCodec_dequeueOutputBuffer", b_AMediaCodec_dequeueOutputBuffer),
+    TL_WRAP("AMediaCodec_getOutputBuffer", b_AMediaCodec_getBuffer), TL_WRAP("AMediaCodec_releaseOutputBuffer", b_AMediaCodec_releaseOutputBuffer),
+    TL_WRAP("AMediaCodec_releaseOutputBufferAtTime", b_AMediaCodec_releaseOutputBufferAtTime), TL_WRAP("AMediaCodec_getOutputFormat", b_AMediaCodec_getOutputFormat),
+    TL_WRAP("AMediaCodec_setOutputSurface", b_AMediaCodec_ok), TL_WRAP("AMediaCodec_getName", b_AMediaCodec_getName),
+    TL_WRAP("AMediaCodec_releaseName", b_AMediaCodec_ok),
+    TL_WRAP("AMediaExtractor_new", b_AMediaExtractor_new), TL_WRAP("AMediaExtractor_delete", b_AMediaExtractor_delete),
+    TL_WRAP("AMediaExtractor_setDataSource", b_AMediaExtractor_setDataSource), TL_WRAP("AMediaExtractor_setDataSourceFd", b_AMediaExtractor_setDataSourceFd),
+    TL_WRAP("AMediaExtractor_getTrackCount", b_AMediaExtractor_getTrackCount), TL_WRAP("AMediaExtractor_getTrackFormat", b_AMediaExtractor_getTrackFormat),
+    TL_WRAP("AMediaExtractor_getFileFormat", b_AMediaExtractor_getFileFormat), TL_WRAP("AMediaExtractor_selectTrack", b_AMediaExtractor_selectTrack),
+    TL_WRAP("AMediaExtractor_unselectTrack", b_AMediaExtractor_selectTrack), TL_WRAP("AMediaExtractor_readSampleData", b_AMediaExtractor_readSampleData),
+    TL_WRAP("AMediaExtractor_getSampleTime", b_AMediaExtractor_getSampleTime), TL_WRAP("AMediaExtractor_getSampleTrackIndex", b_AMediaExtractor_getSampleTrackIndex),
+    TL_WRAP("AMediaExtractor_getSampleFlags", b_AMediaExtractor_getSampleFlags), TL_WRAP("AMediaExtractor_getSampleSize", b_AMediaExtractor_getSampleSize),
+    TL_WRAP("AMediaExtractor_advance", b_AMediaExtractor_advance), TL_WRAP("AMediaExtractor_seekTo", b_AMediaExtractor_seekTo),
+    TL_WRAP("AMediaFormat_new", b_AMediaFormat_new), TL_WRAP("AMediaFormat_delete", b_AMediaFormat_delete),
+    TL_WRAP("AMediaFormat_getInt32", b_AMediaFormat_getInt32), TL_WRAP("AMediaFormat_getInt64", b_AMediaFormat_getInt64),
+    TL_WRAP("AMediaFormat_getFloat", b_AMediaFormat_getFloat), TL_WRAP("AMediaFormat_getString", b_AMediaFormat_getString),
+    TL_WRAP("AMediaFormat_setInt32", b_AMediaFormat_setInt32), TL_WRAP("AMediaFormat_setInt64", b_AMediaFormat_setInt64),
+    TL_WRAP("AMediaFormat_setFloat", b_AMediaFormat_setFloat), TL_WRAP("AMediaFormat_setString", b_AMediaFormat_setString),
+    TL_WRAP("AMediaFormat_toString", b_AMediaFormat_toString),
     MEDIA_DATA(AMEDIAFORMAT_KEY_CHANNEL_COUNT), MEDIA_DATA(AMEDIAFORMAT_KEY_COLOR_FORMAT), MEDIA_DATA(AMEDIAFORMAT_KEY_COLOR_RANGE),
     MEDIA_DATA(AMEDIAFORMAT_KEY_COLOR_STANDARD), MEDIA_DATA(AMEDIAFORMAT_KEY_DURATION), MEDIA_DATA(AMEDIAFORMAT_KEY_ENCODER_DELAY),
     MEDIA_DATA(AMEDIAFORMAT_KEY_FRAME_RATE), MEDIA_DATA(AMEDIAFORMAT_KEY_HEIGHT), MEDIA_DATA(AMEDIAFORMAT_KEY_LANGUAGE),
