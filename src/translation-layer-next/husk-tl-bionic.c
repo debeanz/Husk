@@ -547,6 +547,25 @@ static void *bionic_dlopen(const char *path, int flags)
     return L;
 }
 
+/* Something a game asks Android for that Husk does not provide: always worth a line, once. Engines that load a system library
+ * with dlopen (FMOD and libaaudio.so) give up on the whole library when one function is missing, and ones that look a function up
+ * and call it unchecked (Unity 6's video, through RTLD_DEFAULT) jump to address 0. */
+static void note_unprovided(const char *name, const char *how)
+{
+    static char said[96][64]; static int nsaid; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&mu);
+    bool seen = false;
+    for (int i = 0; i < nsaid && !seen; i++) seen = !strcmp(said[i], name);
+    if (!seen) {
+        if (nsaid < 96) snprintf(said[nsaid++], sizeof(said[0]), "%s", name);
+        tl_log_line("dl: %s is not provided by Husk's Android%s", name, how);
+    }
+    pthread_mutex_unlock(&mu);
+}
+
+/* Android's NDK names its C functions AMedia..., ANativeWindow..., AImage...: a capital A and another capital. */
+static bool ndk_name(const char *n) { return n[0] == 'A' && n[1] >= 'A' && n[1] <= 'Z' && n[2] >= 'a' && n[2] <= 'z'; }
+
 static void *bionic_dlsym(void *handle, const char *name)
 {
     if (!name) return NULL;
@@ -554,19 +573,10 @@ static void *bionic_dlsym(void *handle, const char *name)
     if (handle == NULL || handle == (void *)-1L) {
         r = tl_ld_sym(NULL, name);
         if (!r) r = tl_bionic_find(name);
+        if (!r && ndk_name(name)) note_unprovided(name, " (looked up everywhere)");
     } else if ((sysh *)handle >= g_sys_handle && (sysh *)handle < g_sys_handle + 16) {
         r = tl_bionic_find(name);
-        /* Something a game asks Android for that Husk does not provide: always worth a line, once. Engines that load a
-         * system library with dlopen (FMOD and libaaudio.so) give up on the whole library when one function is missing. */
-        if (!r) {
-            static char said[64][64]; static int nsaid;
-            bool seen = false;
-            for (int i = 0; i < nsaid && !seen; i++) seen = !strcmp(said[i], name);
-            if (!seen) {
-                if (nsaid < 64) snprintf(said[nsaid++], sizeof(said[0]), "%s", name);
-                tl_log_line("dl: %s is not provided by Husk's Android", name);
-            }
-        }
+        if (!r) note_unprovided(name, "");
     } else {
         r = tl_ld_sym((tl_lib *)handle, name);
     }

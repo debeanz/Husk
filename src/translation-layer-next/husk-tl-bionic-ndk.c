@@ -804,7 +804,8 @@ static void *b_AMediaCodec_create(const char *what)
     if (c) c->magic = MC_MAGIC;
     return c;
 }
-static int b_AMediaCodec_delete(mcodec *c) { if (c && c->magic == MC_MAGIC) { c->magic = 0; free(c); } return MEDIA_OK; }
+/* Marked dead and kept: a decoder's own thread (asynchronous mode) may still look at it after the game has deleted it. */
+static int b_AMediaCodec_delete(mcodec *c) { if (c && c->magic == MC_MAGIC) c->magic = 0; return MEDIA_OK; }
 static int b_AMediaCodec_ok(void) { return MEDIA_OK; }
 static int b_AMediaCodec_flush(mcodec *c) { if (c && c->magic == MC_MAGIC) { c->eos_in = c->eos_out = false; c->waits = 0; } return MEDIA_OK; }
 static ssize_t b_AMediaCodec_dequeueInputBuffer(mcodec *c, int64_t timeout) { (void)c; (void)timeout; return 0; }
@@ -837,6 +838,116 @@ static int b_AMediaCodec_releaseOutputBuffer(mcodec *c, size_t i, bool render) {
 static int b_AMediaCodec_releaseOutputBufferAtTime(mcodec *c, size_t i, int64_t t) { (void)c; (void)i; (void)t; return MEDIA_OK; }
 static void *b_AMediaCodec_getOutputFormat(mcodec *c) { (void)c; return mf_video(); }
 static int b_AMediaCodec_getName(mcodec *c, char **out) { (void)c; if (out) *out = strdup("c2.husk.none"); return MEDIA_OK; }
+static void *b_AMediaCodec_getInputFormat(mcodec *c) { (void)c; return mf_video(); }
+static int b_AMediaCodec_err(void) { return MEDIA_ERR; }
+static void *b_media_none(void) { return NULL; }
+static bool b_media_false(void) { return false; }
+
+/*
+ * A decoder in asynchronous mode (setAsyncNotifyCallback, Android 9): it tells the game when an input buffer is free and when
+ * output is ready, from a thread of its own. This one offers one input buffer as it starts and then, as soon as the end of the
+ * input comes (or after a moment if it never does), the end of the stream.
+ */
+typedef struct {
+    void (*input)(void *codec, void *user, int32_t index);
+    void (*output)(void *codec, void *user, int32_t index, mbufinfo *info);
+    void (*format)(void *codec, void *user, void *format);
+    void (*error)(void *codec, void *user, int err, int32_t action, const char *detail);
+} mcallbacks;
+typedef struct { mcodec *c; mcallbacks cb; void *user; } masync;
+static struct { mcodec *c; mcallbacks cb; void *user; } g_async[8];
+static pthread_mutex_t g_async_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static int b_AMediaCodec_setAsyncNotifyCallback(mcodec *c, mcallbacks cb, void *user)
+{
+    pthread_mutex_lock(&g_async_mu);
+    int slot = -1;
+    for (int i = 0; i < 8 && slot < 0; i++) if (g_async[i].c == c || !g_async[i].c) slot = i;
+    if (slot >= 0) { g_async[slot].c = c; g_async[slot].cb = cb; g_async[slot].user = user; }
+    pthread_mutex_unlock(&g_async_mu);
+    return slot >= 0 ? MEDIA_OK : MEDIA_ERR;
+}
+static void *async_run(void *arg)
+{
+    masync a = *(masync *)arg;
+    free(arg);
+    pthread_setname_np("husk-media");
+    usleep(5000);
+    if (a.cb.input) a.cb.input(a.c, a.user, 0);
+    for (int i = 0; i < 20 && a.c->magic == MC_MAGIC && !a.c->eos_in; i++) usleep(5000);
+    if (a.c->magic == MC_MAGIC && !a.c->eos_out && a.cb.output) {
+        a.c->eos_out = true;
+        mbufinfo info = { 0, 0, 0, MEDIA_FLAG_EOS };
+        a.cb.output(a.c, a.user, 0, &info);
+    }
+    return NULL;
+}
+static int b_AMediaCodec_start(mcodec *c)
+{
+    masync *a = NULL;
+    pthread_mutex_lock(&g_async_mu);
+    for (int i = 0; i < 8; i++) if (g_async[i].c == c && c) {
+        a = malloc(sizeof(*a));
+        if (a) { a->c = c; a->cb = g_async[i].cb; a->user = g_async[i].user; }
+        break;
+    }
+    pthread_mutex_unlock(&g_async_mu);
+    if (a) {
+        pthread_t t;
+        if (pthread_create(&t, NULL, async_run, a) == 0) pthread_detach(t); else free(a);
+    }
+    return MEDIA_OK;
+}
+
+/* AMediaDataSource (Android 9): a game that reads the video itself, out of its own packages. */
+typedef struct {
+    uint32_t magic; void *user;
+    ssize_t (*read_at)(void *user, int64_t off, void *buf, size_t size);
+    ssize_t (*get_size)(void *user);
+    void (*close)(void *user);
+} msource;
+#define MS_MAGIC 0x534d4448u
+static void *b_AMediaDataSource_new(void) { msource *d = calloc(1, sizeof(*d)); if (d) d->magic = MS_MAGIC; return d; }
+static void b_AMediaDataSource_delete(msource *d) { if (d && d->magic == MS_MAGIC) { d->magic = 0; free(d); } }
+static void b_AMediaDataSource_setUserdata(msource *d, void *u) { if (d && d->magic == MS_MAGIC) d->user = u; }
+static void b_AMediaDataSource_setReadAt(msource *d, void *f) { if (d && d->magic == MS_MAGIC) d->read_at = (ssize_t (*)(void *, int64_t, void *, size_t))f; }
+static void b_AMediaDataSource_setGetSize(msource *d, void *f) { if (d && d->magic == MS_MAGIC) d->get_size = (ssize_t (*)(void *))f; }
+static void b_AMediaDataSource_setClose(msource *d, void *f) { if (d && d->magic == MS_MAGIC) d->close = (void (*)(void *))f; }
+static void b_AMediaDataSource_ignore(void) { }
+static int b_AMediaExtractor_setDataSourceCustom(mextractor *x, msource *d)
+{
+    (void)x;
+    char what[80];
+    long long size = d && d->magic == MS_MAGIC && d->get_size ? (long long)d->get_size(d->user) : -1;
+    snprintf(what, sizeof(what), "%lld bytes, read through the game's own reader", size);
+    media_note(what);
+    return MEDIA_OK;
+}
+
+/* The rest of AMediaFormat: doubles, sizes, rectangles and buffers are kept as numbers or not at all. */
+static bool b_AMediaFormat_getDouble(mformat *f, const char *k, double *out)
+{ mf_entry *e = mf_find(f, k, 0); if (!e || e->kind == MF_STRING) return false; if (out) *out = e->kind == MF_FLOAT ? e->f : (double)e->i; return true; }
+static bool b_AMediaFormat_getSize(mformat *f, const char *k, size_t *out)
+{ mf_entry *e = mf_find(f, k, 0); if (!e || (e->kind != MF_INT32 && e->kind != MF_INT64)) return false; if (out) *out = (size_t)e->i; return true; }
+static void b_AMediaFormat_setDouble(mformat *f, const char *k, double v) { mf_entry *e = mf_find(f, k, 1); if (e) { e->kind = MF_FLOAT; e->f = (float)v; } }
+static void b_AMediaFormat_setSize(mformat *f, const char *k, size_t v) { mf_set_i(f, k, MF_INT64, (int64_t)v); }
+static bool b_AMediaFormat_getRect(mformat *f, const char *k, int32_t *l, int32_t *t, int32_t *r, int32_t *b)
+{
+    (void)k;
+    if (!f || f->magic != MF_MAGIC) return false;
+    if (l) *l = 0; if (t) *t = 0; if (r) *r = 15; if (b) *b = 15;
+    return true;
+}
+static void b_AMediaFormat_ignore(void) { }
+static void b_AMediaFormat_clear(mformat *f) { if (f && f->magic == MF_MAGIC) f->n = 0; }
+static int b_AMediaFormat_copy(mformat *to, mformat *from)
+{
+    if (!to || !from || to->magic != MF_MAGIC || from->magic != MF_MAGIC) return MEDIA_ERR;
+    *to = *from;
+    return MEDIA_OK;
+}
+static int b_AMediaExtractor_getSampleFormat(mextractor *x, mformat *f) { (void)x; (void)f; return MEDIA_ERR; }
+static int64_t b_AMediaExtractor_getCachedDuration(mextractor *x) { (void)x; return -1; }
 
 #define KEY(sym, text) static const char *g_##sym = text;
 KEY(AMEDIAFORMAT_KEY_CHANNEL_COUNT, "channel-count") KEY(AMEDIAFORMAT_KEY_COLOR_FORMAT, "color-format")
@@ -942,8 +1053,29 @@ const tl_bionic_entry tl_tab_ndk[] = {
     TL_WRAP("ASensor_getResolution", b_ASensor_getResolution), TL_WRAP("ASensor_getMinDelay", b_ASensor_getMinDelay),
     /* media */
     TL_WRAP("AMediaCodec_createDecoderByType", b_AMediaCodec_create), TL_WRAP("AMediaCodec_createCodecByName", b_AMediaCodec_create),
-    TL_WRAP("AMediaCodec_configure", b_AMediaCodec_ok), TL_WRAP("AMediaCodec_start", b_AMediaCodec_ok), TL_WRAP("AMediaCodec_stop", b_AMediaCodec_ok),
+    TL_WRAP("AMediaCodec_configure", b_AMediaCodec_ok), TL_WRAP("AMediaCodec_start", b_AMediaCodec_start), TL_WRAP("AMediaCodec_stop", b_AMediaCodec_ok),
     TL_WRAP("AMediaCodec_flush", b_AMediaCodec_flush), TL_WRAP("AMediaCodec_delete", b_AMediaCodec_delete),
+    TL_WRAP("AMediaCodec_createEncoderByType", b_media_none), TL_WRAP("AMediaCodec_getInputFormat", b_AMediaCodec_getInputFormat),
+    TL_WRAP("AMediaCodec_getBufferFormat", b_AMediaCodec_getInputFormat), TL_WRAP("AMediaCodec_setParameters", b_AMediaCodec_ok),
+    TL_WRAP("AMediaCodec_signalEndOfInputStream", b_AMediaCodec_ok), TL_WRAP("AMediaCodec_setAsyncNotifyCallback", b_AMediaCodec_setAsyncNotifyCallback),
+    TL_WRAP("AMediaCodec_releaseCrypto", b_AMediaCodec_ok), TL_WRAP("AMediaCodec_queueSecureInputBuffer", b_AMediaCodec_err),
+    TL_WRAP("AMediaCodec_createInputSurface", b_AMediaCodec_err), TL_WRAP("AMediaCodec_createPersistentInputSurface", b_AMediaCodec_err),
+    TL_WRAP("AMediaCodec_setInputSurface", b_AMediaCodec_err), TL_WRAP("AMediaCodec_onAsyncNotifyCallback", b_AMediaCodec_ok),
+    TL_WRAP("AMediaCrypto_isCryptoSchemeSupported", b_media_false), TL_WRAP("AMediaCrypto_requiresSecureDecoderComponent", b_media_false),
+    TL_WRAP("AMediaCrypto_new", b_media_none), TL_WRAP("AMediaCrypto_delete", b_AMediaCodec_ok),
+    TL_WRAP("AMediaDataSource_new", b_AMediaDataSource_new), TL_WRAP("AMediaDataSource_delete", b_AMediaDataSource_delete),
+    TL_WRAP("AMediaDataSource_setUserdata", b_AMediaDataSource_setUserdata), TL_WRAP("AMediaDataSource_setReadAt", b_AMediaDataSource_setReadAt),
+    TL_WRAP("AMediaDataSource_setGetSize", b_AMediaDataSource_setGetSize), TL_WRAP("AMediaDataSource_setClose", b_AMediaDataSource_setClose),
+    TL_WRAP("AMediaDataSource_setGetAvailableSize", b_AMediaDataSource_ignore), TL_WRAP("AMediaDataSource_close", b_AMediaDataSource_ignore),
+    TL_WRAP("AMediaDataSource_newUri", b_media_none),
+    TL_WRAP("AMediaExtractor_setDataSourceCustom", b_AMediaExtractor_setDataSourceCustom),
+    TL_WRAP("AMediaExtractor_getSampleFormat", b_AMediaExtractor_getSampleFormat), TL_WRAP("AMediaExtractor_getCachedDuration", b_AMediaExtractor_getCachedDuration),
+    TL_WRAP("AMediaExtractor_getPsshInfo", b_media_none), TL_WRAP("AMediaExtractor_getSampleCryptoInfo", b_media_none),
+    TL_WRAP("AMediaFormat_getDouble", b_AMediaFormat_getDouble), TL_WRAP("AMediaFormat_getSize", b_AMediaFormat_getSize),
+    TL_WRAP("AMediaFormat_getRect", b_AMediaFormat_getRect), TL_WRAP("AMediaFormat_getBuffer", b_media_false),
+    TL_WRAP("AMediaFormat_setDouble", b_AMediaFormat_setDouble), TL_WRAP("AMediaFormat_setSize", b_AMediaFormat_setSize),
+    TL_WRAP("AMediaFormat_setRect", b_AMediaFormat_ignore), TL_WRAP("AMediaFormat_setBuffer", b_AMediaFormat_ignore),
+    TL_WRAP("AMediaFormat_clear", b_AMediaFormat_clear), TL_WRAP("AMediaFormat_copy", b_AMediaFormat_copy),
     TL_WRAP("AMediaCodec_dequeueInputBuffer", b_AMediaCodec_dequeueInputBuffer), TL_WRAP("AMediaCodec_getInputBuffer", b_AMediaCodec_getBuffer),
     TL_WRAP("AMediaCodec_queueInputBuffer", b_AMediaCodec_queueInputBuffer), TL_WRAP("AMediaCodec_dequeueOutputBuffer", b_AMediaCodec_dequeueOutputBuffer),
     TL_WRAP("AMediaCodec_getOutputBuffer", b_AMediaCodec_getBuffer), TL_WRAP("AMediaCodec_releaseOutputBuffer", b_AMediaCodec_releaseOutputBuffer),
