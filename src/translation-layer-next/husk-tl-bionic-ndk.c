@@ -728,6 +728,12 @@ static int b_ASensor_getMinDelay(void *s) { (void)s; return 0; }
  * is its last must last one frame -- a duration of 0 fails that check, and Unity drops the video without a word. So the track
  * lasts one frame at 30 frames a second. On OpenGL ES the frame goes to a SurfaceTexture, and Unity waits until it hears the
  * frame arrived (onFrameAvailable) before it takes the next step; releasing a frame to the screen announces it.
+ *
+ * A video that ends the moment it starts is one no real device plays, and a game can count on its video lasting longer than a
+ * frame: Dave the Diver starts its intro with one "video ended" handler and swaps in another on the next frame, and only the
+ * second lets its loading screen finish -- with the first, the loading bar stopped near its end forever. So the decoder that
+ * draws to the screen holds its frame back for a moment (MEDIA_SHOWN_NS) after it is set up. The decoder Unity checks the video
+ * with hands its frame back at once, since that check is made before the video plays.
  */
 #define MEDIA_OK 0
 #define MEDIA_ERR (-10000)
@@ -818,8 +824,10 @@ static int b_AMediaExtractor_seekTo(mextractor *x, int64_t t, int mode) { (void)
 
 /* AMediaCodec: takes what it is given, and answers with the end of the stream. */
 typedef struct { int32_t offset, size; int64_t presentationTimeUs; uint32_t flags; } mbufinfo;
-typedef struct { uint32_t magic; bool eos_in, eos_out; atomic_bool configured; int waits; int64_t out_pts; tl_nwindow *window; uint8_t buf[4096]; } mcodec;
+typedef struct { uint32_t magic; bool eos_in, eos_out; atomic_bool configured; int waits; int64_t out_pts, shown_at; tl_nwindow *window; uint8_t buf[4096]; } mcodec;
 #define MC_MAGIC 0x434d4448u
+#define MEDIA_SHOWN_NS 1000000000ll     /* how long a video drawn to the screen lasts: a second */
+static int64_t media_now(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (int64_t)ts.tv_sec * 1000000000ll + ts.tv_nsec; }
 
 /* A decoder the game made and never set up is one whose game is stuck before playing: say so, once, a few seconds on. */
 static void *codec_watch(void *arg)
@@ -851,6 +859,7 @@ static int b_AMediaCodec_configure(mcodec *c, mformat *f, tl_nwindow *w, void *c
     if (!c || c->magic != MC_MAGIC) return MEDIA_ERR;
     if (w) atomic_fetch_add(&w->refs, 1);               /* kept for as long as the decoder: windows here are never freed */
     c->window = w && w->texture ? w : NULL;
+    c->shown_at = c->window ? media_now() + MEDIA_SHOWN_NS : 0;
     atomic_store(&c->configured, true);
     static int said;
     if (said++ < 6) tl_log_line("media: the decoder was set up %s", c->window ? "to draw into the video's SurfaceTexture" : w ? "to draw into a window" : "to hand frames back in memory");
@@ -874,8 +883,9 @@ static int b_AMediaCodec_queueInputBuffer(mcodec *c, size_t i, int64_t off, size
 static ssize_t b_AMediaCodec_dequeueOutputBuffer(mcodec *c, mbufinfo *info, int64_t timeout)
 {
     if (!c || c->magic != MC_MAGIC) return MEDIA_TRY_AGAIN;
-    /* The end, once: as soon as the end of the input has come, or after a few waits if the game never sends it. */
-    if (!c->eos_out && (c->eos_in || ++c->waits > 3)) {
+    /* The end, once: as soon as the end of the input has come, or after a few waits if the game never sends it -- and for a
+     * video on the screen, not before it has been on the screen for a moment. */
+    if (!c->eos_out && (c->eos_in || ++c->waits > 3) && (!c->shown_at || media_now() >= c->shown_at)) {
         c->eos_out = true;
         c->out_pts = 0;
         if (info) { info->offset = 0; info->size = 0; info->presentationTimeUs = c->out_pts; info->flags = MEDIA_FLAG_EOS; }
@@ -935,6 +945,7 @@ static void *async_run(void *arg)
     usleep(5000);
     if (a.cb.input) a.cb.input(a.c, a.user, 0);
     for (int i = 0; i < 20 && a.c->magic == MC_MAGIC && !a.c->eos_in; i++) usleep(5000);
+    while (a.c->magic == MC_MAGIC && a.c->shown_at && media_now() < a.c->shown_at) usleep(10000);
     if (a.c->magic == MC_MAGIC && !a.c->eos_out && a.cb.output) {
         a.c->eos_out = true;
         mbufinfo info = { 0, 0, 0, MEDIA_FLAG_EOS };
