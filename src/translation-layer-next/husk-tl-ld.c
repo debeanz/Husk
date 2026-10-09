@@ -644,11 +644,21 @@ __attribute__((naked, used)) void tl_probe_common(void)
 bool tl_ld_probe(tl_lib *L, uint64_t vaddr, void (*cb)(uint64_t *regs))
 {
     uint64_t off = vaddr - L->base_vaddr;
-    if (off + 4 > L->npages * PAGE || L->stub_used + 64 > L->stub_cap) return false;
+    if (off + 4 > L->npages * PAGE) return false;
     uint32_t *site_rw = (uint32_t *)(L->rw + off);
     const uint8_t *site_rx = L->rx + off;
-    uint8_t *rx = L->stub_rx + L->stub_used, *rw = L->stub_rw + L->stub_used;
-    L->stub_used += 64;
+    /* A stub within a branch's reach of the site: from the stub pages after the image, or for a site far from them in a
+     * very large image, from the pool in its dead relocation table. */
+    uint8_t *rx, *rw;
+    int64_t reach = (int64_t)128 << 20;
+    int64_t to_stub = (int64_t)(L->stub_rx + L->stub_used) - (int64_t)site_rx, to_isl = (int64_t)(L->isl_rx + L->isl_used) - (int64_t)site_rx;
+    if (L->stub_used + 64 <= L->stub_cap && to_stub > -reach && to_stub < reach) {
+        rx = L->stub_rx + L->stub_used; rw = L->stub_rw + L->stub_used; L->stub_used += 64;
+    } else if (L->isl_rx && L->isl_used + 64 <= L->isl_cap && to_isl > -reach && to_isl < reach) {
+        rx = L->isl_rx + L->isl_used; rw = L->isl_rw + L->isl_used; L->isl_used += 64;
+    } else {
+        return false;
+    }
     uint64_t common = (uint64_t)(uintptr_t)tl_probe_common, cbv = (uint64_t)(uintptr_t)cb;
     memcpy(rw + 40, &cbv, 8);
     memcpy(rw + 48, &common, 8);

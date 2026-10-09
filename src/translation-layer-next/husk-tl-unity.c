@@ -307,6 +307,133 @@ static void watch_nullable_throws(void)
 }
 
 /*
+ * A game that stops without an error -- a loading screen that never ends -- is waiting on something, and its log does not
+ * say what. So a few C# methods are watched (found through IL2CPP's API: a game without them is not touched) and their calls
+ * logged: for a coroutine's step (MoveNext) the step it is about to take, so the last step logged is where the game waits.
+ * For any game, the scenes it loads; the rest is Dave the Diver's way from its intro to its title screen.
+ */
+enum { TR_CALLS, TR_STEPS, TR_SCENE, TR_TWO_INTS };
+typedef struct { const char *assembly, *cls, *method; int argc, kind; } traced;
+static const traced k_traced[] = {
+    { "UnityEngine.CoreModule", "UnityEngine.SceneManagement.SceneManagerAPIInternal", "LoadSceneAsyncNameIndexInternal", 4, TR_SCENE },
+    { "Assembly-CSharp", "LogoManager", "EndReached", 1, TR_CALLS },
+    { "Assembly-CSharp", "LogoManager", "<Start>b__12_0", 1, TR_CALLS },
+    { "Assembly-CSharp", "LogoManager", "OnLoadingStepUpdate", 2, TR_TWO_INTS },
+    { "Assembly-CSharp", "LogoManager/<Start>d__12", "MoveNext", 0, TR_STEPS },
+    { "Assembly-CSharp", "LogoManager/<Enumerator>d__13", "MoveNext", 0, TR_STEPS },
+    { "Assembly-CSharp", "LogoManager/<AgeGradeEvent>d__14", "MoveNext", 0, TR_STEPS },
+    { "Assembly-CSharp", "LogoManager/<>c", "<AgeGradeEvent>b__14_0", 0, TR_CALLS },
+    { "Assembly-CSharp", "GameBase/<StartGame>d__31", "MoveNext", 0, TR_STEPS },
+    { "Assembly-CSharp", "GameBase/<InitAfterSaveSystem>d__45", "MoveNext", 0, TR_STEPS },
+    { "Assembly-CSharp", "SceneLoaderManagedBehaviour/<Start>d__18", "MoveNext", 0, TR_STEPS },
+    { "Assembly-CSharp", "SceneLoaderManagedBehaviour/<>c", "<Start>b__18_0", 0, TR_CALLS },
+    { "Assembly-CSharp", "DR.Save.MakeEndingBackupSave/<MakeFromSavedData>d__3", "MoveNext", 0, TR_STEPS },
+    { "Assembly-CSharp", "EntrySceneDispatcher", "Enter", 0, TR_CALLS },
+    { "Assembly-CSharp", "EntrySceneDispatcher", "TryPrewarmJungleScene", 0, TR_CALLS },
+    { "Assembly-CSharp", "SceneLoader", "GoToTitle", 1, TR_CALLS },
+    { "Assembly-CSharp", "SceneLoader/<CoChangeSceneAsync>d__116", "MoveNext", 0, TR_STEPS },
+    { "Assembly-CSharp", "SceneLoader/<CoLoadSceneAsync>d__113", "MoveNext", 0, TR_STEPS },
+};
+#define TRACED (sizeof(k_traced) / sizeof(k_traced[0]))
+static struct { atomic_uint calls, lines; const void *obj[4]; int step[4]; } g_tr[TRACED];
+
+static void trace_string(uint64_t v, char *out, size_t n)
+{
+    /* An Il2CppString: its class and monitor, a 32-bit length, then UTF-16. Shown as ASCII. */
+    if (!v || (v & 7)) { snprintf(out, n, "null"); return; }
+    int32_t len = *(const int32_t *)(uintptr_t)(v + 16);
+    const uint16_t *s = (const uint16_t *)(uintptr_t)(v + 20);
+    size_t k = 0;
+    for (int32_t i = 0; i < len && k + 1 < n; i++) out[k++] = s[i] < 0x80 ? (char)s[i] : '?';
+    out[k] = 0;
+}
+static void trace_hit(unsigned i, uint64_t *regs)
+{
+    const traced *t = &k_traced[i];
+    unsigned call = atomic_fetch_add(&g_tr[i].calls, 1) + 1;
+    if (atomic_load(&g_tr[i].lines) >= 40) return;
+    char what[160] = "";
+    if (t->kind == TR_STEPS) {
+        /* A coroutine's state is its object's first field, after the 16-byte object header. Logged when it changes. */
+        const void *obj = (const void *)(uintptr_t)regs[0];
+        int step = obj ? *(const int32_t *)((const uint8_t *)obj + 16) : -99;
+        int slot = -1;
+        for (int k = 0; k < 4 && slot < 0; k++) if (g_tr[i].obj[k] == obj) slot = k;
+        if (slot >= 0 && g_tr[i].step[slot] == step) return;
+        if (slot < 0) { slot = (int)(call % 4); g_tr[i].obj[slot] = obj; }
+        g_tr[i].step[slot] = step;
+        snprintf(what, sizeof(what), " at step %d (%p)", step, obj);
+    } else if (t->kind == TR_SCENE) {
+        char name[120]; trace_string(regs[0], name, sizeof(name));
+        snprintf(what, sizeof(what), " \"%s\" (build index %d)", name, (int)regs[1]);
+    } else if (t->kind == TR_TWO_INTS) {
+        snprintf(what, sizeof(what), " (%d, %d)", (int)regs[1], (int)regs[2]);
+    } else if (!(call <= 3 || call == 10 || call == 100 || call == 1000 || call == 10000 || call == 100000)) {
+        return;
+    }
+    atomic_fetch_add(&g_tr[i].lines, 1);
+    tl_log_line("il2cpp: %s.%s%s, call %u", t->cls, t->method, what, call);
+}
+#define TRACE_CB(i) static void trace_cb##i(uint64_t *regs) { trace_hit(i, regs); }
+TRACE_CB(0) TRACE_CB(1) TRACE_CB(2) TRACE_CB(3) TRACE_CB(4) TRACE_CB(5) TRACE_CB(6) TRACE_CB(7) TRACE_CB(8) TRACE_CB(9)
+TRACE_CB(10) TRACE_CB(11) TRACE_CB(12) TRACE_CB(13) TRACE_CB(14) TRACE_CB(15) TRACE_CB(16) TRACE_CB(17) TRACE_CB(18) TRACE_CB(19)
+static void (*const k_trace_cb[])(uint64_t *) = {
+    trace_cb0, trace_cb1, trace_cb2, trace_cb3, trace_cb4, trace_cb5, trace_cb6, trace_cb7, trace_cb8, trace_cb9,
+    trace_cb10, trace_cb11, trace_cb12, trace_cb13, trace_cb14, trace_cb15, trace_cb16, trace_cb17, trace_cb18, trace_cb19,
+};
+_Static_assert(TRACED <= sizeof(k_trace_cb) / sizeof(k_trace_cb[0]), "a callback for each watched method");
+
+/* "Namespace.Outer/Nested": the class, through its nesting. */
+static void *trace_class(void *image, const char *path)
+{
+    void *(*class_from_name)(void *, const char *, const char *) = (void *(*)(void *, const char *, const char *))tl_ld_sym(NULL, "il2cpp_class_from_name");
+    void *(*nested)(void *, void **) = (void *(*)(void *, void **))tl_ld_sym(NULL, "il2cpp_class_get_nested_types");
+    const char *(*class_name)(void *) = (const char *(*)(void *))tl_ld_sym(NULL, "il2cpp_class_get_name");
+    if (!image || !class_from_name || !nested || !class_name) return NULL;
+    char outer[160];
+    const char *slash = strchr(path, '/');
+    snprintf(outer, sizeof(outer), "%.*s", (int)(slash ? (size_t)(slash - path) : strlen(path)), path);
+    char *dot = strrchr(outer, '.');
+    void *k;
+    if (dot) { *dot = 0; k = class_from_name(image, outer, dot + 1); }
+    else k = class_from_name(image, "", outer);
+    while (k && slash) {
+        const char *name = slash + 1;
+        slash = strchr(name, '/');
+        size_t len = slash ? (size_t)(slash - name) : strlen(name);
+        void *iter = NULL, *n, *found = NULL;
+        while (!found && (n = nested(k, &iter)))
+            if (strlen(class_name(n)) == len && !strncmp(class_name(n), name, len)) found = n;
+        k = found;
+    }
+    return k;
+}
+static void watch_game_steps(void)
+{
+    void *(*domain_get)(void) = (void *(*)(void))tl_ld_sym(NULL, "il2cpp_domain_get");
+    void *(*assembly_open)(void *, const char *) = (void *(*)(void *, const char *))tl_ld_sym(NULL, "il2cpp_domain_assembly_open");
+    void *(*get_image)(void *) = (void *(*)(void *))tl_ld_sym(NULL, "il2cpp_assembly_get_image");
+    void *(*method_from_name)(void *, const char *, int) = (void *(*)(void *, const char *, int))tl_ld_sym(NULL, "il2cpp_class_get_method_from_name");
+    if (!domain_get || !assembly_open || !get_image || !method_from_name) return;
+    tl_ld_iterate(il2cpp_code_cb, NULL);
+    int watched = 0, missing = 0;
+    for (unsigned i = 0; i < TRACED; i++) {
+        void *assembly = assembly_open(domain_get(), k_traced[i].assembly);
+        void *klass = assembly ? trace_class(get_image(assembly), k_traced[i].cls) : NULL;
+        void *method = klass ? method_from_name(klass, k_traced[i].method, k_traced[i].argc) : NULL;
+        const uint8_t *fn = method ? *(const uint8_t *const *)method : NULL;
+        if (!fn) { missing++; continue; }
+        tl_lib *lib = tl_ld_lib_of(fn);
+        if (!lib || pc_relative(*(const uint32_t *)fn) || !tl_ld_probe(lib, (uint64_t)(fn - (const uint8_t *)tl_ld_lib_base(lib)), k_trace_cb[i])) {
+            tl_log_line("il2cpp: cannot watch %s.%s", k_traced[i].cls, k_traced[i].method);
+            continue;
+        }
+        watched++;
+    }
+    if (watched) tl_log_line("il2cpp: watching %d of the game's methods to show where it waits (%d are not in this game)", watched, missing);
+}
+
+/*
  * A shipped game usually tells Unity to log a C# exception without its stack, so the log says what went wrong but not where
  * ("InvalidOperationException: Nullable object must have a value." and nothing else). Asking for the script part of the stack
  * -- what Application.SetStackTraceLogType does -- for errors and exceptions puts the methods it went through back into the log.
@@ -321,6 +448,7 @@ static void want_script_stacks(void)
     static bool by_table;
     if (!by_table && !tries) {
         watch_nullable_throws();
+        watch_game_steps();
         by_table = stacks_by_table();
         if (by_table) { tl_log_line("unity: C# exceptions will be logged with the methods they went through"); return; }
     }
