@@ -4,8 +4,9 @@
  *
  * ANGLE over Metal stops at OpenGL ES 3.0, and Minecraft's Android materials hold only "#version 310 es" shaders, chosen by
  * reporting 3.1. For a game that asks for it (tl_egl_es31_shim) the driver is described as 3.1 and each such shader is written
- * down to 300 es: the version line changes, and `layout(binding = N)` -- which 3.0 does not have -- is dropped and applied after
- * the link as glUniform1i / glUniformBlockBinding. What 3.1 really adds (compute, images, buffers) is not there.
+ * down to 300 es: the version line changes, `layout(binding = N)` -- which 3.0 does not have -- is dropped and applied after
+ * the link as glUniform1i / glUniformBlockBinding, and a varying's `layout(location = N)` becomes a name both stages share
+ * (es31_varying). What 3.1 really adds (compute, images, buffers) is not there.
  */
 static bool g_es31_shim;
 void tl_egl_es31_shim(bool on) { g_es31_shim = on; }
@@ -32,13 +33,46 @@ static const char *es31_fix(const char *s, bool glsl)
 
 static bool es31_ident(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
 
+/* Whether `word` stands on its own in `s` (so "in" is not found in "inout" or "int"). */
+static bool es31_has_word(const char *s, const char *word)
+{
+    size_t wl = strlen(word);
+    for (const char *p = strstr(s, word); p; p = strstr(p + 1, word))
+        if ((p == s || !es31_ident(p[-1])) && !es31_ident(p[wl])) return true;
+    return false;
+}
+
+/*
+ * A varying -- a vertex shader's output, a fragment shader's input -- with `layout(location = N)`. 3.1 matches the two stages' varyings
+ * by location, so their names may differ (Unreal's do: out_TEXCOORD0 and in_TEXCOORD0); 3.0 has no location on them and matches by
+ * name. So the declaration loses its layout and takes a name made of its location, the same in both stages, and a #define after it
+ * turns the shader's own name into that one. Writes it at out + *o and says so; a declaration it cannot read is left alone.
+ */
+static bool es31_varying(char *out, size_t *o, const char *decl, size_t dl, const char *q)
+{
+    const char *eq = strchr(q, '=');
+    int loc = eq ? atoi(eq + 1) : -1;
+    if (loc < 0 || strchr(q, ',')) return false;           /* location and nothing else */
+    size_t e = dl;
+    while (e && (decl[e - 1] == ' ' || decl[e - 1] == '\n' || decl[e - 1] == '\t' || decl[e - 1] == '\r')) e--;
+    size_t arr = e;                                         /* an array's [N] stays after the new name */
+    while (e && decl[e - 1] == ']') { while (e && decl[e - 1] != '[') e--; if (e) e--; }
+    while (e && (decl[e - 1] == ' ' || decl[e - 1] == '\t')) e--;
+    size_t st = e; while (st && es31_ident(decl[st - 1])) st--;
+    if (e <= st || e - st > 120) return false;
+    char name[128]; memcpy(name, decl + st, e - st); name[e - st] = 0;
+    *o += (size_t)sprintf(out + *o, "%.*shusk_v%d%.*s;\n#define %s husk_v%d\n", (int)st, decl, loc, (int)(arr - e), decl + e, name, loc);
+    return true;
+}
+
 /* The 300 es text of a 310 es shader (malloc'd), with the bindings it dropped in rec[0..*nrec). Anything else is returned as it came. */
 static char *es31_downgrade(const char *src, size_t n, es31_bind *rec, int *nrec)
 {
-    char *out = malloc(n + 4096); size_t o = 0;
+    char *out = malloc(2 * n + 8192); size_t o = 0;
     *nrec = 0;
     const char *ver = strstr(src, "#version 310 es");
     if (!ver) { memcpy(out, src, n); out[n] = 0; return out; }
+    const bool vertex = strstr(src, "gl_Position") != NULL;     /* only a vertex shader writes it */
     for (size_t i = 0; i < n;) {
         if (src + i == ver) { memcpy(out + o, "#version 300 es", 15); o += 15; i += 15; continue; }
         if (i + 7 <= n && !strncmp(src + i, "layout(", 7) && (i == 0 || !es31_ident(src[i - 1]))) {
@@ -97,6 +131,10 @@ static char *es31_downgrade(const char *src, size_t n, es31_bind *rec, int *nrec
                 if (kl) { memcpy(out + o, "layout(", 7); o += 7; memcpy(out + o, keep, kl); o += kl; out[o++] = ')'; }
                 i = j; continue;
             }
+            /* layout(location) on a varying (a vertex shader's `out`, a fragment shader's `in`); a vertex input's and a fragment output's
+             * location is 3.0 too, and stays */
+            if (!b && strstr(q, "location") && d < n && src[d] == ';'
+                && es31_has_word(decl, vertex ? "out" : "in") && es31_varying(out, &o, decl, dl, q)) { i = d + 1; continue; }
             memcpy(out + o, src + i, j - i); o += j - i; i = j; continue;
         }
         out[o++] = src[i++];
