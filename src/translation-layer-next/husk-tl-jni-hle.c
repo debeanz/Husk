@@ -163,6 +163,7 @@ static void Context_getSystemService(tl_jcall *c)
         { "wifi", "android/net/wifi/WifiManager" }, { "media_router", "android/media/MediaRouter" },
         { "activity", "android/app/ActivityManager" }, { "layout_inflater", "android/view/LayoutInflater" },
         { "accessibility", "android/view/accessibility/AccessibilityManager" }, { "uimode", "android/app/UiModeManager" },
+        { "vibrator_manager", "android/os/VibratorManager" }, { "batterymanager", "android/os/BatteryManager" },
     };
     for (size_t i = 0; i < sizeof(svc) / sizeof(svc[0]); i++) {
         if (!strcmp(n, svc[i].name)) {
@@ -227,6 +228,62 @@ static void PM_getPackageInfo(tl_jcall *c)
     set_int(p, "versionCode", H.version_code ? H.version_code : 1);
     c->ret = vl(p);
 }
+static void PI_getLongVersionCode(tl_jcall *c)
+{
+    int code = tl_jni_get_field(c->self, "versionCode", "I").i;
+    c->ret.j = code ? code : (H.version_code ? H.version_code : 1);
+}
+/* Where the app came from: the Play Store, as for any copy a player bought. No installer at all is what a sideloaded copy looks like. */
+static void PM_getInstallerPackageName(tl_jcall *c) { c->ret = vl(STR("com.android.vending")); }
+static void PM_getInstallSourceInfo(tl_jcall *c) { c->ret = vl(make("android/content/pm/InstallSourceInfo")); }
+static void ISI_getPlayStore(tl_jcall *c) { c->ret = vl(STR("com.android.vending")); }
+
+/* A phone vibrates. Asked and told no, a game can take the phone for an emulator; the vibrations themselves are not played. */
+static void Vibrator_hasVibrator(tl_jcall *c) { c->ret = vz(1); }
+static void VibratorManager_getDefaultVibrator(tl_jcall *c) { c->ret = vl(make("android/os/Vibrator")); }
+static void VibrationEffect_make(tl_jcall *c) { c->ret = vl(make("android/os/VibrationEffect")); }
+
+/*
+ * The motion sensors an iPhone has, as SensorManager.getDefaultSensor describes them. A phone with no accelerometer is an emulator to
+ * some games. Listeners can be registered; their readings never come, as from a phone lying still.
+ */
+static const struct { int type; const char *name, *string_type; float range, resolution; } k_sensors[] = {
+    { 1, "Accelerometer", "android.sensor.accelerometer", 78.4532f, 0.0023956299f },
+    { 2, "Magnetometer", "android.sensor.magnetic_field", 4912.0f, 0.15f },
+    { 4, "Gyroscope", "android.sensor.gyroscope", 34.906586f, 0.0010652645f },
+    { 9, "Gravity", "android.sensor.gravity", 19.6133f, 0.0023956299f },
+    { 10, "Linear Acceleration", "android.sensor.linear_acceleration", 19.6133f, 0.0023956299f },
+    { 11, "Rotation Vector", "android.sensor.rotation_vector", 1.0f, 5.9604645e-8f },
+    { 15, "Game Rotation Vector", "android.sensor.game_rotation_vector", 1.0f, 5.9604645e-8f },
+};
+static void SM_getDefaultSensor(tl_jcall *c)
+{
+    static jobj *made[sizeof(k_sensors) / sizeof(k_sensors[0])];
+    for (size_t i = 0; i < sizeof(k_sensors) / sizeof(k_sensors[0]); i++) {
+        if (k_sensors[i].type != c->args[0].i) continue;
+        if (!made[i]) {
+            jobj *s = make("android/hardware/Sensor");
+            set_int(s, "mType", k_sensors[i].type);
+            set_str(s, "mName", k_sensors[i].name); set_str(s, "mStringType", k_sensors[i].string_type);
+            set_float(s, "mMaxRange", k_sensors[i].range); set_float(s, "mResolution", k_sensors[i].resolution);
+            made[i] = s;
+        }
+        c->ret = vl(made[i]);
+        return;
+    }
+    c->ret = vl(NULL);
+}
+static void Sensor_getType(tl_jcall *c) { c->ret = tl_jni_get_field(c->self, "mType", "I"); }
+static void Sensor_getName(tl_jcall *c) { c->ret = vl(STR(S(tl_jni_get_field(c->self, "mName", "Ljava/lang/String;").l))); }
+static void Sensor_getStringType(tl_jcall *c) { c->ret = vl(STR(S(tl_jni_get_field(c->self, "mStringType", "Ljava/lang/String;").l))); }
+static void Sensor_getVendor(tl_jcall *c) { c->ret = vl(STR("Apple")); }
+static void Sensor_getMaximumRange(tl_jcall *c) { c->ret = tl_jni_get_field(c->self, "mMaxRange", "F"); }
+static void Sensor_getResolution(tl_jcall *c) { c->ret = tl_jni_get_field(c->self, "mResolution", "F"); }
+static void Sensor_getPower(tl_jcall *c) { c->ret = vf(0.5f); }
+static void Sensor_getMinDelay(tl_jcall *c) { c->ret = vi(5000); }
+static void Sensor_getMaxDelay(tl_jcall *c) { c->ret = vi(200000); }
+static void Sensor_getVersion(tl_jcall *c) { c->ret = vi(1); }
+static void SM_registerListener(tl_jcall *c) { c->ret = vz(1); }
 
 /*
  * The app's own version, read from its manifest (Android binary XML): what PackageInfo reports, and what a game compares against the minimum its servers will
@@ -398,6 +455,24 @@ static void install_build(void)
     v.l = STR("input"); tl_jni_set_static("android/content/Context", "INPUT_SERVICE", "Ljava/lang/String;", v);
     v.l = STR("phone"); tl_jni_set_static("android/content/Context", "TELEPHONY_SERVICE", "Ljava/lang/String;", v);
     v.l = STR("clipboard"); tl_jni_set_static("android/content/Context", "CLIPBOARD_SERVICE", "Ljava/lang/String;", v);
+    /* The rest of the names a service is asked for by. Unset, they read as null, and the service asked for is "" (Dave the Diver). */
+    static const char *const k_services[][2] = {
+        { "ACTIVITY_SERVICE", "activity" }, { "UI_MODE_SERVICE", "uimode" }, { "WIFI_SERVICE", "wifi" },
+        { "LAYOUT_INFLATER_SERVICE", "layout_inflater" }, { "ACCESSIBILITY_SERVICE", "accessibility" },
+        { "MEDIA_ROUTER_SERVICE", "media_router" }, { "VIBRATOR_MANAGER_SERVICE", "vibrator_manager" },
+        { "BATTERY_SERVICE", "batterymanager" }, { "STORAGE_SERVICE", "storage" }, { "STORAGE_STATS_SERVICE", "storagestats" },
+        { "NOTIFICATION_SERVICE", "notification" }, { "ALARM_SERVICE", "alarm" }, { "KEYGUARD_SERVICE", "keyguard" },
+        { "CAMERA_SERVICE", "camera" }, { "USB_SERVICE", "usb" }, { "BLUETOOTH_SERVICE", "bluetooth" },
+        { "DOWNLOAD_SERVICE", "download" }, { "JOB_SCHEDULER_SERVICE", "jobscheduler" }, { "GAME_SERVICE", "game" },
+        { "ACCOUNT_SERVICE", "account" }, { "APP_OPS_SERVICE", "appops" }, { "USAGE_STATS_SERVICE", "usagestats" },
+        { "TELEPHONY_SUBSCRIPTION_SERVICE", "telephony_subscription_service" }, { "NSD_SERVICE", "servicediscovery" },
+        { "CAPTIONING_SERVICE", "captioning" }, { "DEVICE_POLICY_SERVICE", "device_policy" }, { "SEARCH_SERVICE", "search" },
+        { "HARDWARE_PROPERTIES_SERVICE", "hardware_properties" }, { "LOCALE_SERVICE", "locale" },
+    };
+    for (size_t i = 0; i < sizeof(k_services) / sizeof(k_services[0]); i++) {
+        v.l = STR(k_services[i][1]);
+        tl_jni_set_static("android/content/Context", k_services[i][0], "Ljava/lang/String;", v);
+    }
     /* The keys AudioManager.getProperty answers. Unity reads them from these fields rather than spelling them out; unset, they were null, the answers
      * were null, and Unity told FMOD the speakers run at 0 Hz in bursts of 0 frames -- which FMOD's OpenSL output will not start with (Hollow Knight:
      * "FMOD failed to initialize the output device"). */
@@ -960,6 +1035,9 @@ static const struct { const char *name, *super; } k_classes[] = {
     { "org/fmod/FMODAudioDevice", "java/lang/Object" }, { "android/app/AlertDialog$Builder", "java/lang/Object" }, { "android/app/Dialog", "java/lang/Object" }, { "android/app/AlertDialog", "android/app/Dialog" },
     { "android/content/SharedPreferences$Editor", "java/lang/Object" }, { "java/util/Iterator", "java/lang/Object" },
     { "android/graphics/SurfaceTexture", "java/lang/Object" }, { ST_IFACE, "java/lang/Object" },
+    { "android/hardware/SensorManager", "java/lang/Object" }, { "android/hardware/Sensor", "java/lang/Object" },
+    { "android/os/Vibrator", "java/lang/Object" }, { "android/os/VibratorManager", "java/lang/Object" }, { "android/os/VibrationEffect", "java/lang/Object" },
+    { "android/content/pm/InstallSourceInfo", "java/lang/Object" },
 };
 
 /*
@@ -1166,6 +1244,31 @@ static const tl_jhle k_hle[] = {
     M("android/graphics/SurfaceTexture", "attachToGLContext", "(I)V", Noop), M("android/graphics/SurfaceTexture", "detachFromGLContext", "()V", Noop),
     M("android/view/Surface", "<init>", "(Landroid/graphics/SurfaceTexture;)V", Surface_fromSurfaceTexture),
     M("android/view/Surface", "release", "()V", Noop),
+    M("android/content/pm/PackageInfo", "getLongVersionCode", "()J", PI_getLongVersionCode),
+    M("android/content/pm/PackageManager", "getInstallerPackageName", "(Ljava/lang/String;)Ljava/lang/String;", PM_getInstallerPackageName),
+    M("android/content/pm/PackageManager", "getInstallSourceInfo", "(Ljava/lang/String;)Landroid/content/pm/InstallSourceInfo;", PM_getInstallSourceInfo),
+    M("android/content/pm/InstallSourceInfo", "getInstallingPackageName", "()Ljava/lang/String;", ISI_getPlayStore),
+    M("android/content/pm/InstallSourceInfo", "getInitiatingPackageName", "()Ljava/lang/String;", ISI_getPlayStore),
+    M("android/content/pm/InstallSourceInfo", "getOriginatingPackageName", "()Ljava/lang/String;", ISI_getPlayStore),
+    M("android/os/Vibrator", "hasVibrator", "()Z", Vibrator_hasVibrator),
+    M("android/os/Vibrator", "vibrate", "(J)V", Noop), M("android/os/Vibrator", "vibrate", "([JI)V", Noop),
+    M("android/os/Vibrator", "vibrate", "(Landroid/os/VibrationEffect;)V", Noop), M("android/os/Vibrator", "cancel", "()V", Noop),
+    M("android/os/VibratorManager", "getDefaultVibrator", "()Landroid/os/Vibrator;", VibratorManager_getDefaultVibrator),
+    M("android/os/VibrationEffect", "createOneShot", "(JI)Landroid/os/VibrationEffect;", VibrationEffect_make),
+    M("android/os/VibrationEffect", "createWaveform", "([JI)Landroid/os/VibrationEffect;", VibrationEffect_make),
+    M("android/os/VibrationEffect", "createWaveform", "([J[II)Landroid/os/VibrationEffect;", VibrationEffect_make),
+    M("android/os/VibrationEffect", "createPredefined", "(I)Landroid/os/VibrationEffect;", VibrationEffect_make),
+    M("android/hardware/SensorManager", "getDefaultSensor", "(I)Landroid/hardware/Sensor;", SM_getDefaultSensor),
+    M("android/hardware/SensorManager", "registerListener", "(Landroid/hardware/SensorEventListener;Landroid/hardware/Sensor;I)Z", SM_registerListener),
+    M("android/hardware/SensorManager", "registerListener", "(Landroid/hardware/SensorEventListener;Landroid/hardware/Sensor;II)Z", SM_registerListener),
+    M("android/hardware/SensorManager", "registerListener", "(Landroid/hardware/SensorEventListener;Landroid/hardware/Sensor;ILandroid/os/Handler;)Z", SM_registerListener),
+    M("android/hardware/SensorManager", "unregisterListener", "(Landroid/hardware/SensorEventListener;)V", Noop),
+    M("android/hardware/SensorManager", "unregisterListener", "(Landroid/hardware/SensorEventListener;Landroid/hardware/Sensor;)V", Noop),
+    M("android/hardware/Sensor", "getType", "()I", Sensor_getType), M("android/hardware/Sensor", "getName", "()Ljava/lang/String;", Sensor_getName),
+    M("android/hardware/Sensor", "getStringType", "()Ljava/lang/String;", Sensor_getStringType), M("android/hardware/Sensor", "getVendor", "()Ljava/lang/String;", Sensor_getVendor),
+    M("android/hardware/Sensor", "getMaximumRange", "()F", Sensor_getMaximumRange), M("android/hardware/Sensor", "getResolution", "()F", Sensor_getResolution),
+    M("android/hardware/Sensor", "getPower", "()F", Sensor_getPower), M("android/hardware/Sensor", "getMinDelay", "()I", Sensor_getMinDelay),
+    M("android/hardware/Sensor", "getMaxDelay", "()I", Sensor_getMaxDelay), M("android/hardware/Sensor", "getVersion", "()I", Sensor_getVersion),
     { NULL, NULL, NULL, NULL }
 };
 

@@ -39,6 +39,9 @@ bool tl_dexidx_field_sig(const char *cls, const char *name, char *out, size_t n)
 bool tl_dexidx_method_named(const char *cls, const char *name);
 bool tl_dexidx_find_method_lenient(const char *cls, const char *name, const char *want, char *out, size_t n, bool *is_static);
 
+/* The methods `cls` declares, as "name(sig)R, name(sig)R, ..." (cut short to fit). Returns how many were written. */
+int tl_dexidx_methods(const char *cls, char *out, size_t n);
+
 #ifdef __cplusplus
 }
 #endif

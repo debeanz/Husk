@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "husk-tl-bionic.h"
 #include "husk-tl-dexindex.h"
@@ -404,6 +405,164 @@ static jobj *singleton_for(const tl_jmeth *m)
     return obj;
 }
 
+/*
+ * The last Java calls, on every thread. When a game logs an exception, the calls its thread made just before are usually what it
+ * tripped over -- a method that answered null or zero here -- so they are written out with it (tl_jni_recent_dump).
+ */
+#define RECENT 512
+typedef struct {
+    const tl_jmeth *m; uintptr_t thread; jvalue ret, arg0; const char *ret_cls; bool hle;
+    char tname[16], ret_text[40], arg_text[40];
+} recent_call;
+static recent_call g_recent[RECENT];
+static atomic_uint g_recent_at;
+static __thread char t_name[16];
+static __thread unsigned t_name_age;
+
+static void recent_note(const tl_jmeth *m, const jvalue *args, jvalue ret, bool hle)
+{
+    if ((t_name_age++ & 511) == 0) pthread_getname_np(pthread_self(), t_name, sizeof(t_name));        /* names come after a thread starts */
+    recent_call *r = &g_recent[atomic_fetch_add(&g_recent_at, 1) % RECENT];
+    r->m = m; r->thread = (uintptr_t)pthread_self(); r->ret = ret; r->hle = hle;
+    memcpy(r->tname, t_name, sizeof(r->tname));
+    r->arg0.j = m->nargs > 0 && args ? args[0].j : 0;
+    const jobj *ro = m->retk == 'L' ? ret.l : NULL;
+    const char *rs = ro ? tl_jni_string(ro) : NULL;
+    r->ret_cls = ro && ro->cls ? ro->cls->name : NULL;
+    snprintf(r->ret_text, sizeof(r->ret_text), "%s", rs ? rs : "");
+    const char *as = m->nargs > 0 && args && m->argk[0] == 'L' && args[0].l ? tl_jni_string(args[0].l) : NULL;
+    snprintf(r->arg_text, sizeof(r->arg_text), "%s", as ? as : "");
+}
+
+static void recent_line(const recent_call *r)
+{
+    const tl_jmeth *m = r->m;
+    char arg[60] = "", ret[80] = "";
+    if (r->arg_text[0]) snprintf(arg, sizeof(arg), " (\"%s\")", r->arg_text);
+    else if (m->nargs > 0 && (m->argk[0] == 'I' || m->argk[0] == 'J' || m->argk[0] == 'Z')) snprintf(arg, sizeof(arg), " (%lld)", m->argk[0] == 'I' ? (long long)r->arg0.i : m->argk[0] == 'Z' ? (long long)r->arg0.z : (long long)r->arg0.j);
+    switch (m->retk) {
+    case 'V': break;
+    case 'L': snprintf(ret, sizeof(ret), " -> %s%s%s", r->ret_text[0] ? "\"" : "", r->ret_text[0] ? r->ret_text : r->ret_cls ? r->ret_cls : "null", r->ret_text[0] ? "\"" : ""); break;
+    case 'Z': snprintf(ret, sizeof(ret), " -> %s", r->ret.z ? "true" : "false"); break;
+    case 'F': snprintf(ret, sizeof(ret), " -> %g", (double)r->ret.f); break;
+    case 'D': snprintf(ret, sizeof(ret), " -> %g", r->ret.d); break;
+    case 'J': snprintf(ret, sizeof(ret), " -> %lld", (long long)r->ret.j); break;
+    default:  snprintf(ret, sizeof(ret), " -> %d", r->ret.i); break;
+    }
+    tl_log_line("jni:   [%s] %s.%s%s%s%s%s", r->tname[0] ? r->tname : "?", m->cls->name, m->name, m->sig, arg, ret, r->hle ? "" : "   <- not implemented here");
+}
+
+/* Write out the last Java calls of the calling thread (or of every thread, if this one made few), oldest first. */
+void tl_jni_recent_dump(const char *why)
+{
+    enum { SHOW = 30 };
+    uintptr_t me = (uintptr_t)pthread_self();
+    unsigned end = atomic_load(&g_recent_at), n = end < RECENT ? end : RECENT;
+    unsigned pick[SHOW]; int k = 0;
+    for (unsigned i = 0; i < n && k < SHOW; i++) { unsigned at = (end - 1 - i) % RECENT; if (g_recent[at].m && g_recent[at].thread == me) pick[k++] = at; }
+    bool all = k < 5;
+    if (all) { k = 0; for (unsigned i = 0; i < n && k < SHOW; i++) { unsigned at = (end - 1 - i) % RECENT; if (g_recent[at].m) pick[k++] = at; } }
+    tl_log_line("jni: %s; the last %d Java calls %s made, oldest first:", why, k, all ? "the game" : "its thread");
+    for (int j = k - 1; j >= 0; j--) recent_line(&g_recent[pick[j]]);
+}
+
+/*
+ * A plugin's call that is not implemented here, handed a listener the game wrote in C# (an AndroidJavaProxy): the game waits for
+ * an answer that never comes. For Voxel Busters' Essential Kit (cloud saves, game services, app updates), whose services need
+ * Google's apps and an account, the answer is the one a phone without them gives: the listener's failure method, called a moment
+ * later with "not available". Any other plugin is left waiting, as before.
+ */
+jobj *tl_proxy_call(jobj *proxy, const char *iface, const char *name, const char *sig, jobj **args, int nargs);
+typedef struct { jobj *listener; char iface[200], name[80], sig[300]; } plugin_reply;
+static jobj *box_prim(const char *cls, const char *sig, jvalue v) { jobj *o = tl_jni_new_object(tl_jni_class(cls)); tl_jni_set_field(o, "value", sig, v); return o; }
+
+static void *plugin_reply_main(void *arg)
+{
+    plugin_reply *r = arg;
+    pthread_setname_np("husk-plugin-reply");
+    usleep(200000);
+    jobj *a[8] = { 0 }; int n = 0;
+    for (const char *p = r->sig + 1; *p && *p != ')' && n < 8; n++) {
+        const char *start = p;
+        while (*p == '[') p++;
+        jvalue zero; zero.j = 0;
+        if (*p == 'L') {
+            const char *e = strchr(p, ';');
+            if (!e) break;
+            if (start == p && !strncmp(p, "Ljava/lang/String;", 18)) a[n] = tl_jni_new_string("Not available on this device");
+            p = e + 1;
+        } else {
+            if (start == p && *p == 'Z') a[n] = box_prim("java/lang/Boolean", "Z", zero);
+            else if (start == p && *p == 'I') a[n] = box_prim("java/lang/Integer", "I", zero);
+            else if (start == p && *p == 'J') a[n] = box_prim("java/lang/Long", "J", zero);
+            p++;
+        }
+    }
+    jobj *res = tl_proxy_call(r->listener, r->iface, r->name, r->sig, a, n);
+    if (tl_jni_pending()) tl_jni_clear();
+    tl_jni_unref(res);
+    for (int i = 0; i < n; i++) tl_jni_unref(a[i]);
+    tl_jni_unref(r->listener);
+    free(r);
+    return NULL;
+}
+
+/* The listener's failure method, from the APK's own declaration of its interface: the first named like onFailure or onError. */
+static bool failure_method(const char *methods, char *name, size_t nn, char *sig, size_t sn)
+{
+    for (const char *p = methods; *p; ) {
+        const char *paren = strchr(p, '('), *end = strstr(p, ", ");
+        if (!paren) return false;
+        if (!end) end = p + strlen(p);
+        if (paren < end) {
+            snprintf(name, nn, "%.*s", (int)(paren - p), p);
+            if (strcasestr(name, "fail") || strcasestr(name, "error")) { snprintf(sig, sn, "%.*s", (int)(end - paren), paren); return true; }
+        }
+        p = *end ? end + 2 : end;
+    }
+    return false;
+}
+
+static void plugin_listeners(const tl_jmeth *m, const jvalue *args, bool first)
+{
+    if (!args) return;
+    bool essential_kit = !strncmp(m->cls->name, "com/voxelbusters/essentialkit/", 30);
+    if (!first && !essential_kit) return;
+    const char *p = m->sig + 1;
+    for (int i = 0; i < m->nargs && *p && *p != ')'; i++) {
+        const char *start = p;
+        while (*p == '[') p++;
+        char type[200] = "";
+        if (*p == 'L') {
+            const char *e = strchr(p, ';');
+            if (!e) return;
+            if (start == p) snprintf(type, sizeof(type), "%.*s", (int)(e - p - 1), p + 1);
+            p = e + 1;
+        } else if (*p) p++;
+        jobj *o = args[i].l;
+        if (!type[0] || m->argk[i] != 'L' || !o || strcmp(tl_jni_class_name(o), "java/lang/reflect/Proxy")) continue;
+        char methods[700], name[80], sig[300];
+        tl_dexidx_methods(type, methods, sizeof(methods));
+        bool reply = essential_kit && failure_method(methods, name, sizeof(name), sig, sizeof(sig));
+        if (first) {
+            if (reply) tl_log_line("jni:   it was handed a %s the game implements in C#; it is told %s(\"Not available on this device\")", type, name);
+            else tl_log_line("jni:   it was handed a %s the game implements in C#, which nothing here calls back (its methods: %s)", type, methods[0] ? methods : "not in the APK");
+        }
+        if (!reply) continue;
+        plugin_reply *r = calloc(1, sizeof(*r));
+        if (!r) continue;
+        r->listener = tl_jni_ref(o);
+        snprintf(r->iface, sizeof(r->iface), "%s", type); snprintf(r->name, sizeof(r->name), "%s", name); snprintf(r->sig, sizeof(r->sig), "%s", sig);
+        pthread_attr_t at;
+        pthread_attr_init(&at);
+        pthread_attr_setstacksize(&at, 4u << 20);
+        pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+        pthread_t t;
+        if (pthread_create(&t, &at, plugin_reply_main, r) != 0) { tl_jni_unref(r->listener); free(r); }
+        pthread_attr_destroy(&at);
+    }
+}
+
 static jvalue invoke(jobj *self, tl_jmeth *m, bool nonvirtual, const jvalue *args)
 {
     tl_jcall c = { .self = self, .cls = m->cls, .args = args };
@@ -419,6 +578,7 @@ static jvalue invoke(jobj *self, tl_jmeth *m, bool nonvirtual, const jvalue *arg
     if (fn) {
         if (g_trace >= 2) tl_log_line("jni: call %s.%s%s", m->cls->name, m->name, m->sig);
         fn(&c);
+        recent_note(m, args, c.ret, true);
         /* A watched thread: the call and what it was answered. */
         if (g_trace < 2 && tl_watch_line()) {
             const jobj *o = m->retk == 'L' ? c.ret.l : NULL;
@@ -441,13 +601,17 @@ static jvalue invoke(jobj *self, tl_jmeth *m, bool nonvirtual, const jvalue *arg
         if (one) {
             jvalue r; r.j = 0; r.l = one;
             tl_jni_ref(one);                    /* the caller's local reference; the object itself stays */
+            recent_note(m, args, r, false);
             return r;
         }
     }
-    if (!m->warned) {
+    bool first = !m->warned;
+    if (first) {
         m->warned = true;
         tl_log_line("jni: UNIMPLEMENTED Java method %s.%s%s (returning zero)", m->cls->name, m->name, m->sig);
     }
+    plugin_listeners(m, args, first);
+    recent_note(m, args, g_zero, false);
     return g_zero;
 }
 
@@ -783,6 +947,12 @@ static void enum_constant_fallback(void *fid, jvalue *slot)
 {
     tl_jfield *f = fid;
     if (slot->l || !f || !f->cls || f->sig[0] != 'L') return;
+    /* A framework constant nothing here set: a String that is a name or a key on Android reads as null here. */
+    if (!strcmp(f->sig, "Ljava/lang/String;") && !strncmp(f->cls->name, "android/", 8)) {
+        char note[200]; snprintf(note, sizeof(note), "the Java constant %s.%s is not set here (reads as null)", f->cls->name, f->name);
+        tl_note_once(note);
+        return;
+    }
     size_t n = strlen(f->cls->name);
     if (strncmp(f->sig + 1, f->cls->name, n) || f->sig[n + 1] != ';' || f->sig[n + 2]) return;
     for (const char *p = f->name; *p; p++) if (!((*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') || *p == '_')) return;

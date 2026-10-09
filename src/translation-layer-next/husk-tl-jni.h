@@ -132,6 +132,9 @@ const char *tl_jni_reflected_sig(const jobj *member);        /* a method's or fi
 /* Call a Java method by name from C (HLE-implemented or not), as native code would. */
 jvalue tl_jni_call(jobj *self_or_class, const char *name, const char *sig, const jvalue *args);
 
+/* Log the last Java calls the calling thread made (or the game, if this thread made few), with what each was answered. */
+void tl_jni_recent_dump(const char *why);
+
 #ifdef __cplusplus
 }
 #endif

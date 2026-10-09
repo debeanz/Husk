@@ -203,11 +203,15 @@ static int system_property_get(const char *name, char *value)
 
 /* ---------------------------------------------------------------- logging */
 
+void tl_jni_recent_dump(const char *why);
 static void log_emit(int prio, const char *tag, const char *text)
 {
     static const char letters[] = "??VDIWEF";
     char p = (prio >= 0 && prio < 8) ? letters[prio] : '?';
     tl_log_line("%c/%s: %s", p, tag ? tag : "guest", text ? text : "");
+    /* An exception the game reports (an error, from C# or Java): what it last asked Java is usually what it tripped over. */
+    static atomic_int dumps;
+    if (prio >= 6 && text && strstr(text, "Exception") && atomic_fetch_add(&dumps, 1) < 4) tl_jni_recent_dump("the game reported an exception");
 }
 
 static int bionic___android_log_write(int prio, const char *tag, const char *text)
