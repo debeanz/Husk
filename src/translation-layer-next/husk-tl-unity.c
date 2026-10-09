@@ -235,6 +235,78 @@ static bool stacks_by_table(void)
 }
 
 /*
+ * Where a C# "Nullable object must have a value" comes from. Even with stack traces asked for, a shipped IL2CPP game's exception
+ * comes without one here: its code keeps no frame pointers, and the engine's own walk finds nothing. So the throw helper that
+ * Nullable<T>.Value calls (System.ThrowHelper, found through IL2CPP's exported API, so any game) is watched: when it runs, the
+ * stack is scanned for return addresses into libil2cpp -- words that point just past a call -- and they are logged as offsets in
+ * the library, which a dump of the game's methods turns into the methods it went through.
+ */
+static struct { const uint8_t *lo, *hi, *base; atomic_int hits; } g_il;
+static int il2cpp_code_cb(uintptr_t bias, const char *name, const void *phdr, unsigned phnum, void *user)
+{
+    (void)user;
+    const char *slash = name ? strrchr(name, '/') : NULL;
+    if (!name || strcmp(slash ? slash + 1 : name, "libil2cpp.so")) return 0;
+    for (unsigned i = 0; i < phnum; i++) {
+        const uint8_t *p = (const uint8_t *)phdr + 56u * i;
+        uint32_t type, flags; uint64_t vaddr, filesz;
+        memcpy(&type, p, 4); memcpy(&flags, p + 4, 4); memcpy(&vaddr, p + 16, 8); memcpy(&filesz, p + 32, 8);
+        if (type == 1 && (flags & 1)) { g_il.lo = (const uint8_t *)(bias + vaddr); g_il.hi = g_il.lo + filesz; g_il.base = (const uint8_t *)bias; }
+    }
+    return 1;
+}
+static bool return_into_il2cpp(uint64_t v)
+{
+    if ((v & 3) || v < (uintptr_t)g_il.lo + 4 || v >= (uintptr_t)g_il.hi) return false;
+    uint32_t prev = *(const uint32_t *)(uintptr_t)(v - 4);
+    return (prev & 0xFC000000u) == 0x94000000u || (prev & 0xFFFFFC1Fu) == 0xD63F0000u;          /* bl, blr */
+}
+static void nullable_throw_cb(uint64_t *regs)
+{
+    if (atomic_fetch_add(&g_il.hits, 1) >= 4) return;
+    /* tl_ld_probe's frame: the game's lr is at regs[83] and its sp just above the saved frames (regs + 672 bytes). */
+    const uint64_t *sp = (const uint64_t *)((uint8_t *)regs + 672);
+    const uint8_t *top = pthread_get_stackaddr_np(pthread_self());
+    char line[1400];
+    int n = snprintf(line, sizeof(line), "il2cpp: a C# Nullable without a value was read; return addresses in libil2cpp.so, innermost first:");
+    if (return_into_il2cpp(regs[83])) n += snprintf(line + n, sizeof(line) - (size_t)n, " %#llx", (unsigned long long)(regs[83] - (uintptr_t)g_il.base));
+    int frames = 0;
+    for (const uint64_t *p = sp; (const uint8_t *)(p + 1) <= top && p < sp + 4096 && frames < 32 && n < (int)sizeof(line) - 24; p++) {
+        if (!return_into_il2cpp(*p)) continue;
+        n += snprintf(line + n, sizeof(line) - (size_t)n, " %#llx", (unsigned long long)(*p - (uintptr_t)g_il.base));
+        frames++;
+    }
+    tl_log_line("%s", line);
+}
+static bool pc_relative(uint32_t i)
+{
+    return (i & 0x1F000000u) == 0x10000000u || (i & 0x7C000000u) == 0x14000000u || (i & 0xFF000010u) == 0x54000000u
+        || (i & 0x7E000000u) == 0x34000000u || (i & 0x7E000000u) == 0x36000000u || (i & 0x3B000000u) == 0x18000000u;
+}
+static void watch_nullable_throws(void)
+{
+    void *(*domain_get)(void) = (void *(*)(void))tl_ld_sym(NULL, "il2cpp_domain_get");
+    void *(*assembly_open)(void *, const char *) = (void *(*)(void *, const char *))tl_ld_sym(NULL, "il2cpp_domain_assembly_open");
+    void *(*get_image)(void *) = (void *(*)(void *))tl_ld_sym(NULL, "il2cpp_assembly_get_image");
+    void *(*class_from_name)(void *, const char *, const char *) = (void *(*)(void *, const char *, const char *))tl_ld_sym(NULL, "il2cpp_class_from_name");
+    void *(*method_from_name)(void *, const char *, int) = (void *(*)(void *, const char *, int))tl_ld_sym(NULL, "il2cpp_class_get_method_from_name");
+    if (!domain_get || !assembly_open || !get_image || !class_from_name || !method_from_name) return;
+    void *assembly = assembly_open(domain_get(), "mscorlib");
+    void *image = assembly ? get_image(assembly) : NULL;
+    void *helper = image ? class_from_name(image, "System", "ThrowHelper") : NULL;
+    void *method = helper ? method_from_name(helper, "ThrowInvalidOperationException_InvalidOperation_NoValue", 0) : NULL;
+    const uint8_t *fn = method ? *(const uint8_t *const *)method : NULL;                  /* MethodInfo starts with its code */
+    tl_ld_iterate(il2cpp_code_cb, NULL);
+    if (!fn || !g_il.lo || fn < g_il.lo || fn >= g_il.hi || pc_relative(*(const uint32_t *)fn)) {
+        tl_log_line("il2cpp: cannot watch Nullable reads (ThrowHelper %s)", fn ? "not where expected" : "not found");
+        return;
+    }
+    tl_lib *lib = tl_ld_lib_of(fn);
+    if (lib && tl_ld_probe(lib, (uint64_t)(fn - (const uint8_t *)tl_ld_lib_base(lib)), nullable_throw_cb))
+        tl_log_line("il2cpp: watching where C# reads a Nullable that has no value (ThrowHelper at %#llx)", (unsigned long long)(fn - g_il.base));
+}
+
+/*
  * A shipped game usually tells Unity to log a C# exception without its stack, so the log says what went wrong but not where
  * ("InvalidOperationException: Nullable object must have a value." and nothing else). Asking for the script part of the stack
  * -- what Application.SetStackTraceLogType does -- for errors and exceptions puts the methods it went through back into the log.
@@ -248,6 +320,7 @@ static void want_script_stacks(void)
     static int tries;
     static bool by_table;
     if (!by_table && !tries) {
+        watch_nullable_throws();
         by_table = stacks_by_table();
         if (by_table) { tl_log_line("unity: C# exceptions will be logged with the methods they went through"); return; }
     }
