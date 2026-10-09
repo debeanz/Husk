@@ -428,7 +428,7 @@ static void recent_note(const tl_jmeth *m, const jvalue *args, jvalue ret, bool 
     r->arg0.j = m->nargs > 0 && args ? args[0].j : 0;
     const jobj *ro = m->retk == 'L' ? ret.l : NULL;
     const char *rs = ro ? tl_jni_string(ro) : NULL;
-    r->ret_cls = ro && ro->cls ? ro->cls->name : NULL;
+    r->ret_cls = !ro ? NULL : ro->kind == TL_K_CLASS ? "a Class" : ro->cls ? ro->cls->name : "an object";
     snprintf(r->ret_text, sizeof(r->ret_text), "%s", rs ? rs : "");
     const char *as = m->nargs > 0 && args && m->argk[0] == 'L' && args[0].l ? tl_jni_string(args[0].l) : NULL;
     snprintf(r->arg_text, sizeof(r->arg_text), "%s", as ? as : "");

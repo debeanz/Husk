@@ -473,6 +473,23 @@ static void install_build(void)
         v.l = STR(k_services[i][1]);
         tl_jni_set_static("android/content/Context", k_services[i][0], "Ljava/lang/String;", v);
     }
+    v.l = STR("android_id"); tl_jni_set_static("android/provider/Settings$Secure", "ANDROID_ID", "Ljava/lang/String;", v);
+    /* Sensor types and rates by name: unset they read 0, and a game asking for Sensor.TYPE_ACCELEROMETER asked for sensor 0, which is none. */
+    static const struct { const char *cls, *name; int value; } k_ints[] = {
+        { "android/hardware/Sensor", "TYPE_ACCELEROMETER", 1 }, { "android/hardware/Sensor", "TYPE_MAGNETIC_FIELD", 2 },
+        { "android/hardware/Sensor", "TYPE_ORIENTATION", 3 }, { "android/hardware/Sensor", "TYPE_GYROSCOPE", 4 },
+        { "android/hardware/Sensor", "TYPE_LIGHT", 5 }, { "android/hardware/Sensor", "TYPE_PRESSURE", 6 },
+        { "android/hardware/Sensor", "TYPE_PROXIMITY", 8 }, { "android/hardware/Sensor", "TYPE_GRAVITY", 9 },
+        { "android/hardware/Sensor", "TYPE_LINEAR_ACCELERATION", 10 }, { "android/hardware/Sensor", "TYPE_ROTATION_VECTOR", 11 },
+        { "android/hardware/Sensor", "TYPE_RELATIVE_HUMIDITY", 12 }, { "android/hardware/Sensor", "TYPE_AMBIENT_TEMPERATURE", 13 },
+        { "android/hardware/Sensor", "TYPE_MAGNETIC_FIELD_UNCALIBRATED", 14 }, { "android/hardware/Sensor", "TYPE_GAME_ROTATION_VECTOR", 15 },
+        { "android/hardware/Sensor", "TYPE_GYROSCOPE_UNCALIBRATED", 16 }, { "android/hardware/Sensor", "TYPE_SIGNIFICANT_MOTION", 17 },
+        { "android/hardware/Sensor", "TYPE_STEP_DETECTOR", 18 }, { "android/hardware/Sensor", "TYPE_STEP_COUNTER", 19 },
+        { "android/hardware/Sensor", "TYPE_GEOMAGNETIC_ROTATION_VECTOR", 20 }, { "android/hardware/Sensor", "TYPE_ALL", -1 },
+        { "android/hardware/SensorManager", "SENSOR_DELAY_FASTEST", 0 }, { "android/hardware/SensorManager", "SENSOR_DELAY_GAME", 1 },
+        { "android/hardware/SensorManager", "SENSOR_DELAY_UI", 2 }, { "android/hardware/SensorManager", "SENSOR_DELAY_NORMAL", 3 },
+    };
+    for (size_t i = 0; i < sizeof(k_ints) / sizeof(k_ints[0]); i++) { v.j = 0; v.i = k_ints[i].value; tl_jni_set_static(k_ints[i].cls, k_ints[i].name, "I", v); }
     /* The keys AudioManager.getProperty answers. Unity reads them from these fields rather than spelling them out; unset, they were null, the answers
      * were null, and Unity told FMOD the speakers run at 0 Hz in bursts of 0 frames -- which FMOD's OpenSL output will not start with (Hollow Knight:
      * "FMOD failed to initialize the output device"). */
@@ -642,12 +659,180 @@ static void Builder_show(tl_jcall *c)
 static void Object_getClass(tl_jcall *c) { c->ret = vl(c->self && c->self->cls ? tl_jni_class_object(tl_jni_class_name(c->self)) : NULL); }
 static void Class_getClassLoader(tl_jcall *c) { c->ret = vl(make("dalvik/system/PathClassLoader")); }
 static void ClassLoader_findLibrary(tl_jcall *c) { char p[300]; snprintf(p, sizeof(p), "%s/lib%s.so", H.native_lib, S(c->args[0].l)); c->ret = vl(STR(p)); }
-static void SP_getInt(tl_jcall *c) { c->ret = vi(c->args[1].i); }
-static void SP_getString(tl_jcall *c) { c->ret = vl(c->args[1].l ? tl_jni_ref(c->args[1].l) : NULL); }
-static void SP_getBoolean(tl_jcall *c) { c->ret = vz(c->args[1].z); }
-static void SP_edit(tl_jcall *c) { c->ret = vl(make("android/content/SharedPreferences$Editor")); }
-static void Editor_self(tl_jcall *c) { c->ret = vl(tl_jni_ref(c->self)); }
-static void Editor_noop(tl_jcall *c) { (void)c; }
+/*
+ * SharedPreferences: typed values under names, one set per file (Unity keeps PlayerPrefs in one). They are kept here in memory,
+ * one store per file name, and written to <data>/shared_prefs/<name>.prefs on every apply() or commit(). Nothing used to be kept
+ * -- every read answered its default, so a game could not read back what it had just saved, and settings did not outlive a
+ * launch. An editor's changes are seen at once rather than on apply(); Unity applies after every change anyway.
+ */
+typedef struct { char type; char *key, *val; } pref_entry;        /* type: s(tring) i(nt) l(ong) f(loat) b(oolean); val as text */
+typedef struct pref_store { char name[160]; pref_entry *e; int n, cap; struct pref_store *next; } pref_store;
+static pref_store *g_pref_stores;
+static pthread_mutex_t g_pref_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static void pref_path(const pref_store *s, char *out, size_t n)
+{
+    char safe[160]; snprintf(safe, sizeof(safe), "%s", s->name);
+    for (char *p = safe; *p; p++) if (*p == '/') *p = '_';
+    snprintf(out, n, "%s/shared_prefs/%s.prefs", H.data, safe);
+}
+static void pref_esc(FILE *f, const char *s)
+{
+    for (; *s; s++) {
+        if (*s == '\\') fputs("\\\\", f); else if (*s == '\n') fputs("\\n", f); else if (*s == '\t') fputs("\\t", f);
+        else if (*s == '\r') fputs("\\r", f); else fputc(*s, f);
+    }
+}
+static char *pref_unesc(const char *s, size_t n)
+{
+    char *o = malloc(n + 1); size_t k = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] == '\\' && i + 1 < n) { i++; o[k++] = s[i] == 'n' ? '\n' : s[i] == 't' ? '\t' : s[i] == 'r' ? '\r' : s[i]; }
+        else o[k++] = s[i];
+    }
+    o[k] = 0;
+    return o;
+}
+static void pref_add(pref_store *s, char type, char *key, char *val)
+{
+    if (s->n == s->cap) { s->cap = s->cap ? s->cap * 2 : 32; s->e = realloc(s->e, (size_t)s->cap * sizeof(*s->e)); }
+    s->e[s->n].type = type; s->e[s->n].key = key; s->e[s->n].val = val; s->n++;
+}
+static void pref_load(pref_store *s)
+{
+    char path[900]; pref_path(s, path, sizeof(path));
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    char *line = NULL; size_t cap = 0; ssize_t n;
+    while ((n = getline(&line, &cap, f)) > 2) {
+        if (line[n - 1] == '\n') line[--n] = 0;
+        char *t1 = line[1] == '\t' ? line + 1 : NULL, *t2 = t1 ? memchr(t1 + 1, '\t', (size_t)(n - 2)) : NULL;
+        if (!t2) continue;
+        pref_add(s, line[0], pref_unesc(t1 + 1, (size_t)(t2 - t1 - 1)), pref_unesc(t2 + 1, (size_t)(n - (t2 - line) - 1)));
+    }
+    free(line); fclose(f);
+}
+static void pref_save(const pref_store *s)
+{
+    char path[900], tmp[920], dir[800];
+    pref_path(s, path, sizeof(path));
+    snprintf(dir, sizeof(dir), "%s/shared_prefs", H.data); mkdirs(dir);
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE *f = fopen(tmp, "w");
+    if (!f) return;
+    for (int i = 0; i < s->n; i++) { fputc(s->e[i].type, f); fputc('\t', f); pref_esc(f, s->e[i].key); fputc('\t', f); pref_esc(f, s->e[i].val); fputc('\n', f); }
+    fclose(f);
+    rename(tmp, path);
+}
+/* The store a SharedPreferences (or its Editor) stands for; the lock is held. */
+static pref_store *pref_store_of(jobj *o)
+{
+    const char *name = o ? S(tl_jni_get_field(o, "name", "Ljava/lang/String;").l) : "";
+    char def[160];
+    if (!*name) { snprintf(def, sizeof(def), "%s_preferences", H.pkg); name = def; }
+    for (pref_store *s = g_pref_stores; s; s = s->next) if (!strcmp(s->name, name)) return s;
+    pref_store *s = calloc(1, sizeof(*s));
+    snprintf(s->name, sizeof(s->name), "%s", name);
+    pref_load(s);
+    s->next = g_pref_stores; g_pref_stores = s;
+    return s;
+}
+static pref_entry *pref_find(pref_store *s, const char *key)
+{
+    for (int i = 0; i < s->n; i++) if (!strcmp(s->e[i].key, key)) return &s->e[i];
+    return NULL;
+}
+/* The value of `key` if it has one of these types (a long read as an int and back, as Android stores both as numbers). */
+static bool pref_get(jobj *prefs, const char *key, const char *types, char *out, size_t n)
+{
+    pthread_mutex_lock(&g_pref_mu);
+    pref_entry *e = pref_find(pref_store_of(prefs), key);
+    bool ok = e && strchr(types, e->type);
+    if (ok) snprintf(out, n, "%s", e->val);
+    pthread_mutex_unlock(&g_pref_mu);
+    return ok;
+}
+static void pref_set(jobj *editor, const char *key, char type, const char *val)
+{
+    pthread_mutex_lock(&g_pref_mu);
+    pref_store *s = pref_store_of(editor);
+    pref_entry *e = pref_find(s, key);
+    if (e) { free(e->val); e->val = strdup(val); e->type = type; }
+    else pref_add(s, type, strdup(key), strdup(val));
+    pthread_mutex_unlock(&g_pref_mu);
+}
+
+static void SP_getInt(tl_jcall *c) { char v[64]; c->ret = vi(pref_get(c->self, S(c->args[0].l), "il", v, sizeof(v)) ? (int)strtoll(v, NULL, 10) : c->args[1].i); }
+static void SP_getLong(tl_jcall *c) { char v[64]; c->ret.j = pref_get(c->self, S(c->args[0].l), "il", v, sizeof(v)) ? strtoll(v, NULL, 10) : c->args[1].j; }
+static void SP_getFloat(tl_jcall *c) { char v[64]; c->ret = vf(pref_get(c->self, S(c->args[0].l), "f", v, sizeof(v)) ? strtof(v, NULL) : c->args[1].f); }
+static void SP_getBoolean(tl_jcall *c) { char v[8]; c->ret = vz(pref_get(c->self, S(c->args[0].l), "b", v, sizeof(v)) ? v[0] == '1' : c->args[1].z); }
+static void SP_getString(tl_jcall *c)
+{
+    pthread_mutex_lock(&g_pref_mu);
+    pref_entry *e = pref_find(pref_store_of(c->self), S(c->args[0].l));
+    jobj *r = e && e->type == 's' ? STR(e->val) : c->args[1].l;
+    pthread_mutex_unlock(&g_pref_mu);
+    c->ret = vl(r);
+}
+static void SP_contains(tl_jcall *c)
+{
+    pthread_mutex_lock(&g_pref_mu);
+    c->ret = vz(pref_find(pref_store_of(c->self), S(c->args[0].l)) != NULL);
+    pthread_mutex_unlock(&g_pref_mu);
+}
+static void SP_edit(tl_jcall *c)
+{
+    jobj *e = make("android/content/SharedPreferences$Editor");
+    tl_jni_set_field(e, "name", "Ljava/lang/String;", vl(STR(S(tl_jni_get_field(c->self, "name", "Ljava/lang/String;").l))));
+    c->ret = vl(e);
+}
+static void Editor_putString(tl_jcall *c)
+{
+    const char *v = tl_jni_string(c->args[1].l);
+    if (v) pref_set(c->self, S(c->args[0].l), 's', v);
+    else {                                                       /* putString(key, null) removes the key */
+        pthread_mutex_lock(&g_pref_mu);
+        pref_store *s = pref_store_of(c->self); pref_entry *e = pref_find(s, S(c->args[0].l));
+        if (e) { free(e->key); free(e->val); *e = s->e[--s->n]; }
+        pthread_mutex_unlock(&g_pref_mu);
+    }
+    c->ret = vl(c->self);
+}
+static void Editor_putInt(tl_jcall *c) { char v[24]; snprintf(v, sizeof(v), "%d", c->args[1].i); pref_set(c->self, S(c->args[0].l), 'i', v); c->ret = vl(c->self); }
+static void Editor_putLong(tl_jcall *c) { char v[24]; snprintf(v, sizeof(v), "%lld", (long long)c->args[1].j); pref_set(c->self, S(c->args[0].l), 'l', v); c->ret = vl(c->self); }
+static void Editor_putFloat(tl_jcall *c) { char v[32]; snprintf(v, sizeof(v), "%.9g", (double)c->args[1].f); pref_set(c->self, S(c->args[0].l), 'f', v); c->ret = vl(c->self); }
+static void Editor_putBoolean(tl_jcall *c) { pref_set(c->self, S(c->args[0].l), 'b', c->args[1].z ? "1" : "0"); c->ret = vl(c->self); }
+static void Editor_remove(tl_jcall *c)
+{
+    pthread_mutex_lock(&g_pref_mu);
+    pref_store *s = pref_store_of(c->self); pref_entry *e = pref_find(s, S(c->args[0].l));
+    if (e) { free(e->key); free(e->val); *e = s->e[--s->n]; }
+    pthread_mutex_unlock(&g_pref_mu);
+    c->ret = vl(c->self);
+}
+static void Editor_clear(tl_jcall *c)
+{
+    pthread_mutex_lock(&g_pref_mu);
+    pref_store *s = pref_store_of(c->self);
+    for (int i = 0; i < s->n; i++) { free(s->e[i].key); free(s->e[i].val); }
+    s->n = 0;
+    pthread_mutex_unlock(&g_pref_mu);
+    c->ret = vl(c->self);
+}
+static void Editor_apply(tl_jcall *c)
+{
+    pthread_mutex_lock(&g_pref_mu);
+    pref_save(pref_store_of(c->self));
+    pthread_mutex_unlock(&g_pref_mu);
+}
+static void Editor_commit(tl_jcall *c) { Editor_apply(c); c->ret = vz(1); }
+static void PrefManager_getDefault(tl_jcall *c)
+{
+    jobj *p = make("android/content/SharedPreferences");
+    char name[160]; snprintf(name, sizeof(name), "%s_preferences", H.pkg);
+    set_str(p, "name", name);
+    c->ret = vl(p);
+}
 /* An iterator is empty unless it was made over a list (tl_jni_new_list_iterator). */
 typedef struct { jobj **items; uint32_t n, i; } list_iter;
 static void Iterator_hasNext(tl_jcall *c) { const list_iter *it = c->self ? c->self->native : NULL; c->ret = vz(it && it->i < it->n); }
@@ -1177,10 +1362,19 @@ static const tl_jhle k_hle[] = {
     M("android/content/SharedPreferences", "getString", "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;", SP_getString),
     M("android/content/SharedPreferences", "getBoolean", "(Ljava/lang/String;Z)Z", SP_getBoolean),
     M("android/content/SharedPreferences", "edit", "()Landroid/content/SharedPreferences$Editor;", SP_edit),
-    M("android/content/SharedPreferences$Editor", "putInt", "(Ljava/lang/String;I)Landroid/content/SharedPreferences$Editor;", Editor_self),
-    M("android/content/SharedPreferences$Editor", "putString", "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/SharedPreferences$Editor;", Editor_self),
-    M("android/content/SharedPreferences$Editor", "putBoolean", "(Ljava/lang/String;Z)Landroid/content/SharedPreferences$Editor;", Editor_self),
-    M("android/content/SharedPreferences$Editor", "apply", "()V", Editor_noop),
+    M("android/content/SharedPreferences", "getLong", "(Ljava/lang/String;J)J", SP_getLong),
+    M("android/content/SharedPreferences", "getFloat", "(Ljava/lang/String;F)F", SP_getFloat),
+    M("android/content/SharedPreferences", "contains", "(Ljava/lang/String;)Z", SP_contains),
+    M("android/content/SharedPreferences$Editor", "putInt", "(Ljava/lang/String;I)Landroid/content/SharedPreferences$Editor;", Editor_putInt),
+    M("android/content/SharedPreferences$Editor", "putLong", "(Ljava/lang/String;J)Landroid/content/SharedPreferences$Editor;", Editor_putLong),
+    M("android/content/SharedPreferences$Editor", "putFloat", "(Ljava/lang/String;F)Landroid/content/SharedPreferences$Editor;", Editor_putFloat),
+    M("android/content/SharedPreferences$Editor", "putString", "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/SharedPreferences$Editor;", Editor_putString),
+    M("android/content/SharedPreferences$Editor", "putBoolean", "(Ljava/lang/String;Z)Landroid/content/SharedPreferences$Editor;", Editor_putBoolean),
+    M("android/content/SharedPreferences$Editor", "remove", "(Ljava/lang/String;)Landroid/content/SharedPreferences$Editor;", Editor_remove),
+    M("android/content/SharedPreferences$Editor", "clear", "()Landroid/content/SharedPreferences$Editor;", Editor_clear),
+    M("android/content/SharedPreferences$Editor", "apply", "()V", Editor_apply),
+    M("android/content/SharedPreferences$Editor", "commit", "()Z", Editor_commit),
+    M("android/preference/PreferenceManager", "getDefaultSharedPreferences", "(Landroid/content/Context;)Landroid/content/SharedPreferences;", PrefManager_getDefault),
     M("java/util/Iterator", "hasNext", "()Z", Iterator_hasNext), M("java/util/Iterator", "next", "()Ljava/lang/Object;", Iterator_next),
     M("java/lang/String", "<init>", "()V", String_init_empty), M("java/lang/String", "<init>", "([B)V", String_init_bytes),
     M("java/lang/String", "<init>", "([BLjava/lang/String;)V", String_init_bytes), M("java/lang/String", "<init>", "([BII)V", String_init_bytes_range),

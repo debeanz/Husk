@@ -179,6 +179,28 @@ static void call_native(const char *name, const char *sig, uintptr_t a, uintptr_
 
 static void kb_drain(void);
 
+/*
+ * A shipped game usually tells Unity to log a C# exception without its stack, so the log says what went wrong but not where
+ * ("InvalidOperationException: Nullable object must have a value." and nothing else). Asking for the script part of the stack
+ * -- what Application.SetStackTraceLogType does -- for errors and exceptions puts the methods it went through back into the log.
+ * Asked again now and then, in case the game sets it back.
+ */
+static void want_script_stacks(void)
+{
+    typedef void *(*resolve_fn)(const char *name);
+    typedef void (*set_fn)(int log_type, int stack_type);
+    static set_fn set;
+    static int tries;
+    if (!set && tries < 200) {
+        tries++;
+        resolve_fn resolve = (resolve_fn)tl_ld_sym(NULL, "il2cpp_resolve_icall");
+        set = resolve ? (set_fn)resolve("UnityEngine.Application::SetStackTraceLogType") : NULL;
+        if (set) tl_log_line("unity: C# exceptions will be logged with the methods they went through");
+        else if (tries == 5) tl_log_line("unity: Application.SetStackTraceLogType is not to be found; C# exceptions stay without their stacks");
+    }
+    if (set) { set(0, 1); set(4, 1); }          /* LogType.Error and LogType.Exception: StackTraceLogType.ScriptOnly */
+}
+
 static void *unity_main(void *arg)
 {
     (void)arg;
@@ -204,6 +226,7 @@ static void *unity_main(void *arg)
 
     void *render = native_of(U.player_class, "nativeRender", "()Z");
     bool was_paused = false;
+    unsigned long frame = 0;
     while (render && !atomic_load(&U.stop)) {
         if (atomic_load(&U.paused)) {
             if (!was_paused) { NATIVE_VOID("nativeFocusChanged", "(Z)V", 0, 0); NATIVE_VOID("nativePause", "()Z", 0, 0); was_paused = true; tl_log_line("unity: paused"); }
@@ -212,6 +235,7 @@ static void *unity_main(void *arg)
         }
         if (was_paused) { NATIVE_VOID("nativeResume", "()V", 0, 0); NATIVE_VOID("nativeFocusChanged", "(Z)V", 1, 0); was_paused = false; tl_log_line("unity: resumed"); }
         kb_drain();
+        if (++frame >= 3 && frame % 30 == 3) want_script_stacks();      /* once the first frame is out, the engine has registered its calls */
         struct timespec t0, t1;
         clock_gettime(CLOCK_MONOTONIC, &t0);
         uint8_t keep = ((uint8_t (*)(void *, void *))render)(tl_jni_env(), U.player);
