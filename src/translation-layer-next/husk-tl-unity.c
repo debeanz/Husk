@@ -312,27 +312,29 @@ static void watch_nullable_throws(void)
  * logged: for a coroutine's step (MoveNext) the step it is about to take, so the last step logged is where the game waits.
  * For any game, the scenes it loads; the rest is Dave the Diver's way from its intro to its title screen.
  */
-enum { TR_CALLS, TR_STEPS, TR_SCENE, TR_TWO_INTS };
+enum { TR_CALLS, TR_STEPS, TR_ASYNC, TR_SCENE, TR_TWO_INTS };
 typedef struct { const char *assembly, *cls, *method; int argc, kind; } traced;
 static const traced k_traced[] = {
     { "UnityEngine.CoreModule", "UnityEngine.SceneManagement.SceneManagerAPIInternal", "LoadSceneAsyncNameIndexInternal", 4, TR_SCENE },
-    { "Assembly-CSharp", "LogoManager", "EndReached", 1, TR_CALLS },
-    { "Assembly-CSharp", "LogoManager", "<Start>b__12_0", 1, TR_CALLS },
     { "Assembly-CSharp", "LogoManager", "OnLoadingStepUpdate", 2, TR_TWO_INTS },
-    { "Assembly-CSharp", "LogoManager/<Start>d__12", "MoveNext", 0, TR_STEPS },
-    { "Assembly-CSharp", "LogoManager/<Enumerator>d__13", "MoveNext", 0, TR_STEPS },
     { "Assembly-CSharp", "LogoManager/<AgeGradeEvent>d__14", "MoveNext", 0, TR_STEPS },
-    { "Assembly-CSharp", "LogoManager/<>c", "<AgeGradeEvent>b__14_0", 0, TR_CALLS },
-    { "Assembly-CSharp", "GameBase/<StartGame>d__31", "MoveNext", 0, TR_STEPS },
-    { "Assembly-CSharp", "GameBase/<InitAfterSaveSystem>d__45", "MoveNext", 0, TR_STEPS },
-    { "Assembly-CSharp", "SceneLoaderManagedBehaviour/<Start>d__18", "MoveNext", 0, TR_STEPS },
-    { "Assembly-CSharp", "SceneLoaderManagedBehaviour/<>c", "<Start>b__18_0", 0, TR_CALLS },
-    { "Assembly-CSharp", "DR.Save.MakeEndingBackupSave/<MakeFromSavedData>d__3", "MoveNext", 0, TR_STEPS },
-    { "Assembly-CSharp", "EntrySceneDispatcher", "Enter", 0, TR_CALLS },
-    { "Assembly-CSharp", "EntrySceneDispatcher", "TryPrewarmJungleScene", 0, TR_CALLS },
     { "Assembly-CSharp", "SceneLoader", "GoToTitle", 1, TR_CALLS },
+    { "Assembly-CSharp", "SceneLoader/<SyncPrepareTitleAndLoad>d__132", "MoveNext", 0, TR_ASYNC },
     { "Assembly-CSharp", "SceneLoader/<CoChangeSceneAsync>d__116", "MoveNext", 0, TR_STEPS },
     { "Assembly-CSharp", "SceneLoader/<CoLoadSceneAsync>d__113", "MoveNext", 0, TR_STEPS },
+    { "Assembly-CSharp", "Dave.SDK.SDKManager/<InitializeAsync>d__28", "MoveNext", 0, TR_ASYNC },
+    { "Assembly-CSharp", "Dave.SDK.SDKManager/<InitializeInternalAsync>d__29", "MoveNext", 0, TR_ASYNC },
+    { "Assembly-CSharp", "Dave.SDK.GlobalSDK", "InitAsync", 0, TR_CALLS },
+    { "Assembly-CSharp", "Dave.SDK.GlobalSDK/<InitializeIapAsync>d__56", "MoveNext", 0, TR_ASYNC },
+    { "Assembly-CSharp", "Dave.SDK.GlobalSDK", "OnInitialized", 2, TR_CALLS },
+    { "Assembly-CSharp", "Dave.SDK.GlobalSDK", "OnInitializeFailed", 2, TR_CALLS },
+    { "Assembly-CSharp", "Dave.SDK.GlobalSDK", "CompleteInitialization", 2, TR_CALLS },
+    { "Unity.Services.Core", "Unity.Services.Core.UnityServices", "InitializeAsync", 0, TR_CALLS },
+    { "Unity.Purchasing", "UnityEngine.Purchasing.UnityPurchasing", "Initialize", 2, TR_CALLS },
+    { "Unity.Purchasing.Stores", "UnityEngine.Purchasing.BillingClientStateListener", "HandleBillingSetupFinished", 1, TR_CALLS },
+    { "Unity.Purchasing.Stores", "UnityEngine.Purchasing.GooglePlayStoreConnectionService", "OnConnected", 0, TR_CALLS },
+    { "Unity.Purchasing.Stores", "UnityEngine.Purchasing.GooglePlayStoreConnectionService", "OnDisconnected", 1, TR_CALLS },
+    { "Unity.Purchasing.Stores", "UnityEngine.Purchasing.GooglePurchaseService", "OnQueryProductDetailsResponse", 4, TR_CALLS },
 };
 #define TRACED (sizeof(k_traced) / sizeof(k_traced[0]))
 static struct { atomic_uint calls, lines; const void *obj[4]; int step[4]; } g_tr[TRACED];
@@ -353,10 +355,11 @@ static void trace_hit(unsigned i, uint64_t *regs)
     unsigned call = atomic_fetch_add(&g_tr[i].calls, 1) + 1;
     if (atomic_load(&g_tr[i].lines) >= 40) return;
     char what[160] = "";
-    if (t->kind == TR_STEPS) {
-        /* A coroutine's state is its object's first field, after the 16-byte object header. Logged when it changes. */
+    if (t->kind == TR_STEPS || t->kind == TR_ASYNC) {
+        /* A coroutine's state is its object's first field, after the 16-byte object header; an async method's state machine
+         * is a struct, its state the first thing in it. Logged when it changes. */
         const void *obj = (const void *)(uintptr_t)regs[0];
-        int step = obj ? *(const int32_t *)((const uint8_t *)obj + 16) : -99;
+        int step = obj ? *(const int32_t *)((const uint8_t *)obj + (t->kind == TR_ASYNC ? 0 : 16)) : -99;
         int slot = -1;
         for (int k = 0; k < 4 && slot < 0; k++) if (g_tr[i].obj[k] == obj) slot = k;
         if (slot >= 0 && g_tr[i].step[slot] == step) return;

@@ -10,7 +10,10 @@
  *     services, or stop to show "Get Google Play services", carry on;
  *   - Play Games: sign-in reports "not authenticated"; achievements, leaderboards and events are accepted and dropped, and the
  *     calls that return a Task get one that has already finished (failed, where a signed-out player's would);
- *   - Play Billing: the connection finishes with BILLING_UNAVAILABLE, the answer for a device whose Play Store cannot sell.
+ *   - Play Billing: connected, with nothing for sale and nothing bought: the store knows none of the game's products, the
+ *     player owns none, and a purchase cannot start. (It used to say BILLING_UNAVAILABLE, but Unity IAP 5 takes that for a
+ *     passing outage and tries again for ever, and a game that waits for its store to be ready -- Dave the Diver, before
+ *     its title screen -- never went on. A store with no products is an answer every store library finishes on.)
  *
  * A listener the game hands over -- a Unity C# proxy, most often -- is called back with the result, as Play services would.
  * Signing in, cloud saves and purchases themselves would need a Google account and are not here.
@@ -33,7 +36,6 @@ static jvalue vi(int i) { jvalue v; v.j = 0; v.i = i; return v; }
 static jvalue vz(int z) { jvalue v; v.j = 0; v.z = z != 0; return v; }
 static void Noop(tl_jcall *c) { (void)c; }
 static void RetFalse(tl_jcall *c) { c->ret = vz(0); }
-static void RetZero(tl_jcall *c) { c->ret = vi(0); }
 
 /* The Play services version a current phone has (25.13). */
 #define GMS_VERSION 251333035
@@ -62,6 +64,15 @@ static void deliver(jobj *listener, const char *iface, const char *method, const
     if (!strcmp(tl_jni_class_name(listener), "java/lang/reflect/Proxy")) { tl_proxy_call(listener, iface, method, sig, &arg, 1); return; }
     jvalue a = vl(arg);
     tl_jni_call(listener, method, sig, &a);
+    if (tl_jni_pending()) tl_jni_clear();
+}
+static void deliver2(jobj *listener, const char *iface, const char *method, const char *sig, jobj *arg0, jobj *arg1)
+{
+    if (!listener) return;
+    jobj *args[2] = { arg0, arg1 };
+    if (!strcmp(tl_jni_class_name(listener), "java/lang/reflect/Proxy")) { tl_proxy_call(listener, iface, method, sig, args, 2); return; }
+    jvalue a[2] = { vl(arg0), vl(arg1) };
+    tl_jni_call(listener, method, sig, a);
     if (tl_jni_pending()) tl_jni_clear();
 }
 
@@ -151,7 +162,15 @@ static void Task_failed(tl_jcall *c) { c->ret = vl(task_failed()); }
 #define BR "com/android/billingclient/api/BillingResult"
 #define PPP "com/android/billingclient/api/PendingPurchasesParams"
 #define PPPB "com/android/billingclient/api/PendingPurchasesParams$Builder"
+#define QPDP "com/android/billingclient/api/QueryProductDetailsParams"
+#define QPDPP "com/android/billingclient/api/QueryProductDetailsParams$Product"
+#define QPP "com/android/billingclient/api/QueryPurchasesParams"
+#define GBCP "com/android/billingclient/api/GetBillingConfigParams"
+#define QPDR "com/android/billingclient/api/QueryProductDetailsResult"
+#define BCFG "com/android/billingclient/api/BillingConfig"
+#define BILLING_OK 0
 #define BILLING_UNAVAILABLE 3
+#define CONNECTED 2                     /* BillingClient.ConnectionState */
 
 static jobj *billing_result(int code, const char *message)
 {
@@ -160,18 +179,54 @@ static jobj *billing_result(int code, const char *message)
     tl_jni_set_field(r, "message", "Ljava/lang/String;", vl(tl_jni_new_string(message)));
     return r;
 }
-static void BC_newBuilder(tl_jcall *c) { c->ret = vl(tl_jni_new_object(tl_jni_class(BCB))); }
+static jobj *empty_list(void) { return tl_jni_new_object(tl_jni_class("java/util/ArrayList")); }
+
+/* The parameter objects' builders: what they are told is not needed, only that they build. */
+#define NEW(fn, cls) static void fn(tl_jcall *c) { c->ret = vl(tl_jni_new_object(tl_jni_class(cls))); }
+NEW(BC_newBuilder, BCB) NEW(BCB_build, BC) NEW(PPP_newBuilder, PPPB) NEW(PPPB_build, PPP)
+NEW(QPDP_newBuilder, QPDP "$Builder") NEW(QPDPB_build, QPDP) NEW(QPDPP_newBuilder, QPDPP "$Builder") NEW(QPDPPB_build, QPDPP)
+NEW(QPP_newBuilder, QPP "$Builder") NEW(QPPB_build, QPP) NEW(GBCP_newBuilder, GBCP "$Builder") NEW(GBCPB_build, GBCP)
 static void BCB_self(tl_jcall *c) { c->ret = vl(c->self); }
-static void PPP_newBuilder(tl_jcall *c) { c->ret = vl(tl_jni_new_object(tl_jni_class(PPPB))); }
-static void PPPB_build(tl_jcall *c) { c->ret = vl(tl_jni_new_object(tl_jni_class(PPP))); }
-static void BCB_build(tl_jcall *c) { c->ret = vl(tl_jni_new_object(tl_jni_class(BC))); }
+
 static void BC_startConnection(tl_jcall *c)
 {
-    once("Play Billing: connection finished with BILLING_UNAVAILABLE");
+    once("Play Billing: connected; the store has nothing to sell and nothing was bought");
+    tl_jni_set_field(c->self, "connected", "Z", vz(1));
     deliver(c->args[0].l, "com/android/billingclient/api/BillingClientStateListener", "onBillingSetupFinished",
-            "(Lcom/android/billingclient/api/BillingResult;)V", billing_result(BILLING_UNAVAILABLE, "Google Play Billing is not available in Husk"));
+            "(Lcom/android/billingclient/api/BillingResult;)V", billing_result(BILLING_OK, ""));
 }
+static void BC_endConnection(tl_jcall *c) { tl_jni_set_field(c->self, "connected", "Z", vz(0)); }
+static void BC_isReady(tl_jcall *c) { c->ret = vz(tl_jni_get_field(c->self, "connected", "Z").z); }
+static void BC_connectionState(tl_jcall *c) { c->ret = vi(tl_jni_get_field(c->self, "connected", "Z").z ? CONNECTED : 0); }
 static void BC_isFeatureSupported(tl_jcall *c) { c->ret = vl(billing_result(BILLING_UNAVAILABLE, "")); }
+/* A purchase cannot start: no product is for sale. */
+static void BC_launchBillingFlow(tl_jcall *c) { c->ret = vl(billing_result(BILLING_UNAVAILABLE, "Purchases are not available in Husk")); }
+/* Product details: none of the products asked about is in the store. */
+static void BC_queryProductDetails(tl_jcall *c)
+{
+    jobj *r = tl_jni_new_object(tl_jni_class(QPDR));
+    tl_jni_set_field(r, "products", "Ljava/util/List;", vl(empty_list()));
+    tl_jni_set_field(r, "unfetched", "Ljava/util/List;", vl(empty_list()));
+    deliver2(c->args[1].l, "com/android/billingclient/api/ProductDetailsResponseListener", "onProductDetailsResponse",
+             "(Lcom/android/billingclient/api/BillingResult;Lcom/android/billingclient/api/QueryProductDetailsResult;)V", billing_result(BILLING_OK, ""), r);
+}
+static void QPDR_products(tl_jcall *c) { c->ret = tl_jni_get_field(c->self, "products", "Ljava/util/List;"); }
+static void QPDR_unfetched(tl_jcall *c) { c->ret = tl_jni_get_field(c->self, "unfetched", "Ljava/util/List;"); }
+/* Purchases: none. */
+static void BC_queryPurchases(tl_jcall *c)
+{
+    deliver2(c->args[1].l, "com/android/billingclient/api/PurchasesResponseListener", "onQueryPurchasesResponse",
+             "(Lcom/android/billingclient/api/BillingResult;Ljava/util/List;)V", billing_result(BILLING_OK, ""), empty_list());
+}
+/* The billing country: the United States. */
+static void BC_getBillingConfig(tl_jcall *c)
+{
+    jobj *cfg = tl_jni_new_object(tl_jni_class(BCFG));
+    tl_jni_set_field(cfg, "country", "Ljava/lang/String;", vl(tl_jni_new_string("US")));
+    deliver2(c->args[1].l, "com/android/billingclient/api/BillingConfigResponseListener", "onBillingConfigResponse",
+             "(Lcom/android/billingclient/api/BillingResult;Lcom/android/billingclient/api/BillingConfig;)V", billing_result(BILLING_OK, ""), cfg);
+}
+static void BCFG_country(tl_jcall *c) { c->ret = tl_jni_get_field(c->self, "country", "Ljava/lang/String;"); }
 static void BR_code(tl_jcall *c) { c->ret = tl_jni_get_field(c->self, "code", "I"); }
 static void BR_message(tl_jcall *c) { c->ret = tl_jni_get_field(c->self, "message", "Ljava/lang/String;"); }
 
@@ -284,6 +339,9 @@ static const struct { const char *name, *super; } k_classes[] = {
     { FB "GoogleApiAvailabilityHelper", "java/lang/Object" },
     { PPP, "java/lang/Object" }, { PPPB, "java/lang/Object" },
     { BC, "java/lang/Object" }, { BCB, "java/lang/Object" }, { BR, "java/lang/Object" },
+    { QPDP, "java/lang/Object" }, { QPDP "$Builder", "java/lang/Object" }, { QPDPP, "java/lang/Object" }, { QPDPP "$Builder", "java/lang/Object" },
+    { QPP, "java/lang/Object" }, { QPP "$Builder", "java/lang/Object" }, { GBCP, "java/lang/Object" }, { GBCP "$Builder", "java/lang/Object" },
+    { QPDR, "java/lang/Object" }, { BCFG, "java/lang/Object" },
 };
 
 /* ------------------------------------------------------------ class loader */
@@ -405,14 +463,38 @@ static const tl_jhle k_gms[] = {
     M(BCB, "enablePendingPurchases", "(Lcom/android/billingclient/api/PendingPurchasesParams;)Lcom/android/billingclient/api/BillingClient$Builder;", BCB_self),
     M(BCB, "enableAutoServiceReconnection", "()Lcom/android/billingclient/api/BillingClient$Builder;", BCB_self),
     M(BCB, "enableAlternativeBillingOnly", "()Lcom/android/billingclient/api/BillingClient$Builder;", BCB_self),
+    M(BCB, "enableExternalOffer", "()Lcom/android/billingclient/api/BillingClient$Builder;", BCB_self),
+    M(BCB, "enableBillingProgram", "(I)Lcom/android/billingclient/api/BillingClient$Builder;", BCB_self),
+    M(BCB, "enableBillingProgram", "(Lcom/android/billingclient/api/EnableBillingProgramParams;)Lcom/android/billingclient/api/BillingClient$Builder;", BCB_self),
     M(PPP, "newBuilder", "()Lcom/android/billingclient/api/PendingPurchasesParams$Builder;", PPP_newBuilder),
     M(PPPB, "enableOneTimeProducts", "()Lcom/android/billingclient/api/PendingPurchasesParams$Builder;", BCB_self),
     M(PPPB, "enablePrepaidPlans", "()Lcom/android/billingclient/api/PendingPurchasesParams$Builder;", BCB_self),
     M(PPPB, "build", "()Lcom/android/billingclient/api/PendingPurchasesParams;", PPPB_build),
     M(BCB, "build", "()Lcom/android/billingclient/api/BillingClient;", BCB_build),
     M(BC, "startConnection", "(Lcom/android/billingclient/api/BillingClientStateListener;)V", BC_startConnection),
-    M(BC, "isReady", "()Z", RetFalse), M(BC, "endConnection", "()V", Noop), M(BC, "getConnectionState", "()I", RetZero),
+    M(BC, "isReady", "()Z", BC_isReady), M(BC, "endConnection", "()V", BC_endConnection), M(BC, "getConnectionState", "()I", BC_connectionState),
     M(BC, "isFeatureSupported", "(Ljava/lang/String;)Lcom/android/billingclient/api/BillingResult;", BC_isFeatureSupported),
+    M(BC, "launchBillingFlow", "(Landroid/app/Activity;Lcom/android/billingclient/api/BillingFlowParams;)Lcom/android/billingclient/api/BillingResult;", BC_launchBillingFlow),
+    M(BC, "queryProductDetailsAsync", "(L" QPDP ";Lcom/android/billingclient/api/ProductDetailsResponseListener;)V", BC_queryProductDetails),
+    M(BC, "queryPurchasesAsync", "(L" QPP ";Lcom/android/billingclient/api/PurchasesResponseListener;)V", BC_queryPurchases),
+    M(BC, "getBillingConfigAsync", "(L" GBCP ";Lcom/android/billingclient/api/BillingConfigResponseListener;)V", BC_getBillingConfig),
+    M(QPDP, "newBuilder", "()L" QPDP "$Builder;", QPDP_newBuilder),
+    M(QPDP "$Builder", "setProductList", "(Ljava/util/List;)L" QPDP "$Builder;", BCB_self),
+    M(QPDP "$Builder", "build", "()L" QPDP ";", QPDPB_build),
+    M(QPDPP, "newBuilder", "()L" QPDPP "$Builder;", QPDPP_newBuilder),
+    M(QPDPP "$Builder", "setProductId", "(Ljava/lang/String;)L" QPDPP "$Builder;", BCB_self),
+    M(QPDPP "$Builder", "setProductType", "(Ljava/lang/String;)L" QPDPP "$Builder;", BCB_self),
+    M(QPDPP "$Builder", "setDynamicProductToken", "(Ljava/lang/String;)L" QPDPP "$Builder;", BCB_self),
+    M(QPDPP "$Builder", "build", "()L" QPDPP ";", QPDPPB_build),
+    M(QPP, "newBuilder", "()L" QPP "$Builder;", QPP_newBuilder),
+    M(QPP "$Builder", "setProductType", "(Ljava/lang/String;)L" QPP "$Builder;", BCB_self),
+    M(QPP "$Builder", "includeSuspendedSubscriptions", "(Z)L" QPP "$Builder;", BCB_self),
+    M(QPP "$Builder", "build", "()L" QPP ";", QPPB_build),
+    M(GBCP, "newBuilder", "()L" GBCP "$Builder;", GBCP_newBuilder),
+    M(GBCP "$Builder", "build", "()L" GBCP ";", GBCPB_build),
+    M(QPDR, "getProductDetailsList", "()Ljava/util/List;", QPDR_products),
+    M(QPDR, "getUnfetchedProductList", "()Ljava/util/List;", QPDR_unfetched),
+    M(BCFG, "getCountryCode", "()Ljava/lang/String;", BCFG_country),
     M(BR, "getResponseCode", "()I", BR_code), M(BR, "getDebugMessage", "()Ljava/lang/String;", BR_message),
     M(BR, "toString", "()Ljava/lang/String;", BR_message),
     { NULL, NULL, NULL, NULL }
