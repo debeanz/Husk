@@ -702,6 +702,9 @@ struct TLCocosAttemptView: View {
                         }
                     }
                     .ignoresSafeArea(.container, edges: fullBleed ? .all : [.horizontal, .bottom])
+                    // The keyboard goes over the game, as on Android; the game is not shrunk to fit above it (the strip on top
+                    // of the keyboard shows what is typed).
+                    .ignoresSafeArea(.keyboard)
             }
 
             // A game that did not start, or that quit: say so, rather than leave a black screen.
@@ -752,6 +755,7 @@ struct TLCocosAttemptView: View {
         .persistentSystemOverlays(.hidden)
         // Swipes near the edges are the game's.
         .defersSystemGestures(on: .all)
+        .ignoresSafeArea(.keyboard)
         .onAppear {
             HuskOrientation.set(portrait ? .portrait : .landscape)
             UIApplication.shared.isIdleTimerDisabled = settings.keepAwake
