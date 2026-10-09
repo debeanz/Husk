@@ -178,13 +178,7 @@ struct TLAppSettingsView: View {
             } header: {
                 Text("Display")
             } footer: {
-                Text("\(GameDisplay.detail(GameDisplay.resolution(for: settings))) \(GameDisplay.scaling(for: settings).detail) "
-                   + "\(GameDisplay.frameRateDetail(GameDisplay.frameRate(for: settings))) "
-                   + (resolutionIsCustom || scalingIsCustom || frameRateIsCustom
-                      ? "Custom is this game's own choice; the others follow Husk's Settings. "
-                      : "These follow Husk's Settings until you choose something else here. ")
-                   + "Full Screen draws the game around the camera too. These apply the next time the game starts; a game "
-                   + "already running in this session needs Husk closed and opened again.")
+                Text(displayFooter)
             }
 
             if app.packageName == GeodeSupport.gamePackage {
@@ -260,6 +254,20 @@ struct TLAppSettingsView: View {
     }
 
     // MARK: resolution and scaling: Husk's Settings unless this game says otherwise
+
+    /// What the Display section's choices do. Built a line at a time: as one expression it is more than the type checker will take.
+    private var displayFooter: String {
+        let custom = resolutionIsCustom || scalingIsCustom || frameRateIsCustom
+        var lines: [String] = []
+        lines.append(GameDisplay.detail(GameDisplay.resolution(for: settings)))
+        lines.append(GameDisplay.scaling(for: settings).detail)
+        lines.append(GameDisplay.frameRateDetail(GameDisplay.frameRate(for: settings)))
+        lines.append(custom ? "Custom is this game's own choice; the others follow Husk's Settings."
+                            : "These follow Husk's Settings until you choose something else here.")
+        lines.append("Full Screen draws the game around the camera too. These apply the next time the game starts; a game "
+                     + "already running in this session needs Husk closed and opened again.")
+        return lines.joined(separator: " ")
+    }
 
     /// Whether this game has its own resolution or scaling rather than Husk's.
     private var resolutionIsCustom: Bool { GameDisplay.resolutions.contains(settings.resolution) }

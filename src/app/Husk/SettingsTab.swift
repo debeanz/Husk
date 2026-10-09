@@ -51,9 +51,7 @@ struct SettingsTab: View {
                 } header: {
                     Text("Display")
                 } footer: {
-                    Text("\(GameDisplay.detail(resolution)) \((GameScaling(rawValue: scaling) ?? .fit).detail) "
-                       + "\(GameDisplay.frameRateDetail(frameRate)) "
-                       + "These are the defaults; each game can have its own in its settings.")
+                    Text(displayFooter)
                 }
 
                 Section {
@@ -94,6 +92,12 @@ struct SettingsTab: View {
             .navigationTitle("Settings")
             .sheet(isPresented: $showLogs) { LogView() }
         }
+    }
+
+    /// What the Display section's defaults do.
+    private var displayFooter: String {
+        [GameDisplay.detail(resolution), (GameScaling(rawValue: scaling) ?? .fit).detail, GameDisplay.frameRateDetail(frameRate),
+         "These are the defaults; each game can have its own in its settings."].joined(separator: " ")
     }
 
     /// What the Memory section says: the limits as they are now, and where the permissions come from.
