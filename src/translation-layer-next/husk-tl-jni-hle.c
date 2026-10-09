@@ -10,6 +10,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -556,6 +557,52 @@ static void System_loadLibrary(tl_jcall *c)
 static void System_getProperty(tl_jcall *c) { const char *k = S(c->args[0].l); const char *v = !strcmp(k, "os.arch") ? "aarch64" : !strcmp(k, "http.agent") ? "Dalvik/2.1.0 (Linux; U; Android 14; Pixel 8)" : NULL; c->ret = vl(v ? STR(v) : NULL); }
 static void System_currentTimeMillis(tl_jcall *c) { struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); jvalue v; v.j = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000; c->ret = v; }
 static void System_nanoTime(tl_jcall *c) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); jvalue v; v.j = (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec; c->ret = v; }
+
+/*
+ * java.lang.Thread, for the threads a game's native code runs on. Engines ask for the thread they are on to name it
+ * (Unreal does as its library loads: Thread.currentThread().setName(...)); with no Thread to answer, the call on null threw,
+ * and the exception left over from loading the library was taken, as on Android, for a library that failed to load.
+ * Each native thread gets one Thread object, kept for the thread's life; naming it names the thread itself.
+ */
+static _Thread_local jobj *t_thread;
+static atomic_long g_thread_ids = 1;
+static void Thread_current(tl_jcall *c)
+{
+    if (!t_thread) {
+        t_thread = tl_jni_ref(tl_jni_new_object(tl_jni_class("java/lang/Thread")));    /* kept: a caller letting go of its reference must not free it */
+        jvalue id; id.j = atomic_fetch_add(&g_thread_ids, 1);
+        tl_jni_set_field(t_thread, "husk_id", "J", id);
+        t_thread->native = (void *)pthread_self();
+        char name[64] = "";
+        pthread_getname_np(pthread_self(), name, sizeof(name));
+        tl_jni_set_field(t_thread, "husk_name", "Ljava/lang/String;", vl(tl_jni_new_string(name[0] ? name : "main")));
+    }
+    c->ret = vl(t_thread);
+}
+static void Thread_setName(tl_jcall *c)
+{
+    if (!c->self) return;
+    const char *name = S(c->args[0].l);
+    tl_jni_set_field(c->self, "husk_name", "Ljava/lang/String;", vl(tl_jni_new_string(name)));
+    if (c->self && c->self->native == (void *)pthread_self() && name[0]) pthread_setname_np(name);   /* Darwin names only the calling thread */
+}
+static void Thread_getName(tl_jcall *c)
+{
+    jobj *n = tl_jni_get_field(c->self, "husk_name", "Ljava/lang/String;").l;
+    c->ret = vl(n ? n : tl_jni_new_string("Thread"));
+}
+static void Thread_getId(tl_jcall *c) { c->ret = tl_jni_get_field(c->self, "husk_id", "J"); }
+static void Thread_getPriority(tl_jcall *c) { c->ret = vi(5); }            /* Thread.NORM_PRIORITY */
+static void Thread_isAlive(tl_jcall *c) { c->ret = vz(1); }
+static void Thread_false(tl_jcall *c) { c->ret = vz(0); }
+static void Thread_noop(tl_jcall *c) { (void)c; }
+static void Thread_sleep(tl_jcall *c)
+{
+    int64_t ms = c->args[0].j;
+    if (ms <= 0) return;
+    struct timespec d = { (time_t)(ms / 1000), (long)(ms % 1000) * 1000000l };
+    nanosleep(&d, NULL);
+}
 static void UnityPlayer_initializeGoogleAr(tl_jcall *c) { c->ret = vz(0); }
 
 /* JNIBridge builds Java proxies for interfaces C# implements. A proxy that never answers is
@@ -1260,6 +1307,7 @@ static const struct { const char *name, *super; } k_classes[] = {
     { "android/content/pm/PackageInfo", "java/lang/Object" }, { "android/view/Display", "java/lang/Object" },
     { "android/view/WindowManager", "java/lang/Object" }, { "android/view/Window", "java/lang/Object" },
     { "android/os/Looper", "java/lang/Object" }, { "android/os/Handler", "java/lang/Object" },
+    { "java/lang/Thread", "java/lang/Object" },
     { "android/os/Build", "java/lang/Object" }, { "android/os/Build$VERSION", "java/lang/Object" },
     { "android/os/Environment", "java/lang/Object" }, { "android/os/Process", "java/lang/Object" },
     { "android/content/SharedPreferences", "java/lang/Object" }, { "android/content/Intent", "java/lang/Object" },
@@ -1334,6 +1382,15 @@ static const tl_jhle k_hle[] = {
     M("java/lang/System", "getProperty", "(Ljava/lang/String;)Ljava/lang/String;", System_getProperty),
     M("java/lang/System", "currentTimeMillis", "()J", System_currentTimeMillis),
     M("java/lang/System", "nanoTime", "()J", System_nanoTime),
+    M("java/lang/Thread", "currentThread", "()Ljava/lang/Thread;", Thread_current),
+    M("java/lang/Thread", "setName", "(Ljava/lang/String;)V", Thread_setName),
+    M("java/lang/Thread", "getName", "()Ljava/lang/String;", Thread_getName),
+    M("java/lang/Thread", "getId", "()J", Thread_getId),
+    M("java/lang/Thread", "getPriority", "()I", Thread_getPriority), M("java/lang/Thread", "setPriority", "(I)V", Thread_noop),
+    M("java/lang/Thread", "isAlive", "()Z", Thread_isAlive), M("java/lang/Thread", "isDaemon", "()Z", Thread_false),
+    M("java/lang/Thread", "setDaemon", "(Z)V", Thread_noop), M("java/lang/Thread", "interrupt", "()V", Thread_noop),
+    M("java/lang/Thread", "isInterrupted", "()Z", Thread_false), M("java/lang/Thread", "interrupted", "()Z", Thread_false),
+    M("java/lang/Thread", "sleep", "(J)V", Thread_sleep),
     M("java/io/File", "<init>", "(Ljava/lang/String;)V", File_init_s),
     M("java/io/File", "<init>", "(Ljava/io/File;Ljava/lang/String;)V", File_init_fs),
     M("java/io/File", "getPath", "()Ljava/lang/String;", File_getPath),

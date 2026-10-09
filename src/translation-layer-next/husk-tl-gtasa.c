@@ -131,14 +131,6 @@ static void NV_get(tl_jcall *c) { const char *k = Str(c->args[0].l), *v = nv_val
 static void NV_set(tl_jcall *c) { tl_log_line("gta: NvUtil.setAppLocalValue(%s, %s)", Str(c->args[0].l), Str(c->args[1].l)); }
 static void NV_param(tl_jcall *c) { tl_log_line("gta: NvUtil.getParameter(%s)", Str(c->args[0].l)); c->ret = vl(NULL); }
 
-/* java.lang.Thread.currentThread().setName(...): the library names the threads it starts. */
-static jobj *g_thread;
-static void T_current(tl_jcall *c)
-{
-    if (!g_thread) g_thread = tl_jni_new_object(tl_jni_class("java/lang/Thread"));
-    c->ret = vl(tl_jni_ref(g_thread));
-}
-
 #define M_(c, n, s, f) { c, n, s, f }
 static const tl_jhle k_hle[] = {
     M_(CLS_SVC, "getAppVersion", "()Ljava/lang/String;", S_appVersion),
@@ -182,8 +174,6 @@ static const tl_jhle k_hle[] = {
     M_("com/nvidia/devtech/NvUtil", "getAppLocalValue", "(Ljava/lang/String;)Ljava/lang/String;", NV_get),
     M_("com/nvidia/devtech/NvUtil", "setAppLocalValue", "(Ljava/lang/String;Ljava/lang/String;)V", NV_set),
     M_("com/nvidia/devtech/NvUtil", "getParameter", "(Ljava/lang/String;)Ljava/lang/String;", NV_param),
-    M_("java/lang/Thread", "currentThread", "()Ljava/lang/Thread;", T_current),
-    M_("java/lang/Thread", "setName", "(Ljava/lang/String;)V", S_void),
     { NULL, NULL, NULL, NULL }
 };
 

@@ -288,7 +288,9 @@ static atomic_int g_frame_hz = 60;
 void husk_tl_set_frame_rate(int hz)
 {
     int v = hz > 60 ? 120 : 60;
-    if (atomic_exchange(&g_frame_hz, v) != v || !atomic_load(&E.presented)) tl_log_line("display: games are held to %d Hz", v);
+    static atomic_bool said;
+    /* Said the first time and when it changes: the app sets it each time the game's screen is drawn again. */
+    if (atomic_exchange(&g_frame_hz, v) != v || !atomic_exchange(&said, true)) tl_log_line("display: games are held to %d Hz", v);
 }
 int tl_frame_hz(void) { return atomic_load(&g_frame_hz); }
 
