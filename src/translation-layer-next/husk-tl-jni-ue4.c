@@ -190,11 +190,80 @@ extern bool tl_pad_connected(int slot);
 static void GA_gamepad(tl_jcall *c) { c->ret = vz(tl_pad_connected(0)); }
 static void GA_listInputDevices(tl_jcall *c) { c->ret = vl(tl_jni_new_string("")); }
 static void GA_isOBBInAPK(tl_jcall *c) { c->ret = vz(0); }
+/*
+ * AndroidThunkJava_SetDesiredViewSize: the engine draws at its content scale factor (r.MobileContentScaleFactor), smaller than the screen, and
+ * GameActivity has the SurfaceView's buffers that size (SurfaceHolder.setFixedSize), which Android scales up to the view. Given a window of the
+ * screen's size, OpenGL's picture would sit in its bottom-left corner. With Vulkan, MoltenVK sizes the frames from the swapchain and the
+ * layer already scales them.
+ */
+bool tl_egl_draws_on_window(void);
+void tl_nwindow_set_buffer_size(int w, int h);
+static void GA_desiredViewSize(tl_jcall *c)
+{
+    int w = c->args[0].i, h = c->args[1].i;
+    bool gl = tl_egl_draws_on_window();
+    tl_log_line("ue4: the engine draws at %dx%d%s", w, h, gl ? "; the window's frames are made that size and scaled up to the screen" : "");
+    if (gl) tl_nwindow_set_buffer_size(w, h);
+}
 static void GA_boolObj(tl_jcall *c)                                            /* java.lang.Boolean true */
 {
     jobj *b = tl_jni_new_object(tl_jni_class("java/lang/Boolean"));
     jvalue v = vz(1); tl_jni_set_field(b, "value", "Z", v);
     c->ret = vl(b);
+}
+
+/*
+ * com.epicgames.unreal.GooglePlayGamesWrapper (Little Nightmares): Google Play Games, which this device does not have. Each request is answered as the
+ * class answers it on a phone that is not signed in. PostLogin's sign-in check fails, so the saved games (snapshots) are never loaded: querying, loading
+ * and writing them fail at once, inside the call. A sign-in, the player's identity, achievements and leaderboards fail when their task does. The engine
+ * runs its online requests one after another, so one left unanswered holds up every later one: QuerySnapshots, unanswered, kept the game at "checking
+ * for downloadable content" for good.
+ */
+#define GPGW "com/epicgames/unreal/GooglePlayGamesWrapper"
+static void *gpgw_native(const char *name)
+{
+    void *fn = tl_jni_native(GPGW, name, NULL);
+    char sym[160];
+    snprintf(sym, sizeof(sym), "Java_com_epicgames_unreal_GooglePlayGamesWrapper_%s", name);
+    if (!fn) fn = tl_ld_sym(NULL, sym);
+    if (!fn) tl_log_line("ue4: Google Play Games: %s is not in the game's libraries", sym);
+    return fn;
+}
+static void gpgw_said(const char *request, const char *answer)
+{
+    tl_log_line("ue4: Google Play Games: %s -> %s (not signed in)", request, answer);
+}
+/* native(long request) */
+static void gpgw_fail(tl_jcall *c, const char *request, const char *native)
+{
+    gpgw_said(request, native);
+    void (*fn)(void *, void *, int64_t) = (void (*)(void *, void *, int64_t))gpgw_native(native);
+    if (fn) fn(tl_jni_env(), tl_jni_class_object(GPGW), c->args[0].j);
+}
+static void GPGW_nothing(tl_jcall *c) { (void)c; }
+static void GPGW_querySnapshots(tl_jcall *c) { gpgw_fail(c, "QuerySnapshots", "nativeQuerySnapshotsFailure"); }
+static void GPGW_loadSnapshot(tl_jcall *c) { gpgw_fail(c, "LoadSnapshot", "nativeLoadSnapshotFailure"); }
+static void GPGW_writeSnapshot(tl_jcall *c) { gpgw_fail(c, "WriteSnapshot", "nativeWriteSnapshotFailure"); }
+static void GPGW_login(tl_jcall *c) { gpgw_fail(c, "Login", "nativeLoginFailed"); }
+static void GPGW_identity(tl_jcall *c) { gpgw_fail(c, "RequestIdentityData", "nativeLoginFailed"); }
+static void GPGW_queryAchievements(tl_jcall *c) { gpgw_fail(c, "QueryAchievements", "nativeQueryAchievementsFailed"); }
+static void GPGW_leaderboardScore(tl_jcall *c) { gpgw_fail(c, "RequestPlayerLeaderboardScore", "nativeLeaderboardRequestFailed"); }
+/* nativeWriteAchievementsCompleted(long request, String[] written): none were */
+static void GPGW_writeAchievements(tl_jcall *c)
+{
+    gpgw_said("WriteAchievements", "nativeWriteAchievementsCompleted, none written");
+    void (*fn)(void *, void *, int64_t, void *) = (void (*)(void *, void *, int64_t, void *))gpgw_native("nativeWriteAchievementsCompleted");
+    if (!fn) return;
+    jobj *none = tl_jni_new_obj_array(tl_jni_class("java/lang/String"), 0);
+    fn(tl_jni_env(), tl_jni_class_object(GPGW), c->args[0].j, none);
+    tl_jni_unref(none);
+}
+/* nativeFlushLeaderboardsCompleted(long request, boolean all written): not */
+static void GPGW_submitScores(tl_jcall *c)
+{
+    gpgw_said("SubmitLeaderboardsScores", "nativeFlushLeaderboardsCompleted(false)");
+    void (*fn)(void *, void *, int64_t, uint8_t) = (void (*)(void *, void *, int64_t, uint8_t))gpgw_native("nativeFlushLeaderboardsCompleted");
+    if (fn) fn(tl_jni_env(), tl_jni_class_object(GPGW), c->args[0].j, 0);
 }
 
 #define M_(c, n, s, f) { c, n, s, f }
@@ -229,6 +298,7 @@ static const tl_jhle k_hle[] = {
     M_("dalvik/system/PathClassLoader", "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;", CL_findClass),
     M_(CLS, "getAppPackageName", "()Ljava/lang/String;", GA_packageName),
     M_(CLS, "isOBBInAPK", "()Z", GA_isOBBInAPK),
+    M_(CLS, "AndroidThunkJava_SetDesiredViewSize", "(II)V", GA_desiredViewSize),
     M_(CLS, "isStandaloneMode", "()Ljava/lang/Boolean;", GA_boolObj),
     M_(CLS, "isValidGameActivity", "()Ljava/lang/Boolean;", GA_boolObj),
     M_(CLS, "AndroidThunkJava_GetCommandLine", "()Ljava/lang/String;", GA_commandLine),
@@ -253,6 +323,20 @@ static const tl_jhle k_hle[] = {
     M_(CLS, "AndroidThunkJava_IapIsAllowedToMakePurchases", "()Z", GA_false),
     M_(CLS, "AndroidThunkJava_GooglePAD_Available", "()Z", GA_false),
     M_(CLS, "AndroidThunkJava_IsAllowedRemoteNotifications", "()Z", GA_false),
+    M_(GPGW, "Initialize", "(Landroid/content/Context;)V", GPGW_nothing),
+    M_(GPGW, "PostLogin", "(Landroid/app/Activity;)V", GPGW_nothing),
+    M_(GPGW, "InitSnapshots", "(Landroid/app/Activity;)V", GPGW_nothing),
+    M_(GPGW, "ShowAchievementsUI", "(Landroid/app/Activity;)V", GPGW_nothing),
+    M_(GPGW, "ShowLeaderboardUI", "(Landroid/app/Activity;Ljava/lang/String;)V", GPGW_nothing),
+    M_(GPGW, "QuerySnapshots", "(JLandroid/app/Activity;)V", GPGW_querySnapshots),
+    M_(GPGW, "LoadSnapshot", "(JLandroid/app/Activity;Ljava/lang/String;)V", GPGW_loadSnapshot),
+    M_(GPGW, "WriteSnapshot", "(JLandroid/app/Activity;Ljava/lang/String;[B)V", GPGW_writeSnapshot),
+    M_(GPGW, "Login", "(JLandroid/app/Activity;Ljava/lang/String;Z)V", GPGW_login),
+    M_(GPGW, "RequestIdentityData", "(JLandroid/app/Activity;Lcom/epicgames/unreal/GooglePlayGamesWrapper$AuthCodeSettings;)V", GPGW_identity),
+    M_(GPGW, "QueryAchievements", "(JLandroid/app/Activity;)V", GPGW_queryAchievements),
+    M_(GPGW, "WriteAchievements", "(JLandroid/app/Activity;[Ljava/lang/String;[I[I)V", GPGW_writeAchievements),
+    M_(GPGW, "RequestPlayerLeaderboardScore", "(JLandroid/app/Activity;Ljava/lang/String;)V", GPGW_leaderboardScore),
+    M_(GPGW, "SubmitLeaderboardsScores", "(JLandroid/app/Activity;[Ljava/lang/String;[J)V", GPGW_submitScores),
     { NULL, NULL, NULL, NULL }
 };
 

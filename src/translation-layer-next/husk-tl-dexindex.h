@@ -41,6 +41,8 @@ bool tl_dexidx_find_method_lenient(const char *cls, const char *name, const char
 
 /* The methods `cls` declares, as "name(sig)R, name(sig)R, ..." (cut short to fit). Returns how many were written. */
 int tl_dexidx_methods(const char *cls, char *out, size_t n);
+/* Likewise its native methods: the calls its Java code makes into the game's libraries. */
+int tl_dexidx_natives(const char *cls, char *out, size_t n);
 
 #ifdef __cplusplus
 }

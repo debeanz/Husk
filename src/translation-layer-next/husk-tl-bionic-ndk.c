@@ -666,6 +666,14 @@ void *tl_nwindow_get(void) { atomic_fetch_add(&g_window.refs, 1); return &g_wind
 void *tl_nwindow_native(void *window) { return window ? ((tl_nwindow *)window)->layer : NULL; }
 int tl_nwindow_width(void *window) { return window ? ((tl_nwindow *)window)->width : 0; }
 int tl_nwindow_height(void *window) { return window ? ((tl_nwindow *)window)->height : 0; }
+/*
+ * A game that draws its frames smaller than its window (Unreal at its content scale factor) asks Android to scale them up to
+ * it: the app makes the window's layer that many pixels, scaled onto the same rectangle. The window still reports the size
+ * it was given, which is what touches are measured in. 0x0 goes back to the window's size.
+ */
+static void (*g_buffer_size_handler)(int width, int height);
+void husk_tl_set_buffer_size_handler(void (*handler)(int width, int height)) { g_buffer_size_handler = handler; }
+void tl_nwindow_set_buffer_size(int w, int h) { if (g_buffer_size_handler) g_buffer_size_handler(w, h); }
 
 static void *b_ANativeWindow_fromSurface(void *env, void *surface)
 {
@@ -688,7 +696,10 @@ static int b_ANativeWindow_getHeight(tl_nwindow *w) { return w ? w->height : 0; 
 static int b_ANativeWindow_getFormat(tl_nwindow *w) { return w ? w->format : 0; }
 static int b_ANativeWindow_setBuffersGeometry(tl_nwindow *w, int width, int height, int format)
 {
-    (void)width; (void)height; (void)format; (void)w;
+    (void)format;
+    static atomic_bool said;
+    if (w == &g_window && width > 0 && height > 0 && (width != w->width || height != w->height) && !atomic_exchange(&said, true))
+        tl_log_line("ndk: the game asks for %dx%d frames on its %dx%d window (drawn at the window's size)", width, height, w->width, w->height);
     return 0;
 }
 static void *b_ANativeWindow_toSurface(void *env, void *w) { (void)env; (void)w; return NULL; }

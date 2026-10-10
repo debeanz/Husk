@@ -4,6 +4,7 @@
 
 #include <pthread.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,6 +13,7 @@
 
 #include "husk-tl-bionic.h"
 #include "husk-tl-dexindex.h"
+#include "husk-tl-ld.h"
 #include "husk-tl-va.h"
 
 /* ---------------------------------------------------------------- types */
@@ -26,6 +28,7 @@ typedef struct tl_jmeth {
     char retk;                         /* kind of the return value, or V */
     bool exists;                       /* declared by something we can see */
     bool warned;
+    int replies;                       /* answers sent through the class's native methods (native_replies) */
 } tl_jmeth;
 
 typedef struct tl_jfield {
@@ -44,6 +47,7 @@ struct tl_jclass {
     tl_jfield **fields; int nfields, capf;
     jvalue *statics; int nstatics;
     struct { char *name, *sig; void *fn; } *natives; int nnatives;
+    bool natives_said;                 /* its native methods logged (natives_note) */
     tl_jclass *next;
 };
 
@@ -563,6 +567,194 @@ static void plugin_listeners(const tl_jmeth *m, const jvalue *args, bool first)
     }
 }
 
+/*
+ * The native methods a class declares are how its Java code answers the game. The first call into a class that is not implemented
+ * here lists them, once: what the game may be left waiting for.
+ */
+static void natives_note(tl_jclass *cls)
+{
+    if (cls->natives_said) return;
+    cls->natives_said = true;
+    char *list = malloc(16384);
+    if (!list) return;
+    int n = tl_dexidx_natives(cls->name, list, 16384);
+    if (n > 0) {
+        /* in lines that fit the log, broken between methods */
+        size_t len = strlen(list), at = 0;
+        while (at < len) {
+            size_t take = len - at;
+            if (take > 1500) {
+                take = 1500;
+                while (take > 0 && list[at + take] != ',') take--;
+                if (!take) take = 1500;
+            }
+            tl_log_line("jni:   %s's native methods (its calls into the game): %.*s", cls->name, (int)take, list + at);
+            at += take;
+            while (at < len && (list[at] == ',' || list[at] == ' ')) at++;
+        }
+    }
+    free(list);
+}
+
+/*
+ * A request that hands Java the native side's pointer to it (the first argument, a long) and returns nothing: Java answers through
+ * a native method of the class named for the request, with the pointer -- QuerySnapshots with nativeQuerySnapshotsFailure. Not
+ * implemented here, the game waits for that answer for good (Little Nightmares sat at "checking for downloadable content" over
+ * Google Play Games' saved games, before husk-tl-jni-ue4.c answered them). When the class declares a failure for the request, it is
+ * answered with that a moment later, as a phone without the service answers: the pointer, booleans false, numbers 0, strings and
+ * arrays empty, other objects null.
+ */
+typedef struct { void *fn; jobj *target; char cls[160], name[120], sig[300]; int64_t handle; } native_reply;
+typedef void (*native_reply_fn)(void *, void *, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                                double, double, double, double, double, double, double, double);
+
+/* A name as JNI writes it into a native's symbol: '/' as '_', and '_', ';', '[' and the rest escaped. */
+static size_t jni_mangle(char *out, size_t n, const char *s, const char *end)
+{
+    size_t k = 0;
+    for (; *s && s != end && k + 8 < n; s++) {
+        unsigned char ch = (unsigned char)*s;
+        if (ch == '/') out[k++] = '_';
+        else if (ch == '_') { out[k++] = '_'; out[k++] = '1'; }
+        else if (ch == ';') { out[k++] = '_'; out[k++] = '2'; }
+        else if (ch == '[') { out[k++] = '_'; out[k++] = '3'; }
+        else if ((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')) out[k++] = (char)ch;
+        else k += (size_t)snprintf(out + k, n - k, "_0%04x", ch);
+    }
+    out[k] = 0;
+    return k;
+}
+
+/* A native method's code: registered by a library, or exported under its JNI name (the short one, then the one with the signature). */
+static void *native_code(const char *cls, const char *name, const char *sig)
+{
+    void *fn = tl_jni_native(cls, name, sig);
+    if (fn) return fn;
+    char sym[800];
+    size_t k = (size_t)snprintf(sym, sizeof(sym), "Java_");
+    k += jni_mangle(sym + k, sizeof(sym) - k, cls, NULL);
+    sym[k++] = '_';
+    k += jni_mangle(sym + k, sizeof(sym) - k, name, NULL);
+    fn = tl_ld_sym(NULL, sym);
+    if (fn) return fn;
+    snprintf(sym + k, sizeof(sym) - k, "__");
+    jni_mangle(sym + k + 2, sizeof(sym) - k - 2, sig + 1, strchr(sig, ')'));
+    return tl_ld_sym(NULL, sym);
+}
+
+static void *native_reply_main(void *arg)
+{
+    native_reply *r = arg;
+    pthread_setname_np("husk-native-reply");
+    usleep(200000);
+    uint64_t x[6] = { 0 };
+    int nx = 0, nd = 0;
+    jobj *made[16]; int nmade = 0;
+    bool first_long = true, fits = true;
+    for (const char *p = r->sig + 1; *p && *p != ')'; ) {
+        const char *start = p;
+        while (*p == '[') p++;
+        const char *e = *p == 'L' ? strchr(p, ';') : p;
+        if (!e) { fits = false; break; }
+        uint64_t v = 0;
+        if (start != p) {
+            /* an array: empty */
+            jobj *a = p - start == 1 && *p != 'L' ? tl_jni_new_prim_array(*p, 0) : NULL;
+            if (!a) {
+                char elem[200] = "java/lang/Object";
+                if (p - start == 1) snprintf(elem, sizeof(elem), "%.*s", (int)(e - p - 1), p + 1);
+                a = tl_jni_new_obj_array(tl_jni_class(elem), 0);
+            }
+            if (nmade < 16) made[nmade++] = a;
+            v = (uint64_t)(uintptr_t)a;
+        } else if (*p == 'L') {
+            if (!strncmp(p, "Ljava/lang/String;", 18)) {
+                jobj *s = tl_jni_new_string("");
+                if (nmade < 16) made[nmade++] = s;
+                v = (uint64_t)(uintptr_t)s;
+            }
+        } else if (*p == 'J') {
+            if (first_long) v = (uint64_t)r->handle;
+            first_long = false;
+        }
+        if (start == p && (*p == 'F' || *p == 'D')) nd++;      /* zero, as every floating-point register passed is */
+        else if (nx < 6) x[nx++] = v;
+        else fits = false;
+        p = e + 1;
+    }
+    if (!fits || nd > 8) {
+        tl_log_line("jni: %s.%s%s takes more than this can pass; the game is not answered", r->cls, r->name, r->sig);
+    } else {
+        tl_log_line("jni: answering the game through %s.%s%s: the service is not on this device", r->cls, r->name, r->sig);
+        ((native_reply_fn)r->fn)(tl_jni_env(), r->target, x[0], x[1], x[2], x[3], x[4], x[5], 0, 0, 0, 0, 0, 0, 0, 0);
+        if (tl_jni_pending()) tl_jni_clear();
+        tl_log_line("jni: %s.%s returned", r->cls, r->name);
+    }
+    for (int i = 0; i < nmade; i++) tl_jni_unref(made[i]);
+    if (r->target && r->target->kind != TL_K_CLASS) tl_jni_unref(r->target);
+    free(r);
+    return NULL;
+}
+
+static bool is_failure_name(const char *name)
+{
+    static const char *const words[] = { "Fail", "Error" };
+    for (size_t i = 0; i < sizeof(words) / sizeof(words[0]); i++) if (strstr(name, words[i])) return true;
+    return false;
+}
+
+/* At most this many answers for one request; a request with no answer to give is not looked at again. */
+enum { REPLIES_MAX = 20 };
+static void native_replies(jobj *self, tl_jmeth *m, const jvalue *args)
+{
+    if (!args || m->nargs < 1 || m->argk[0] != 'J' || m->retk != 'V' || m->replies >= REPLIES_MAX) return;
+    char *list = malloc(16384);
+    if (!list) return;
+    char best[120] = "", best_sig[300] = "";
+    if (tl_dexidx_natives(m->cls->name, list, 16384) > 0) {
+        for (char *p = list; *p; ) {
+            char *end = strstr(p, ", ");
+            if (end) *end = 0;
+            char *paren = strchr(p, '(');
+            if (paren && paren - p < (ptrdiff_t)sizeof(best) && !strncmp(paren, "(J", 2)) {
+                char name[120]; snprintf(name, sizeof(name), "%.*s", (int)(paren - p), p);
+                if (strstr(name, m->name) && is_failure_name(name) && !best[0]) {
+                    snprintf(best, sizeof(best), "%s", name);
+                    snprintf(best_sig, sizeof(best_sig), "%s", paren);
+                }
+            }
+            if (!end) break;
+            p = end + 2;
+        }
+    }
+    free(list);
+    if (!best[0]) { m->replies = REPLIES_MAX; return; }
+    void *fn = native_code(m->cls->name, best, best_sig);
+    if (!fn) {
+        tl_log_line("jni:   its answer, %s%s, is not in the game's libraries", best, best_sig);
+        m->replies = REPLIES_MAX;
+        return;
+    }
+    bool is_static = true;
+    tl_dexidx_declares_method(m->cls->name, best, best_sig, &is_static);
+    native_reply *r = calloc(1, sizeof(*r));
+    if (!r) return;
+    m->replies++;
+    r->fn = fn;
+    r->handle = args[0].j;
+    r->target = is_static || !self ? tl_jni_class_object(m->cls->name) : tl_jni_ref(self);     /* a class is never freed */
+    snprintf(r->cls, sizeof(r->cls), "%s", m->cls->name);
+    snprintf(r->name, sizeof(r->name), "%s", best);
+    snprintf(r->sig, sizeof(r->sig), "%s", best_sig);
+    pthread_attr_t at;
+    pthread_attr_init(&at);
+    pthread_attr_setstacksize(&at, 4u << 20);
+    pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    pthread_t t;
+    if (pthread_create(&t, &at, native_reply_main, r) != 0) { if (r->target && r->target->kind != TL_K_CLASS) tl_jni_unref(r->target); free(r); }
+    pthread_attr_destroy(&at);
+}
+
 static jvalue invoke(jobj *self, tl_jmeth *m, bool nonvirtual, const jvalue *args)
 {
     tl_jcall c = { .self = self, .cls = m->cls, .args = args };
@@ -610,7 +802,9 @@ static jvalue invoke(jobj *self, tl_jmeth *m, bool nonvirtual, const jvalue *arg
         m->warned = true;
         tl_log_line("jni: UNIMPLEMENTED Java method %s.%s%s (returning zero)", m->cls->name, m->name, m->sig);
     }
+    if (first) natives_note(m->cls);
     plugin_listeners(m, args, first);
+    native_replies(self, m, args);
     recent_note(m, args, g_zero, false);
     return g_zero;
 }

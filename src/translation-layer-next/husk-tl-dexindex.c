@@ -267,7 +267,8 @@ bool tl_dexidx_find_method_lenient(const char *cls, const char *name, const char
     return best >= 0;
 }
 
-int tl_dexidx_methods(const char *cls, char *out, size_t n)
+/* The methods a class declares whose access flags include all of `need`, as "name(sig)" separated by ", ". */
+static int list_methods(const char *cls, uint32_t need, char *out, size_t n)
 {
     if (n) out[0] = 0;
     const cls_ref *r = lookup(cls);
@@ -283,9 +284,10 @@ int tl_dexidx_methods(const char *cls, char *out, size_t n)
         uint32_t idx = 0;
         for (uint32_t i = 0; i < counts[group]; i++) {
             idx += uleb(x, &o);
-            uleb(x, &o);                                /* access flags */
+            uint32_t flags = uleb(x, &o);
             if (group < 2) continue;
             uleb(x, &o);                                /* code_off */
+            if ((flags & need) != need) continue;
             size_t mo = x->meth_off + 8u * idx;
             char ps[512]; proto_sig(x, u16(x, mo + 2), ps, sizeof(ps));
             int w = snprintf(out + k, n - k, "%s%s%s", found ? ", " : "", str_of(x, u32(x, mo + 4)), ps);
@@ -295,6 +297,9 @@ int tl_dexidx_methods(const char *cls, char *out, size_t n)
     }
     return found;
 }
+
+int tl_dexidx_methods(const char *cls, char *out, size_t n) { return list_methods(cls, 0, out, n); }
+int tl_dexidx_natives(const char *cls, char *out, size_t n) { return list_methods(cls, 0x100 /* ACC_NATIVE */, out, n); }
 
 bool tl_dexidx_declares_method(const char *cls, const char *name, const char *sig, bool *st) { return scan_members(cls, true, name, sig, st, NULL, 0); }
 bool tl_dexidx_declares_field(const char *cls, const char *name, const char *sig, bool *st) { return scan_members(cls, false, name, sig, st, NULL, 0); }

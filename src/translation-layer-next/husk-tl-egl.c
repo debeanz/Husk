@@ -221,6 +221,8 @@ static EGLint w_eglGetError(void) { return E.ready ? a_eglGetError() : 0x3001; }
 static bool g_offscreen_windows;
 /* A game that draws with Vulkan on the window's layer still makes an OpenGL ES context first, to read what the device offers. The layer is MoltenVK's, so ANGLE gets a buffer instead. */
 void tl_egl_offscreen_windows(bool on) { g_offscreen_windows = on; }
+/* Whether a game's window is ANGLE's to draw on: not Vulkan's, and not frames saved to files. */
+bool tl_egl_draws_on_window(void) { return !g_offscreen_windows && !E.frame_dir[0]; }
 static EGLSurface w_eglCreateWindowSurface(EGLDisplay d, EGLConfig cfg, void *win, const EGLint *at)
 {
     if (E.frame_dir[0] || g_offscreen_windows) {

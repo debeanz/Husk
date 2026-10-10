@@ -96,6 +96,8 @@ final class TLUnityUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
             TLUnityUIView.cocosView = self
             TLUnityUIView.installUnityKeyboardHandler()
         }
+        TLUnityUIView.screenView = self
+        TLUnityUIView.installBufferSizeHandler()
         // The GPU is not the app's while it is in the background: stop drawing, and carry on when it returns.
         NotificationCenter.default.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { _ in
             husk_unity_set_paused(true)
@@ -172,13 +174,39 @@ final class TLUnityUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     /// surface from the layer's bounds, see the size the game was told), centred, and scaled onto the view by a transform --
     /// which, unlike a frame, can stretch one way more than the other.
     private func place(_ size: CGSize) {
+        // A game that draws its frames smaller than its size (bufferSize) has a layer of that many pixels, scaled onto the
+        // same rectangle.
+        let pixels = bufferSize ?? size
         metal.setAffineTransform(.identity)
         metal.contentsScale = 1
-        metal.bounds = CGRect(origin: .zero, size: size)
+        metal.bounds = CGRect(origin: .zero, size: pixels)
         metal.position = CGPoint(x: bounds.midX, y: bounds.midY)
         let s = scales(for: size)
-        metal.setAffineTransform(CGAffineTransform(scaleX: s.x, y: s.y))
-        if engine != .ue4 { metal.drawableSize = size }
+        metal.setAffineTransform(CGAffineTransform(scaleX: s.x * size.width / pixels.width, y: s.y * size.height / pixels.height))
+        if engine != .ue4 { metal.drawableSize = pixels }
+    }
+
+    /// The size the game draws its frames at, when it asked for one other than the size it was told: Unreal draws at a
+    /// fraction of the screen and has Android scale its frames up to the window. Touches are still in the size it was told.
+    private var bufferSize: CGSize?
+    /// The game on screen, which the game's requests for a frame size (from its own thread) are routed to.
+    nonisolated(unsafe) static weak var screenView: TLUnityUIView?
+    static func installBufferSizeHandler() {
+        husk_tl_set_buffer_size_handler { w, h in
+            DispatchQueue.main.async { TLUnityUIView.screenView?.setBufferSize(Int(w), Int(h)) }
+        }
+    }
+    private func setBufferSize(_ w: Int, _ h: Int) {
+        var size: CGSize? = w > 0 && h > 0 ? CGSize(width: w, height: h) : nil
+        if size == launchedSize { size = nil }
+        guard size != bufferSize else { return }
+        bufferSize = size
+        HuskLog.log("tl", size == nil ? "native: the game draws its frames at its full size" : "native: the game draws its frames at \(w)x\(h), scaled up to the screen")
+        guard let launched = launchedSize else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        place(launched)
+        CATransaction.commit()
     }
 
     private var firstLayout: Date?
