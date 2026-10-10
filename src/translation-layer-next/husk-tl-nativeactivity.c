@@ -365,6 +365,30 @@ static bool patch_return(tl_lib *lib, const char *symbol, unsigned value)
     return true;
 }
 
+/*
+ * An engine changed to clamp its frame rate to a range of the project's (Little Nightmares: FrameRateClampingValues, 20 to 60, in its
+ * DefaultEngine.ini) ends UEngine::GetMaxTickRate with the clamp: the upper bound's type is loaded (ldrb w8, [x19, #...]), compared with
+ * Open (cmp w8, #2), and the rate is held under the bound, with FLT_MAX standing in for no rate. The load is made "Open" (mov w8, #2):
+ * the game's own cap (t.MaxFPS) and Husk's 120 Hz hold it, as they do in an engine without the clamp.
+ */
+static void lift_tick_rate_clamp(tl_lib *lib)
+{
+    uint32_t *rx = (uint32_t *)tl_ld_sym(lib, "_ZNK7UEngine14GetMaxTickRateEfb");
+    if (!rx) return;
+    for (int i = 0; i < 200; i++) {
+        if (rx[i] == 0xD65F03C0u) break;                                   /* ret: the end */
+        if ((rx[i] & 0xFFC003FFu) != 0x39400268u || rx[i + 1] != 0x7100091Fu) continue;    /* ldrb w8, [x19, #imm]; cmp w8, #2 */
+        bool flt_max = false;
+        for (int j = i + 2; j < i + 8; j++) if (rx[j] == 0x12B01008u) flt_max = true;      /* movn w8, #0x8080, lsl #16 (FLT_MAX) */
+        if (!flt_max) continue;
+        uint32_t *rw = (uint32_t *)((uint8_t *)(rx + i) + tl_xmem_delta());
+        rw[0] = 0x52800048u;                                                /* mov w8, #2 */
+        tl_xmem_flush(rx + i, 4);
+        tl_log_line("ue4: the engine's frame rate clamp (its upper bound) is lifted: the game's own cap and Husk's %d Hz hold it", tl_frame_hz());
+        return;
+    }
+}
+
 /* The OBB the engine looks for: <package>.obb in the OBB directory, named main.<version>.<package>.obb. */
 #define OBB_VERSION 42
 
@@ -500,6 +524,7 @@ bool tl_na_start(const tl_ga_config *cfg)
          * (rhi.SyncInterval, 1 unless a game asks otherwise), whatever the screen's refresh rate. A game held to 120 Hz here stopped at 60 with its
          * own cap set to 120 (Little Nightmares: t.MaxFPS 120). With no interval the game's cap (t.MaxFPS) and Husk's 120 Hz are what hold it. */
         if (ue && !N.vulkan && tl_frame_hz() > 60) patch_return(ue, "_Z18RHIGetSyncIntervalv", 0);
+        if (ue && tl_frame_hz() > 60) lift_tick_rate_clamp(ue);
     }
     tl_log_line("ue4: libraries loaded");
     tl_ue4_watch();
