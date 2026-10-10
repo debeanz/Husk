@@ -7,6 +7,7 @@
 #define _DARWIN_C_SOURCE
 #include "husk-tl-jni.h"
 
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -223,9 +224,10 @@ static void GA_boolObj(tl_jcall *c)                                            /
 /*
  * com.epicgames.unreal.GooglePlayGamesWrapper (Little Nightmares): Google Play Games, which this device does not have. Each request is answered as the
  * class answers it on a phone that is not signed in. PostLogin's sign-in check fails, so the saved games (snapshots) are never loaded: querying, loading
- * and writing them fail at once, inside the call. A sign-in, the player's identity, achievements and leaderboards fail when their task does. The engine
- * runs its online requests one after another, so one left unanswered holds up every later one: QuerySnapshots, unanswered, kept the game at "checking
- * for downloadable content" for good.
+ * and writing them fail at once, inside the call. A sign-in, the player's identity, achievements and leaderboards fail when their Play Games task does,
+ * after the call has returned -- and must: the engine's task, once the call returns, sets itself waiting for the answer (successful = the call was made,
+ * complete = not that), so an answer given during the call was overwritten and the request never ended. Its "checking for downloadable content" screen
+ * waits for two achievement queries (CacheAchievements, CacheAchievementDescriptions), and waited for good.
  */
 #define GPGW "com/epicgames/unreal/GooglePlayGamesWrapper"
 static void *gpgw_native(const char *name)
@@ -248,30 +250,58 @@ static void gpgw_fail(tl_jcall *c, const char *request, const char *native)
     void (*fn)(void *, void *, int64_t) = (void (*)(void *, void *, int64_t))gpgw_native(native);
     if (fn) fn(tl_jni_env(), tl_jni_class_object(GPGW), c->args[0].j);
 }
+/* The answer a Play Games task gives, from another thread a moment after the request returned: native(long request), (long, false) or (long, String[0]). */
+enum { GPGW_LONG, GPGW_LONG_FALSE, GPGW_LONG_NONE };
+typedef struct { void *fn; int64_t request; int args; } gpgw_later;
+static void *gpgw_later_main(void *p)
+{
+    gpgw_later *l = p;
+    pthread_setname_np("husk-play-games");
+    usleep(100000);
+    void *env = tl_jni_env(), *cls = tl_jni_class_object(GPGW);
+    if (l->args == GPGW_LONG) ((void (*)(void *, void *, int64_t))l->fn)(env, cls, l->request);
+    else if (l->args == GPGW_LONG_FALSE) ((void (*)(void *, void *, int64_t, uint8_t))l->fn)(env, cls, l->request, 0);
+    else {
+        jobj *none = tl_jni_new_obj_array(tl_jni_class("java/lang/String"), 0);
+        ((void (*)(void *, void *, int64_t, void *))l->fn)(env, cls, l->request, none);
+        tl_jni_unref(none);
+    }
+    if (tl_jni_pending()) tl_jni_clear();
+    free(l);
+    return NULL;
+}
+static void gpgw_fail_later(tl_jcall *c, const char *request, const char *native, int args, const char *how)
+{
+    gpgw_said(request, how ? how : native);
+    void *fn = gpgw_native(native);
+    gpgw_later *l = fn ? calloc(1, sizeof(*l)) : NULL;
+    if (!l) return;
+    l->fn = fn; l->request = c->args[0].j; l->args = args;
+    pthread_attr_t at;
+    pthread_attr_init(&at);
+    pthread_attr_setstacksize(&at, 4u << 20);
+    pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    pthread_t t;
+    if (pthread_create(&t, &at, gpgw_later_main, l) != 0) free(l);
+    pthread_attr_destroy(&at);
+}
 static void GPGW_nothing(tl_jcall *c) { (void)c; }
 static void GPGW_querySnapshots(tl_jcall *c) { gpgw_fail(c, "QuerySnapshots", "nativeQuerySnapshotsFailure"); }
 static void GPGW_loadSnapshot(tl_jcall *c) { gpgw_fail(c, "LoadSnapshot", "nativeLoadSnapshotFailure"); }
 static void GPGW_writeSnapshot(tl_jcall *c) { gpgw_fail(c, "WriteSnapshot", "nativeWriteSnapshotFailure"); }
-static void GPGW_login(tl_jcall *c) { gpgw_fail(c, "Login", "nativeLoginFailed"); }
-static void GPGW_identity(tl_jcall *c) { gpgw_fail(c, "RequestIdentityData", "nativeLoginFailed"); }
-static void GPGW_queryAchievements(tl_jcall *c) { gpgw_fail(c, "QueryAchievements", "nativeQueryAchievementsFailed"); }
-static void GPGW_leaderboardScore(tl_jcall *c) { gpgw_fail(c, "RequestPlayerLeaderboardScore", "nativeLeaderboardRequestFailed"); }
+static void GPGW_login(tl_jcall *c) { gpgw_fail_later(c, "Login", "nativeLoginFailed", GPGW_LONG, NULL); }
+static void GPGW_identity(tl_jcall *c) { gpgw_fail_later(c, "RequestIdentityData", "nativeLoginFailed", GPGW_LONG, NULL); }
+static void GPGW_queryAchievements(tl_jcall *c) { gpgw_fail_later(c, "QueryAchievements", "nativeQueryAchievementsFailed", GPGW_LONG, NULL); }
+static void GPGW_leaderboardScore(tl_jcall *c) { gpgw_fail_later(c, "RequestPlayerLeaderboardScore", "nativeLeaderboardRequestFailed", GPGW_LONG, NULL); }
 /* nativeWriteAchievementsCompleted(long request, String[] written): none were */
 static void GPGW_writeAchievements(tl_jcall *c)
 {
-    gpgw_said("WriteAchievements", "nativeWriteAchievementsCompleted, none written");
-    void (*fn)(void *, void *, int64_t, void *) = (void (*)(void *, void *, int64_t, void *))gpgw_native("nativeWriteAchievementsCompleted");
-    if (!fn) return;
-    jobj *none = tl_jni_new_obj_array(tl_jni_class("java/lang/String"), 0);
-    fn(tl_jni_env(), tl_jni_class_object(GPGW), c->args[0].j, none);
-    tl_jni_unref(none);
+    gpgw_fail_later(c, "WriteAchievements", "nativeWriteAchievementsCompleted", GPGW_LONG_NONE, "nativeWriteAchievementsCompleted, none written");
 }
 /* nativeFlushLeaderboardsCompleted(long request, boolean all written): not */
 static void GPGW_submitScores(tl_jcall *c)
 {
-    gpgw_said("SubmitLeaderboardsScores", "nativeFlushLeaderboardsCompleted(false)");
-    void (*fn)(void *, void *, int64_t, uint8_t) = (void (*)(void *, void *, int64_t, uint8_t))gpgw_native("nativeFlushLeaderboardsCompleted");
-    if (fn) fn(tl_jni_env(), tl_jni_class_object(GPGW), c->args[0].j, 0);
+    gpgw_fail_later(c, "SubmitLeaderboardsScores", "nativeFlushLeaderboardsCompleted", GPGW_LONG_FALSE, "nativeFlushLeaderboardsCompleted(false)");
 }
 
 /*
