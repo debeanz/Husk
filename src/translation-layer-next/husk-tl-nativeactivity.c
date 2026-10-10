@@ -496,6 +496,10 @@ bool tl_na_start(const tl_ga_config *cfg)
         tl_lib *ue = tl_ld_find_lib("libUE4.so");
         if (ue && N.vulkan) { patch_return(ue, "_ZN12FAndroidMisc15ShouldUseVulkanEv", 1); patch_return(ue, "_ZN12FAndroidMisc17IsVulkanAvailableEv", 1); }
         if (ue && N.gl_only) { patch_return(ue, "_ZN12FAndroidMisc15ShouldUseVulkanEv", 0); patch_return(ue, "_ZN12FAndroidMisc22ShouldUseDesktopVulkanEv", 0); }
+        /* Over OpenGL ES the engine paces its frames itself, sleeping before each swap for its sync interval -- counted in sixtieths of a second
+         * (rhi.SyncInterval, 1 unless a game asks otherwise), whatever the screen's refresh rate. A game held to 120 Hz here stopped at 60 with its
+         * own cap set to 120 (Little Nightmares: t.MaxFPS 120). With no interval the game's cap (t.MaxFPS) and Husk's 120 Hz are what hold it. */
+        if (ue && !N.vulkan && tl_frame_hz() > 60) patch_return(ue, "_Z18RHIGetSyncIntervalv", 0);
     }
     tl_log_line("ue4: libraries loaded");
     tl_ue4_watch();
