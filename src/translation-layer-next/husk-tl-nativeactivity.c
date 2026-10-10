@@ -30,6 +30,7 @@ void tl_set_data_dir(const char *dir);
 void tl_nwindow_configure(int w, int h, void *layer);
 void *tl_nwindow_get(void);
 void tl_ue4_hle_install(const char *pkg, const char *apk, const char *data, const char *ext_files);
+void tl_ue4_watch(void);
 void tl_ue4_set_activity(jobj *activity);
 const char *tl_ue4_meta(const char *key);
 
@@ -326,6 +327,7 @@ bool tl_na_start(const tl_ga_config *cfg)
         if (ue && N.gl_only) { patch_return(ue, "_ZN12FAndroidMisc15ShouldUseVulkanEv", 0); patch_return(ue, "_ZN12FAndroidMisc22ShouldUseDesktopVulkanEv", 0); }
     }
     tl_log_line("ue4: libraries loaded");
+    tl_ue4_watch();
     setenv("TL_PAD_DPAD", "keys", 0);          /* the D-pad as DPAD_* keys, which the engine maps like a stick's arrows */
     static const tl_pad_sink sink = { na_pad_key, na_pad_motion };
     tl_pad_set_sink(&sink);

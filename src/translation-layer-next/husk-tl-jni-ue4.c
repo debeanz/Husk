@@ -7,7 +7,9 @@
 #define _DARWIN_C_SOURCE
 #include "husk-tl-jni.h"
 
+#include <stdatomic.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -187,7 +189,13 @@ static void GA_orientation(tl_jcall *c) { c->ret = vi(1); }                    /
 static void GA_netType(tl_jcall *c) { c->ret = vi(1); }                        /* Wi-Fi */
 static void GA_netTime(tl_jcall *c) { c->ret = vj(0); }
 extern bool tl_pad_connected(int slot);
-static void GA_gamepad(tl_jcall *c) { c->ret = vz(tl_pad_connected(0)); }
+/* Any controller: the app gives each its own slot, and the first one connected need not be in the first. */
+static void GA_gamepad(tl_jcall *c)
+{
+    bool any = false;
+    for (int s = 0; s < 4 && !any; s++) any = tl_pad_connected(s);
+    c->ret = vz(any);
+}
 static void GA_listInputDevices(tl_jcall *c) { c->ret = vl(tl_jni_new_string("")); }
 static void GA_isOBBInAPK(tl_jcall *c) { c->ret = vz(0); }
 /*
@@ -266,6 +274,174 @@ static void GPGW_submitScores(tl_jcall *c)
     if (fn) fn(tl_jni_env(), tl_jni_class_object(GPGW), c->args[0].j, 0);
 }
 
+/*
+ * AndroidThunkJava_GetInputDeviceInfo: what the engine learns of an input device it has not seen, before it takes the device's events. Java answers
+ * from InputDevice (its descriptor, vendor and product, controller number and name), and for a device it cannot find, "Unknown"; never nothing. Told
+ * nothing, the engine marks the device invalid: a controller's buttons and sticks went nowhere, and the game was never told one was connected.
+ */
+jobj *tl_input_device_object(int id);
+static void GA_inputDeviceInfo(tl_jcall *c)
+{
+    int id = c->args[0].i;
+    jobj *dev = tl_input_device_object(id);
+    jobj *info = tl_jni_new_object(tl_jni_class("com/epicgames/ue4/GameActivity$InputDeviceInfo"));
+    jvalue vendor = vi(0), product = vi(0), controller = vi(-1), name, descriptor;
+    name.j = 0; descriptor.j = 0;
+    if (dev) {
+        vendor = tl_jni_call(dev, "getVendorId", "()I", NULL);
+        product = tl_jni_call(dev, "getProductId", "()I", NULL);
+        controller = tl_jni_call(dev, "getControllerNumber", "()I", NULL);
+        name = tl_jni_call(dev, "getName", "()Ljava/lang/String;", NULL);
+        descriptor = tl_jni_call(dev, "getDescriptor", "()Ljava/lang/String;", NULL);
+        tl_jni_unref(dev);
+    }
+    if (!name.l) name.l = tl_jni_new_string("Unknown");
+    if (!descriptor.l) descriptor.l = tl_jni_new_string("Unknown");
+    tl_jni_set_field(info, "deviceId", "I", vi(id));
+    tl_jni_set_field(info, "vendorId", "I", vendor);
+    tl_jni_set_field(info, "productId", "I", product);
+    tl_jni_set_field(info, "controllerId", "I", controller);
+    tl_jni_set_field(info, "name", "Ljava/lang/String;", name);
+    tl_jni_set_field(info, "descriptor", "Ljava/lang/String;", descriptor);
+    static uint64_t said;
+    if (id >= 0 && id < 64 && !(said & (1ull << id))) {
+        said |= 1ull << id;
+        tl_log_line("ue4: input device %d is \"%s\" (%04x:%04x, controller %d)", id, S(name.l), vendor.i, product.i, controller.i);
+    }
+    c->ret = vl(info);
+}
+
+/*
+ * What a game's start-up is doing, for a game that stops on a screen: the functions of its own that its menus and start-up go through, logged as they
+ * are called (the first few calls, then the 10th, 100th...; a state as it changes; a menu with the class of the widget pushed or popped). Each is
+ * watched if the game has it -- these are Little Nightmares': its "checking for downloadable content" screen, its save slots, its user and controller
+ * discovery and its DLC system.
+ */
+enum { TW_CALL, TW_INT1, TW_INT3, TW_WIDGET1, TW_TOP };
+static const struct { const char *sym, *label; int kind; } k_watch[] = {
+    { "_ZN17UAtlasMenuManager4PushEP16UAtlasMenuWidgetbbb19EAtlasViewportState", "menu: push", TW_WIDGET1 },
+    { "_ZN17UAtlasMenuManager14PushWithFadingEP16UAtlasMenuWidgetbbb19EAtlasViewportState", "menu: push (fading)", TW_WIDGET1 },
+    { "_ZN17UAtlasMenuManager3PopEv", "menu: pop", TW_TOP },
+    { "_ZN17UAtlasMenuManager13PopWithFadingEv", "menu: pop (fading)", TW_TOP },
+    { "_ZN17UAtlasMenuManager5ClearEv", "menu: clear", TW_TOP },
+    { "_ZN17UAtlasMenuManager15ClearWithFadingEv", "menu: clear (fading)", TW_TOP },
+    { "_ZN21UAtlasComplianceLayer30CheckingForContentWidgetPoppedEv", "compliance: the checking-for-content widget was popped", TW_CALL },
+    { "_ZN21UAtlasComplianceLayer10InitializeEP18AAtlasBaseGameMode", "compliance: Initialize", TW_CALL },
+    { "_ZN28UAtlasAndroidComplianceLayer20DiscoverPlatformUserEi", "compliance: DiscoverPlatformUser", TW_INT1 },
+    { "_ZN21UAtlasComplianceLayer21SetUserDiscoveryStateE24EAtlasUserDiscoveryState", "compliance: user discovery state", TW_INT1 },
+    { "_ZN21UAtlasComplianceLayer22SetMainControllerStateE25EAtlasMainControllerState", "compliance: main controller state", TW_INT1 },
+    { "_ZN21UAtlasComplianceLayer29RequestMainControllerIdChangeEi", "compliance: main controller id", TW_INT1 },
+    { "_ZN21UAtlasComplianceLayer45SetCurrentProcessedControllerAsMainControllerEv", "compliance: SetCurrentProcessedControllerAsMainController", TW_CALL },
+    { "_ZN28UAtlasAndroidComplianceLayer29OnControllerConnectionChangedEbii", "compliance: controller connection (connected, user, controller)", TW_INT3 },
+    { "_ZN28UAtlasAndroidComplianceLayer32PushControllerDisconnectedWidgetEv", "compliance: PushControllerDisconnectedWidget", TW_CALL },
+    { "_ZN28UAtlasAndroidComplianceLayer23MenuManagerPoppedWidgetEP16UAtlasMenuWidget", "compliance: MenuManagerPoppedWidget", TW_WIDGET1 },
+    { "_ZN21UAtlasComplianceLayer19IsStateSharePendingERbR16EAtlasSaveTargetR5FName", "compliance: IsStateSharePending", TW_CALL },
+    { "_ZNK21UAtlasComplianceLayer16IsUserDiscoveredEv", "compliance: IsUserDiscovered", TW_CALL },
+    { "_ZN22UAtlasSaveSlotsManager28LoadCurrentUserIndexToMemoryEv", "saves: LoadCurrentUserIndexToMemory", TW_CALL },
+    { "_ZN22UAtlasSaveSlotsManager18SetActiveUserIndexEib", "saves: active user index", TW_INT1 },
+    { "_ZN22UAtlasSaveSlotsManager19EnqueueStateRequestEP22AtlasStateAsyncRequest", "saves: EnqueueStateRequest", TW_CALL },
+    { "_ZN22UAtlasSaveSlotsManager16OnLoadStatesDoneEP22AtlasStateAsyncRequest", "saves: OnLoadStatesDone", TW_CALL },
+    { "_ZN12UGameHelpers19CheckForEnabledDLCsEP7UObject", "dlc: CheckForEnabledDLCs", TW_CALL },
+    { "_ZN12UGameHelpers12IsDLCEnabledEP7UObject9EAtlasDLC", "dlc: IsDLCEnabled", TW_CALL },
+    { "_ZN19AtlasDLCSystemEmpty5StartEv", "dlc: the (empty) DLC system starts", TW_CALL },
+    { "_ZN18UAtlasGameInstance17StartGameInstanceEv", "game instance: StartGameInstance", TW_CALL },
+    { "_ZN18UAtlasGameInstance18CreatePreloadTasksEP6UClassRK7FStringi", "game instance: CreatePreloadTasks", TW_CALL },
+    { "_ZN18UAtlasGameInstance16StartPreLoadTaskEib", "game instance: StartPreLoadTask", TW_INT3 },
+    { "_ZN18UAtlasGameInstance17PreloadedCallbackEP12FPreloadTask", "game instance: PreloadedCallback", TW_CALL },
+};
+#define WATCHED (sizeof(k_watch) / sizeof(k_watch[0]))
+static struct { atomic_uint calls, lines; int64_t last; } g_watch[WATCHED];
+
+/* An FName as text, and the class of an object (UObjectBase: its class at +0x10, a class's name at +0x18). */
+static void ue_fname(const void *fname, char *out, size_t n)
+{
+    static void (*to_string)(const void *, void *);
+    static void (*mem_free)(void *);
+    if (!to_string) {
+        tl_lib *ue = tl_ld_find_lib("libUE4.so");
+        mem_free = ue ? (void (*)(void *))tl_ld_sym(ue, "_ZN7FMemory4FreeEPv") : NULL;
+        to_string = ue ? (void (*)(const void *, void *))tl_ld_sym(ue, "_ZNK5FName8ToStringER7FString") : NULL;
+    }
+    snprintf(out, n, "?");
+    if (!fname || !to_string) return;
+    struct { uint16_t *data; int32_t num, max; } s = { NULL, 0, 0 };
+    to_string(fname, &s);
+    size_t k = 0;
+    for (int32_t i = 0; s.data && i < s.num && s.data[i] && k + 1 < n; i++) out[k++] = s.data[i] < 0x80 ? (char)s.data[i] : '?';
+    out[k] = 0;
+    if (s.data && mem_free) mem_free(s.data);
+}
+static void ue_class_of(const void *obj, char *out, size_t n)
+{
+    if (!obj) { snprintf(out, n, "nothing"); return; }
+    const uint8_t *cls = *(const uint8_t *const *)((const uint8_t *)obj + 0x10);
+    ue_fname(cls ? cls + 0x18 : NULL, out, n);
+}
+
+static void watch_hit(unsigned i, uint64_t *regs)
+{
+    unsigned call = atomic_fetch_add(&g_watch[i].calls, 1) + 1;
+    if (atomic_load(&g_watch[i].lines) >= 60) return;
+    char what[200] = "";
+    switch (k_watch[i].kind) {
+    case TW_INT1:
+        if (call > 1 && g_watch[i].last == (int64_t)(int32_t)regs[1]) return;
+        g_watch[i].last = (int32_t)regs[1];
+        snprintf(what, sizeof(what), " %d", (int)regs[1]);
+        break;
+    case TW_INT3:
+        snprintf(what, sizeof(what), " (%d, %d, %d)", (int)regs[1], (int)regs[2], (int)regs[3]);
+        break;
+    case TW_WIDGET1: {
+        char cls[120]; ue_class_of((const void *)(uintptr_t)regs[1], cls, sizeof(cls));
+        snprintf(what, sizeof(what), " %s", cls);
+        break;
+    }
+    case TW_TOP: {
+        static void *(*top)(void *);
+        if (!top) { tl_lib *ue = tl_ld_find_lib("libUE4.so"); top = ue ? (void *(*)(void *))tl_ld_sym(ue, "_ZNK17UAtlasMenuManager3TopEv") : NULL; }
+        char cls[120] = "?";
+        if (top && regs[0]) ue_class_of(top((void *)(uintptr_t)regs[0]), cls, sizeof(cls));
+        snprintf(what, sizeof(what), " (on top: %s)", cls);
+        break;
+    }
+    default:
+        if (!(call <= 5 || call == 10 || call == 100 || call == 1000 || call == 10000 || call == 100000)) return;
+        break;
+    }
+    atomic_fetch_add(&g_watch[i].lines, 1);
+    tl_log_line("ue4: %s%s, call %u", k_watch[i].label, what, call);
+}
+#define W_CB(i) static void watch_cb##i(uint64_t *regs) { watch_hit(i, regs); }
+W_CB(0) W_CB(1) W_CB(2) W_CB(3) W_CB(4) W_CB(5) W_CB(6) W_CB(7) W_CB(8) W_CB(9) W_CB(10) W_CB(11) W_CB(12) W_CB(13) W_CB(14) W_CB(15)
+W_CB(16) W_CB(17) W_CB(18) W_CB(19) W_CB(20) W_CB(21) W_CB(22) W_CB(23) W_CB(24) W_CB(25) W_CB(26) W_CB(27) W_CB(28) W_CB(29) W_CB(30) W_CB(31)
+static void (*const k_watch_cb[])(uint64_t *) = {
+    watch_cb0, watch_cb1, watch_cb2, watch_cb3, watch_cb4, watch_cb5, watch_cb6, watch_cb7, watch_cb8, watch_cb9, watch_cb10, watch_cb11,
+    watch_cb12, watch_cb13, watch_cb14, watch_cb15, watch_cb16, watch_cb17, watch_cb18, watch_cb19, watch_cb20, watch_cb21, watch_cb22,
+    watch_cb23, watch_cb24, watch_cb25, watch_cb26, watch_cb27, watch_cb28, watch_cb29, watch_cb30, watch_cb31,
+};
+_Static_assert(WATCHED <= sizeof(k_watch_cb) / sizeof(k_watch_cb[0]), "a callback for each watched function");
+
+/* An instruction that reads the pc (adr/adrp, branches, literal loads): one a probe cannot move into its stub. */
+static bool pc_relative(uint32_t i)
+{
+    return (i & 0x1F000000u) == 0x10000000u || (i & 0x7C000000u) == 0x14000000u || (i & 0xFF000010u) == 0x54000000u
+        || (i & 0x7E000000u) == 0x34000000u || (i & 0x7E000000u) == 0x36000000u || (i & 0x3B000000u) == 0x18000000u;
+}
+
+void tl_ue4_watch(void)
+{
+    tl_lib *ue = tl_ld_find_lib("libUE4.so");
+    if (!ue) return;
+    int n = 0;
+    for (unsigned i = 0; i < WATCHED; i++) {
+        const uint8_t *fn = tl_ld_sym(ue, k_watch[i].sym);
+        if (!fn || pc_relative(*(const uint32_t *)fn)) continue;
+        if (tl_ld_probe(ue, (uint64_t)(fn - (const uint8_t *)tl_ld_lib_base(ue)), k_watch_cb[i])) n++;
+    }
+    if (n) tl_log_line("ue4: watching %d of the game's start-up functions", n);
+}
+
 #define M_(c, n, s, f) { c, n, s, f }
 static const tl_jhle k_hle[] = {
     M_(CLS, "AndroidThunkJava_HasMetaDataKey", "(Ljava/lang/String;)Z", GA_hasMeta),
@@ -299,6 +475,7 @@ static const tl_jhle k_hle[] = {
     M_(CLS, "getAppPackageName", "()Ljava/lang/String;", GA_packageName),
     M_(CLS, "isOBBInAPK", "()Z", GA_isOBBInAPK),
     M_(CLS, "AndroidThunkJava_SetDesiredViewSize", "(II)V", GA_desiredViewSize),
+    M_(CLS, "AndroidThunkJava_GetInputDeviceInfo", "(I)Lcom/epicgames/ue4/GameActivity$InputDeviceInfo;", GA_inputDeviceInfo),
     M_(CLS, "isStandaloneMode", "()Ljava/lang/Boolean;", GA_boolObj),
     M_(CLS, "isValidGameActivity", "()Ljava/lang/Boolean;", GA_boolObj),
     M_(CLS, "AndroidThunkJava_GetCommandLine", "()Ljava/lang/String;", GA_commandLine),
@@ -350,6 +527,7 @@ void tl_ue4_hle_install(const char *pkg, const char *apk, const char *data, cons
     tl_jni_declare(CLS, "android/app/NativeActivity");
     tl_jni_declare("com/epicgames/ue4/GameApplication", "android/app/Application");
     tl_jni_declare("java/lang/Boolean", "java/lang/Object");
+    tl_jni_declare("com/epicgames/ue4/GameActivity$InputDeviceInfo", "java/lang/Object");
     tl_jni_register_hle(k_hle);
     /* The enum constants EOS reads off EOSOverlay.BrowserStatus: with no class initialiser to run they would be null, which it takes as a broken SDK. */
     static const char *const status[] = { "BEGIN_LOAD", "CLOSED", "CRASHED", "END_LOAD", "LOAD_ERROR" };
