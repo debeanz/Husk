@@ -199,6 +199,9 @@ static void GA_gamepad(tl_jcall *c)
 }
 static void GA_listInputDevices(tl_jcall *c) { c->ret = vl(tl_jni_new_string("")); }
 static void GA_isOBBInAPK(tl_jcall *c) { c->ret = vz(0); }
+/* Play Asset Delivery: there when the APK carries asset packs, which husk-tl-nativeactivity.c shows installed. */
+bool tl_ue4_has_asset_packs(void);
+static void GA_padAvailable(tl_jcall *c) { c->ret = vz(tl_ue4_has_asset_packs()); }
 /*
  * AndroidThunkJava_SetDesiredViewSize: the engine draws at its content scale factor (r.MobileContentScaleFactor), smaller than the screen, and
  * GameActivity has the SurfaceView's buffers that size (SurfaceHolder.setFixedSize), which Android scales up to the view. Given a window of the
@@ -378,6 +381,7 @@ static const struct { const char *sym, *label; int kind; } k_watch[] = {
     { "_ZN18UAtlasGameInstance18CreatePreloadTasksEP6UClassRK7FStringi", "game instance: CreatePreloadTasks", TW_CALL },
     { "_ZN18UAtlasGameInstance16StartPreLoadTaskEib", "game instance: StartPreLoadTask", TW_INT3 },
     { "_ZN18UAtlasGameInstance17PreloadedCallbackEP12FPreloadTask", "game instance: PreloadedCallback", TW_CALL },
+    { "_ZN9UTarUtils16MountAssetBundleE7FString", "paks: MountAssetBundle", TW_CALL },
 };
 #define WATCHED (sizeof(k_watch) / sizeof(k_watch[0]))
 static struct { atomic_uint calls, lines; int64_t last; } g_watch[WATCHED];
@@ -528,7 +532,7 @@ static const tl_jhle k_hle[] = {
     M_(CLS, "AndroidThunkJava_IsScreensaverEnabled", "()Z", GA_false),
     M_(CLS, "AndroidThunkJava_IsScreenCaptureDisabled", "()Z", GA_false),
     M_(CLS, "AndroidThunkJava_IapIsAllowedToMakePurchases", "()Z", GA_false),
-    M_(CLS, "AndroidThunkJava_GooglePAD_Available", "()Z", GA_false),
+    M_(CLS, "AndroidThunkJava_GooglePAD_Available", "()Z", GA_padAvailable),
     M_(CLS, "AndroidThunkJava_IsAllowedRemoteNotifications", "()Z", GA_false),
     M_(GPGW, "Initialize", "(Landroid/content/Context;)V", GPGW_nothing),
     M_(GPGW, "PostLogin", "(Landroid/app/Activity;)V", GPGW_nothing),

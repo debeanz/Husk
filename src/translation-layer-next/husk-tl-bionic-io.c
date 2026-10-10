@@ -175,13 +175,13 @@ static void note_missing(const char *what, const char *path)
  */
 typedef struct { char name[160]; char host[1024]; uint64_t off, size; } vfile;
 typedef struct { bool on; uint64_t off, size, pos; } vfd;
-static vfile g_vfiles[8];
+static vfile g_vfiles[16];
 static int g_nvfiles;
 static vfd g_vfd[4096];
 
 void tl_vfile_add(const char *guest_name, const char *host_path, uint64_t off, uint64_t size)
 {
-    if (g_nvfiles >= 8) return;
+    if (g_nvfiles >= 16) return;
     snprintf(g_vfiles[g_nvfiles].name, sizeof(g_vfiles[0].name), "%s", guest_name);
     snprintf(g_vfiles[g_nvfiles].host, sizeof(g_vfiles[0].host), "%s", host_path);
     g_vfiles[g_nvfiles].off = off; g_vfiles[g_nvfiles].size = size;

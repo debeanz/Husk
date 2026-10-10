@@ -112,6 +112,177 @@ static bool stored_range(const char *apk, const char *entry, unsigned long long 
 }
 
 /*
+ * Play Asset Delivery. A game too big for one APK has Google Play deliver the rest as asset packs, which Play Core installs under the app's files
+ * directory (files/assetpacks/<pack>/<version>/<version>/assets/) and reports through its AssetPackManager: Little Nightmares' levels are its "levels"
+ * pack, pakchunk1-Android_ETC2.pak, which its boot level mounts (MountAssetBundle) once Play Core says the pack is installed and where. Without it the
+ * menus work and New Game stops: "Could not find SuperStruct BP_SwitchClass_C". A repackaged APK carries the packs itself, as that same files/ tree
+ * zipped into a stored asset (assets/youtubeapi.html, 309 MB), for its own code to unpack on the first start.
+ *
+ * Here the packs are found in the APK and shown where Play Core would put them, each file read in place from the APK (a virtual file), and Play Core's
+ * native API (play/asset_pack.h), which the engine's GooglePAD plugin calls, is answered from them: every pack the APK carries is installed.
+ */
+#define PACK_FILES 8
+static struct { char pack[64], file[160]; unsigned long long off, size; } g_pack_file[PACK_FILES];
+static int g_npack_files;
+static char g_pack_root[700];
+
+bool tl_ue4_has_asset_packs(void) { return g_npack_files > 0; }
+
+static uint16_t rd16(const uint8_t *p) { uint16_t v; memcpy(&v, p, 2); return v; }
+static uint32_t rd32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
+
+/* The stored files under .../assetpacks/<pack>/.../assets/ in a zip that lies, stored, at `base` in the APK. */
+static void packs_in_zip(const uint8_t *z, uint64_t len, uint64_t base, const char *where)
+{
+    if (len < 22) return;
+    uint64_t eocd = 0; bool found = false;
+    for (uint64_t i = len - 22, lo = len > 65557 ? len - 65557 : 0; ; i--) {
+        if (rd32(z + i) == 0x06054b50u) { eocd = i; found = true; break; }
+        if (i == lo) break;
+    }
+    if (!found) return;
+    uint16_t n = rd16(z + eocd + 10);
+    uint64_t o = rd32(z + eocd + 16);
+    for (uint16_t k = 0; k < n && o + 46 <= len && rd32(z + o) == 0x02014b50u; k++) {
+        uint16_t method = rd16(z + o + 10), nlen = rd16(z + o + 28), xlen = rd16(z + o + 30), clen = rd16(z + o + 32);
+        uint32_t usize = rd32(z + o + 24), lho = rd32(z + o + 42);
+        char name[512]; snprintf(name, sizeof(name), "%.*s", (int)nlen, (const char *)(z + o + 46));
+        o += 46u + nlen + xlen + clen;
+        const char *ap = strstr(name, "assetpacks/"), *as = ap ? strstr(ap, "/assets/") : NULL;
+        if (!as || method != 0 || !usize || strchr(as + 8, '/') || g_npack_files >= PACK_FILES || (uint64_t)lho + 30 > len) continue;
+        const char *pack = ap + 11, *slash = strchr(pack, '/');
+        uint64_t data = (uint64_t)lho + 30 + rd16(z + lho + 26) + rd16(z + lho + 28);
+        if (!slash || data + usize > len) continue;
+        snprintf(g_pack_file[g_npack_files].pack, sizeof(g_pack_file[0].pack), "%.*s", (int)(slash - pack), pack);
+        snprintf(g_pack_file[g_npack_files].file, sizeof(g_pack_file[0].file), "%s", as + 8);
+        g_pack_file[g_npack_files].off = base + data;
+        g_pack_file[g_npack_files].size = usize;
+        tl_log_line("ue4: asset pack \"%s\": %s, %.1f MiB, in the APK's %s", g_pack_file[g_npack_files].pack, as + 8, usize / 1048576.0, where);
+        g_npack_files++;
+    }
+}
+
+/* The packs the APK carries, each file made visible where Play Core would have installed it. */
+static void find_asset_packs(void)
+{
+    tl_zip z; char err[160];
+    if (!tl_zip_open(&z, N.apk, err, sizeof(err))) return;
+    for (size_t i = 0; i < z.count; i++) {
+        const tl_zip_entry *e = &z.entries[i];
+        if (e->method != 0 || e->usize < (1u << 20) || e->local_offset + 30 > z.size) continue;
+        const uint8_t *h = z.map + e->local_offset;
+        uint64_t start = e->local_offset + 30 + rd16(h + 26) + rd16(h + 28);
+        if (start + e->usize > z.size || memcmp(z.map + start, "PK\3\4", 4)) continue;
+        packs_in_zip(z.map + start, e->usize, start, e->name);
+    }
+    tl_zip_close(&z);
+    snprintf(g_pack_root, sizeof(g_pack_root), "%s/assetpacks", N.internal_dir);
+    for (int i = 0; i < g_npack_files; i++) {
+        char dir[900], path[1100];
+        snprintf(dir, sizeof(dir), "%s/%s/assets", g_pack_root, g_pack_file[i].pack);
+        mkdirs(dir);
+        /* An empty file of that name, so the directory lists it; opening it reads the APK (matching is by name). */
+        snprintf(path, sizeof(path), "%s/%s", dir, g_pack_file[i].file);
+        int fd = open(path, O_CREAT | O_WRONLY, 0644);
+        if (fd >= 0) close(fd);
+        tl_vfile_add(g_pack_file[i].file, N.apk, g_pack_file[i].off, g_pack_file[i].size);
+    }
+}
+
+/* play/asset_pack.h */
+enum { PAD_NO_ERROR = 0, PAD_INVALID_REQUEST = -3 };
+enum { PAD_COMPLETED = 4 };
+enum { PAD_STORAGE_FILES = 0 };
+enum { PAD_CONFIRM_APPROVED = 2 };
+typedef struct { int status; uint64_t bytes; } pad_state;
+typedef struct { char path[900]; } pad_location;
+
+static uint64_t pack_bytes(const char *name)
+{
+    uint64_t total = 0;
+    for (int i = 0; i < g_npack_files && name; i++) if (!strcmp(g_pack_file[i].pack, name)) total += g_pack_file[i].size;
+    return total;
+}
+static int pad_init(void *vm, void *context) { (void)vm; (void)context; return PAD_NO_ERROR; }
+static void pad_destroy(void) {}
+static int pad_ok(void) { return PAD_NO_ERROR; }
+static int pad_request(const char **packs, size_t n)
+{
+    for (size_t i = 0; i < n && packs; i++) if (packs[i]) tl_log_line("ue4: Play Asset Delivery: the game asks for \"%s\" (%s)", packs[i], pack_bytes(packs[i]) ? "installed" : "not in the APK");
+    return PAD_NO_ERROR;
+}
+static int pad_removal(const char *name) { (void)name; return PAD_NO_ERROR; }
+static int pad_get_state(const char *name, pad_state **out)
+{
+    uint64_t bytes = pack_bytes(name);
+    if (out) *out = NULL;
+    if (!bytes || !out) return PAD_INVALID_REQUEST;
+    pad_state *s = calloc(1, sizeof(*s));
+    if (!s) return PAD_INVALID_REQUEST;
+    s->status = PAD_COMPLETED; s->bytes = bytes;
+    *out = s;
+    return PAD_NO_ERROR;
+}
+static void pad_state_destroy(pad_state *s) { free(s); }
+static int pad_state_status(pad_state *s) { return s ? s->status : 0; }
+static uint64_t pad_state_bytes(pad_state *s) { return s ? s->bytes : 0; }
+static int pad_show(void *activity) { (void)activity; return PAD_NO_ERROR; }
+static int pad_confirm_status(int *out) { if (out) *out = PAD_CONFIRM_APPROVED; return PAD_NO_ERROR; }
+static int pad_get_location(const char *name, pad_location **out)
+{
+    if (out) *out = NULL;
+    if (!pack_bytes(name) || !out) return PAD_INVALID_REQUEST;
+    pad_location *l = calloc(1, sizeof(*l));
+    if (!l) return PAD_INVALID_REQUEST;
+    snprintf(l->path, sizeof(l->path), "%s/%s/assets", g_pack_root, name);
+    tl_log_line("ue4: Play Asset Delivery: pack \"%s\" is at %s", name, l->path);
+    *out = l;
+    return PAD_NO_ERROR;
+}
+static void pad_location_destroy(pad_location *l) { free(l); }
+static int pad_location_storage(pad_location *l) { (void)l; return PAD_STORAGE_FILES; }
+static const char *pad_location_path(pad_location *l) { return l ? l->path : ""; }
+
+/* A function of the game's made to jump to one of Husk's: ldr x16, #8; br x16; the address. A one-instruction wrapper (b elsewhere) has its target
+ * redirected instead, as it has no room. */
+static bool redirect(tl_lib *lib, const char *symbol, void *to)
+{
+    uint8_t *rx = (uint8_t *)tl_ld_sym(lib, symbol);
+    if (!rx) return false;
+    uint32_t first; memcpy(&first, rx, 4);
+    if ((first & 0xFC000000u) == 0x14000000u) rx += (int64_t)((int32_t)(first << 6) >> 6) * 4;
+    uint32_t *rw = (uint32_t *)(rx + tl_xmem_delta());
+    uint64_t a = (uint64_t)(uintptr_t)to;
+    rw[0] = 0x58000050u;
+    rw[1] = 0xD61F0200u;
+    memcpy(rw + 2, &a, 8);
+    tl_xmem_flush(rx, 16);
+    return true;
+}
+
+static void answer_play_core(void)
+{
+    tl_lib *ue = tl_ld_find_lib("libUE4.so");
+    if (!ue || !g_npack_files) return;
+    static const struct { const char *sym; void *fn; } k_pad[] = {
+        { "AssetPackManager_init", (void *)pad_init }, { "AssetPackManager_destroy", (void *)pad_destroy },
+        { "AssetPackManager_onResume", (void *)pad_ok }, { "AssetPackManager_onPause", (void *)pad_ok },
+        { "AssetPackManager_requestInfo", (void *)pad_request }, { "AssetPackManager_requestDownload", (void *)pad_request },
+        { "AssetPackManager_cancelDownload", (void *)pad_request }, { "AssetPackManager_requestRemoval", (void *)pad_removal },
+        { "AssetPackManager_getDownloadState", (void *)pad_get_state }, { "AssetPackDownloadState_destroy", (void *)pad_state_destroy },
+        { "AssetPackDownloadState_getStatus", (void *)pad_state_status }, { "AssetPackDownloadState_getBytesDownloaded", (void *)pad_state_bytes },
+        { "AssetPackDownloadState_getTotalBytesToDownload", (void *)pad_state_bytes },
+        { "AssetPackManager_showCellularDataConfirmation", (void *)pad_show }, { "AssetPackManager_getShowCellularDataConfirmationStatus", (void *)pad_confirm_status },
+        { "AssetPackManager_showConfirmationDialog", (void *)pad_show }, { "AssetPackManager_getShowConfirmationDialogStatus", (void *)pad_confirm_status },
+        { "AssetPackManager_getAssetPackLocation", (void *)pad_get_location }, { "AssetPackLocation_destroy", (void *)pad_location_destroy },
+        { "AssetPackLocation_getStorageMethod", (void *)pad_location_storage }, { "AssetPackLocation_getAssetsPath", (void *)pad_location_path },
+    };
+    int n = 0;
+    for (size_t i = 0; i < sizeof(k_pad) / sizeof(k_pad[0]); i++) n += redirect(ue, k_pad[i].sym, k_pad[i].fn);
+    if (n) tl_log_line("ue4: Play Asset Delivery answered here (%d of Play Core's functions): the APK's packs are installed", n);
+}
+
+/*
  * Which graphics API a game's data has shaders for. A cooked Unreal game cannot compile shaders on the phone: it runs on an API its pak
  * has shaders for, or it stops as it starts (CompileGlobalShaderMap fails the check, and the engine quits -- Little Nightmares, asked for
  * Vulkan with shaders only for OpenGL ES). The pak's file index, after its data at the end of the file, names the shader files by format:
@@ -328,6 +499,8 @@ bool tl_na_start(const tl_ga_config *cfg)
     }
     tl_log_line("ue4: libraries loaded");
     tl_ue4_watch();
+    find_asset_packs();
+    answer_play_core();
     setenv("TL_PAD_DPAD", "keys", 0);          /* the D-pad as DPAD_* keys, which the engine maps like a stick's arrows */
     static const tl_pad_sink sink = { na_pad_key, na_pad_motion };
     tl_pad_set_sink(&sink);
