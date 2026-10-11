@@ -108,6 +108,8 @@ static bool apply_zip64_extra(const uint8_t *extra, uint16_t len, tl_zip_entry *
     return !(need_usize || need_csize || need_offset);
 }
 
+static bool parse(tl_zip *z, char *err, size_t errlen);
+
 bool tl_zip_open(tl_zip *z, const char *path, char *err, size_t errlen)
 {
     memset(z, 0, sizeof(*z));
@@ -133,7 +135,22 @@ bool tl_zip_open(tl_zip *z, const char *path, char *err, size_t errlen)
         return false;
     }
     z->map = map;
+    return parse(z, err, errlen);
+}
 
+/* A ZIP file held inside another (a stored entry of an APK): read in place, never unmapped by tl_zip_close. */
+bool tl_zip_open_mem(tl_zip *z, const uint8_t *data, size_t size, char *err, size_t errlen)
+{
+    memset(z, 0, sizeof(*z));
+    z->fd = -1;
+    z->map = data;
+    z->size = size;
+    z->borrowed = true;
+    return parse(z, err, errlen);
+}
+
+static bool parse(tl_zip *z, char *err, size_t errlen)
+{
     uint64_t end;
     if (!find_end(z, &end)) {
         fail(err, errlen, "not a ZIP file (no end-of-directory record)");
@@ -242,7 +259,7 @@ void tl_zip_close(tl_zip *z)
         }
         free(z->entries);
     }
-    if (z->map) {
+    if (z->map && !z->borrowed) {
         munmap((void *)z->map, z->size);
     }
     if (z->fd >= 0) {
@@ -358,4 +375,107 @@ bool tl_zip_data(const tl_zip *z, const tl_zip_entry *e, size_t limit,
     *out_len = (size_t)e->usize;
     *owned = true;
     return true;
+}
+
+bool tl_zip_extract(const tl_zip *z, const tl_zip_entry *e, const char *path,
+                    char *err, size_t errlen)
+{
+    if (e->flags & 1) {
+        fail(err, errlen, "%s is encrypted", e->name);
+        return false;
+    }
+    if (!in_file(z, e->local_offset, 30) || rd32(z->map + e->local_offset) != SIG_LOCAL) {
+        fail(err, errlen, "%s: damaged local header", e->name);
+        return false;
+    }
+    const uint8_t *l = z->map + e->local_offset;
+    uint64_t data_off = e->local_offset + 30ull + rd16(l + 26) + rd16(l + 28);
+    if (!in_file(z, data_off, e->csize)) {
+        fail(err, errlen, "%s runs past the end of the file", e->name);
+        return false;
+    }
+    if (e->method != 0 && e->method != 8) {
+        fail(err, errlen, "%s uses compression method %u", e->name, e->method);
+        return false;
+    }
+    /* Written beside the target and renamed over it at the end, so a file that exists is a whole one. */
+    char part[1100];
+    snprintf(part, sizeof(part), "%s.part", path);
+    int fd = open(part, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        fail(err, errlen, "cannot create %s: %s", part, strerror(errno));
+        return false;
+    }
+    const uint8_t *in = z->map + data_off;
+    bool ok = true;
+    if (e->method == 0) {
+        if (e->csize != e->usize) {
+            fail(err, errlen, "%s: stored entry with mismatched sizes", e->name);
+            ok = false;
+        }
+        for (uint64_t done = 0; ok && done < e->usize;) {
+            size_t n = e->usize - done > (8u << 20) ? (8u << 20) : (size_t)(e->usize - done);
+            ssize_t w = write(fd, in + done, n);
+            if (w <= 0) { fail(err, errlen, "writing %s: %s", path, strerror(errno)); ok = false; }
+            else done += (uint64_t)w;
+        }
+    } else {
+        enum { CHUNK = 4u << 20 };
+        uint8_t *buf = malloc(CHUNK);
+        z_stream zs;
+        memset(&zs, 0, sizeof(zs));
+        if (!buf || inflateInit2(&zs, -MAX_WBITS) != Z_OK) {
+            free(buf);
+            close(fd);
+            unlink(part);
+            fail(err, errlen, "inflate failed to start");
+            return false;
+        }
+        uint64_t in_left = e->csize;
+        int rc = Z_OK;
+        while (ok && rc != Z_STREAM_END) {
+            if (zs.avail_in == 0 && in_left > 0) {
+                uInt n = in_left > 0x40000000u ? 0x40000000u : (uInt)in_left;
+                zs.next_in = (Bytef *)in;
+                zs.avail_in = n;
+                in += n;
+                in_left -= n;
+            }
+            zs.next_out = buf;
+            zs.avail_out = CHUNK;
+            rc = inflate(&zs, Z_NO_FLUSH);
+            if (rc != Z_OK && rc != Z_STREAM_END) {
+                fail(err, errlen, "%s did not inflate cleanly (%d)", e->name, rc);
+                ok = false;
+                break;
+            }
+            size_t have = CHUNK - zs.avail_out;
+            for (size_t done = 0; done < have;) {
+                ssize_t w = write(fd, buf + done, have - done);
+                if (w <= 0) { fail(err, errlen, "writing %s: %s", path, strerror(errno)); ok = false; break; }
+                done += (size_t)w;
+            }
+            if (rc == Z_OK && zs.avail_in == 0 && in_left == 0 && have == 0) {
+                fail(err, errlen, "%s ends early", e->name);
+                ok = false;
+            }
+        }
+        if (ok && zs.total_out != e->usize) {
+            fail(err, errlen, "%s inflated to %llu bytes, not %llu", e->name,
+                 (unsigned long long)zs.total_out, (unsigned long long)e->usize);
+            ok = false;
+        }
+        inflateEnd(&zs);
+        free(buf);
+    }
+    if (close(fd) != 0 && ok) {
+        fail(err, errlen, "closing %s: %s", path, strerror(errno));
+        ok = false;
+    }
+    if (ok && rename(part, path) != 0) {
+        fail(err, errlen, "renaming %s: %s", path, strerror(errno));
+        ok = false;
+    }
+    if (!ok) unlink(part);
+    return ok;
 }

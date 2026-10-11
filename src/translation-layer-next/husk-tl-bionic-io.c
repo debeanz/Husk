@@ -998,9 +998,19 @@ static void *b_mmap(void *addr, size_t len, int prot, int flags, int fd, long of
         size_t n = (len + TL_XMEM_PAGE - 1) & ~(size_t)(TL_XMEM_PAGE - 1);
         if (tl_xmem_alloc(n, &rx, &rw)) {
             memset(rw, 0, n);
-            tl_log_line("mm: %#zx bytes of executable memory for the guest at %p", n, (void *)rx);
+            /* A JIT maps chunk after chunk: the first few, then every 16 MiB of them. */
+            static size_t total, said_at; static int said;
+            total += n;
+            if (said++ < 4 || total - said_at >= (16u << 20)) {
+                said_at = total;
+                tl_log_line("mm: %#zx bytes of executable memory for the guest at %p (%.1f MiB so far, %.0f of %.0f MiB of the JIT region used)", n, (void *)rx,
+                            total / 1048576.0, tl_xmem_used() / 1048576.0, tl_xmem_size() / 1048576.0);
+            }
             return rx;
         }
+        tl_log_line("mm: the JIT region is full (%.0f MiB): no executable memory for %#zx bytes", tl_xmem_size() / 1048576.0, n);
+        tl_set_guest_errno(12);                                                                                            /* ENOMEM */
+        return MAP_FAILED;
     }
     int df = flags & 0x3;                                   /* MAP_SHARED / MAP_PRIVATE */
     if (flags & 0x10)   df |= MAP_FIXED;
@@ -1503,9 +1513,86 @@ static long b_pathconf(const char *p, int name)
     switch (name) { case 3: return 255; case 4: return 4096; case 5: return 4096; case 6: return 0x10000; default: return -1; }
 }
 
+/* What .NET's System.Native and Mono call beyond the usual set: the 64-bit names bionic also exports, and the rest of
+ * POSIX a runtime touches while starting -- answered as an app with no other users, groups or mounts sees it. */
+static int b_posix_fadvise(int fd, long off, long len, int adv) { (void)fd; (void)off; (void)len; (void)adv; return 0; }
+static int b_fstatfs(int fd, guest_statfs *g)
+{
+    struct statfs s;
+    TL_ERRNO_BEGIN(); int r = fstatfs(fd, &s); TL_ERRNO_END();
+    if (r == 0) {
+        memset(g, 0, sizeof(*g));
+        g->f_type = 0xEF53; g->f_bsize = s.f_bsize; g->f_blocks = s.f_blocks; g->f_bfree = s.f_bfree;
+        g->f_bavail = s.f_bavail; g->f_files = s.f_files; g->f_ffree = s.f_ffree; g->f_namelen = 255; g->f_frsize = s.f_bsize;
+    }
+    return r;
+}
+static int b_msync(void *a, size_t l, int flags)
+{
+    int d = (flags & 1 ? MS_ASYNC : 0) | (flags & 2 ? MS_INVALIDATE : 0) | (flags & 4 ? MS_SYNC : 0);
+    TL_ERRNO_BEGIN(); int r = msync(a, l, d); TL_ERRNO_END(); return r;
+}
+static int b_sched_getcpu(void) { return 0; }
+static int b_fallocate(int fd, int mode, long off, long len) { (void)fd; (void)mode; (void)off; (void)len; tl_set_guest_errno(95 /* EOPNOTSUPP */); return -1; }
+static int b_inotify_init1(int flags) { (void)flags; return b_inotify_init(); }
+static int b_inotify_rm_watch(int fd, int wd) { (void)fd; (void)wd; return stub_enosys_i("inotify_rm_watch"); }
+static void *b_getgrgid(unsigned gid) { (void)gid; return NULL; }
+static int b_getgrouplist(const char *user, unsigned group, unsigned *groups, int *n)
+{
+    (void)user;
+    if (*n < 1) { *n = 1; return -1; }
+    groups[0] = group; *n = 1; return 1;
+}
+static int b_getgroups(int n, unsigned *list) { if (n > 0) list[0] = (unsigned)getgid(); return 1; }
+static int b_getsid(int pid) { (void)pid; return getpid(); }
+static int b_getpwnam_r(const char *name, void *pw, char *buf, size_t n, void **result) { (void)name; (void)pw; (void)buf; (void)n; *result = NULL; return 0; }
+static int b_seteuid(unsigned u) { (void)u; return 0; }
+static int b_setgroups(size_t n, const unsigned *list) { (void)n; (void)list; tl_set_guest_errno(1 /* EPERM */); return -1; }
+static void b_sync(void) { sync(); }
+static int b_vfork(void) { tl_note_once("the game tried to start a process (vfork): refused"); tl_set_guest_errno(38 /* ENOSYS */); return -1; }
+static int b_execvp(const char *f, char *const *argv) { (void)argv; tl_log_line("bionic: the game tried to run %s: refused", f ? f : "?"); tl_set_guest_errno(38); return -1; }
+static int b_system(const char *cmd) { tl_log_line("bionic: system(%s) refused", cmd ? cmd : "NULL"); return cmd ? -1 : 0; }
+static int b_waitid(int idtype, int id, void *info, int options) { (void)idtype; (void)id; (void)info; (void)options; tl_set_guest_errno(10 /* ECHILD */); return -1; }
+static int b_mkfifo(const char *p, unsigned m) { (void)p; (void)m; tl_set_guest_errno(1); return -1; }
+static int b_mknod(const char *p, unsigned m, uint64_t dev) { (void)p; (void)m; (void)dev; tl_set_guest_errno(1); return -1; }
+static void *b_setmntent(const char *p, const char *m) { (void)p; (void)m; return NULL; }
+static void *b_getmntent_r(void *f, void *ent, char *buf, int n) { (void)f; (void)ent; (void)buf; (void)n; return NULL; }
+static int b_endmntent(void *f) { (void)f; return 1; }
+static int b_sigrtmax(void) { return 64; }
+static int b_sigrtmin(void) { return 34; }
+static int b_setsid(void) { return getpid(); }
+static int b_setpgid(int pid, int pgid) { (void)pid; (void)pgid; return 0; }
+static int b_creat(const char *path, unsigned mode) { return b_open(path, 0x40 | 0x1 | 0x200 /* O_CREAT | O_WRONLY | O_TRUNC */, mode); }
+/* clock_nanosleep answers with the error number itself; TIMER_ABSTIME (1) sleeps until a time on that clock. */
+static int b_clock_nanosleep(int id, int flags, const struct timespec *req, struct timespec *rem)
+{
+    struct timespec d = *req;
+    if (flags & 1) {
+        struct timespec now;
+        clock_gettime(clock_to_darwin(id), &now);
+        long long ns = (req->tv_sec - now.tv_sec) * 1000000000ll + (req->tv_nsec - now.tv_nsec);
+        if (ns <= 0) return 0;
+        d.tv_sec = ns / 1000000000ll; d.tv_nsec = ns % 1000000000ll;
+        rem = NULL;
+    }
+    return nanosleep(&d, rem) == 0 ? 0 : tl_errno_to_guest(errno);
+}
+
 const tl_bionic_entry tl_tab_io2[] = {
     TL_WRAP("openat", b_openat), TL_WRAP("unlinkat", b_unlinkat), TL_WRAP("fchmodat", b_fchmodat), TL_WRAP("fchown", b_fchown),
     TL_WRAP("chdir", b_chdir), TL_WRAP("utimensat", b_utimensat), TL_WRAP("stat64", b_stat), TL_WRAP("statvfs", b_statvfs),
     TL_WRAP("statvfs64", b_statvfs), TL_WRAP("pathconf", b_pathconf),
+    TL_WRAP("pread", b_pread64), TL_WRAP("pwrite", b_pwrite64), TL_WRAP("fstat64", b_fstat), TL_WRAP("lstat64", b_lstat),
+    TL_WRAP("ftruncate64", b_ftruncate), TL_WRAP("mmap64", b_mmap), TL_WRAP("posix_fadvise", b_posix_fadvise),
+    TL_WRAP("posix_fadvise64", b_posix_fadvise), TL_WRAP("fstatfs", b_fstatfs), TL_WRAP("fstatfs64", b_fstatfs),
+    TL_WRAP("statfs64", b_statfs), TL_WRAP("msync", b_msync), TL_WRAP("sched_getcpu", b_sched_getcpu), TL_WRAP("fallocate", b_fallocate),
+    TL_WRAP("fallocate64", b_fallocate), TL_WRAP("inotify_init1", b_inotify_init1), TL_WRAP("inotify_rm_watch", b_inotify_rm_watch),
+    TL_WRAP("getgrgid", b_getgrgid), TL_WRAP("getgrouplist", b_getgrouplist), TL_WRAP("getgroups", b_getgroups), TL_WRAP("getsid", b_getsid),
+    TL_WRAP("getpwnam_r", b_getpwnam_r), TL_WRAP("seteuid", b_seteuid), TL_WRAP("setgroups", b_setgroups), TL_WRAP("sync", b_sync),
+    TL_WRAP("vfork", b_vfork), TL_WRAP("execvp", b_execvp), TL_WRAP("system", b_system), TL_WRAP("waitid", b_waitid),
+    TL_WRAP("mkfifo", b_mkfifo), TL_WRAP("mknod", b_mknod), TL_WRAP("setmntent", b_setmntent), TL_WRAP("getmntent_r", b_getmntent_r),
+    TL_WRAP("endmntent", b_endmntent), TL_WRAP("__libc_current_sigrtmax", b_sigrtmax), TL_WRAP("__libc_current_sigrtmin", b_sigrtmin),
+    TL_WRAP("setsid", b_setsid), TL_WRAP("setpgid", b_setpgid), TL_WRAP("creat", b_creat), TL_WRAP("clock_nanosleep", b_clock_nanosleep),
+    TL_DIRECT(mkstemp), TL_DIRECT(mkstemps), TL_DIRECT(mkdtemp),
     TL_END
 };

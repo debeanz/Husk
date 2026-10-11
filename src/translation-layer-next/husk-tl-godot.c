@@ -70,9 +70,14 @@ static int read_major(void)
 
 int tl_godot_major(void) { return U.major; }
 
+/* Arguments a launcher would have added after the export's own (husk-tl-godot-dotnet.c). */
+static char *g_extra[48];
+static int g_nextra;
+void tl_godot_add_arg(const char *arg) { if (g_nextra < 48) g_extra[g_nextra++] = strdup(arg); }
+
 static jobj *command_line(void)
 {
-    char *list[32]; int n = 0;
+    char *list[32 + 48]; int n = 0;
     for (int z = 0; n == 0; z++) {
         const tl_zip *zip = tl_ld_apk_at(z);
         if (!zip) break;
@@ -91,6 +96,7 @@ static jobj *command_line(void)
         }
         if (owned) free((void *)d);
     }
+    for (int i = 0; i < g_nextra; i++) list[n++] = strdup(g_extra[i]);
     jobj *arr = tl_jni_new_obj_array(tl_jni_class("java/lang/String"), (uint32_t)n);
     for (int i = 0; i < n; i++) { arr->oarr.v[i] = tl_jni_new_string(list[i]); tl_log_line("godot: argument %s", list[i]); free(list[i]); }
     return arr;
@@ -117,6 +123,8 @@ bool tl_godot_start(const tl_godot_config *cfg)
     tl_hle_configure(cfg->package_name, cfg->apk_path, cfg->data_dir, cfg->width, cfg->height);
     tl_jni_hle_install();
     tl_godot_hle_install(cfg->package_name, cfg->apk_path, cfg->data_dir, cfg->width, cfg->height);
+    /* A .NET game: Mono's settings, and whatever the game's launcher puts on disk before the engine starts. */
+    if (!tl_godot_dotnet_prepare(cfg->data_dir)) return false;
 
     /* Godot.onCreate: System.loadLibrary("godot_android") (JNI_OnLoad keeps the VM). */
     jvalue a = vl(tl_jni_new_string("godot_android"));

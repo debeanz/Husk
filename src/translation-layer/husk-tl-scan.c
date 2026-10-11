@@ -97,8 +97,9 @@ static const char *engine_name(const engine_scan *s)
     if (s->unity) return s->mono_unity ? "Unity (Mono)" : "Unity";
     if (s->flutter) return "Flutter";
     if (s->react) return "React Native";
-    if (s->dotnet) return ".NET / Xamarin";
+    /* A Godot .NET export ships Mono (libmonosgen-2.0.so) beside the engine: the engine is what runs it. */
     if (s->godot) return "Godot";
+    if (s->dotnet) return ".NET / Xamarin";
     if (s->unreal) return "Unreal Engine";
     if (s->cocos) return "Cocos";
     if (s->minecraft) return "Minecraft";

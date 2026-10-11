@@ -12,4 +12,11 @@ bool tl_codewrite_enabled(void);
 /* Stores carried out so far, for the log. */
 long tl_codewrite_count(void);
 
+#include <stddef.h>
+/* Set once tl_codewrite_enable has run: the guest's memcpy/memmove/memset look here before anything else. */
+extern volatile bool tl_codewrite_active;
+/* A copy or fill whose destination is code, done through the writable view. False (nothing done) for any other memory. */
+bool tl_codewrite_copy(void *dst, const void *src, size_t n);
+bool tl_codewrite_fill(void *dst, int c, size_t n);
+
 #endif

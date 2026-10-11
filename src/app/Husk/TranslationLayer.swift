@@ -146,7 +146,7 @@ final class TranslationLayerStore: ObservableObject {
 
     /// Which reading of an app's libraries its report came from. A newer Husk that recognises more (an engine, a kind of game) reads
     /// the apps it already holds again, so they are not left with what the old one knew.
-    nonisolated static let scanVersion = 4
+    nonisolated static let scanVersion = 5
     private var rescanning = false
 
     func reload() {

@@ -10,9 +10,11 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <fnmatch.h>
+#include <inttypes.h>
 #include <getopt.h>
 #include <locale.h>
 #include <net/if.h>
+#include <netinet/in.h>
 #include <regex.h>
 #include <math.h>
 #include <setjmp.h>
@@ -28,6 +30,7 @@
 #include <xlocale.h>
 
 #include "husk-tl-va.h"
+#include "husk-tl-codewrite.h"
 
 const char *tl_path_resolve(const char *path, char *buf, size_t n);   /* husk-tl-bionic-io.c */
 int tl_synth_open(const char *path);
@@ -236,6 +239,9 @@ static int b_fseek(void *f, long off, int whence) { TL_ERRNO_BEGIN(); int r = fs
 static int b_fseeko(void *f, long off, int whence) { TL_ERRNO_BEGIN(); int r = fseeko(map_stream(f), off, whence); TL_ERRNO_END(); return r; }
 static long b_ftell(void *f) { TL_ERRNO_BEGIN(); long r = ftell(map_stream(f)); TL_ERRNO_END(); return r; }
 static long b_ftello(void *f) { TL_ERRNO_BEGIN(); long r = ftello(map_stream(f)); TL_ERRNO_END(); return r; }
+/* bionic's fpos_t is the offset itself (off_t, 8 bytes on LP64). */
+static int b_fgetpos(void *f, int64_t *pos) { long r = b_ftello(f); if (r < 0) return -1; *pos = r; return 0; }
+static int b_fsetpos(void *f, const int64_t *pos) { return b_fseeko(f, (long)*pos, SEEK_SET); }
 static int b_fflush(void *f)
 {
     if (!f) { TL_ERRNO_BEGIN(); int r = fflush(NULL); TL_ERRNO_END(); return r; }
@@ -289,8 +295,12 @@ static int b_rename(const char *a, const char *b)
 /* ----------------------------------------------------------- _chk variants */
 
 static void chk_fail(const char *what) { tl_log_line("bionic: %s: buffer overflow detected", what); abort(); }
-static void *b___memcpy_chk(void *d, const void *s, size_t n, size_t dl) { if (n > dl) chk_fail("__memcpy_chk"); return memcpy(d, s, n); }
-static void *b___memmove_chk(void *d, const void *s, size_t n, size_t dl) { if (n > dl) chk_fail("__memmove_chk"); return memmove(d, s, n); }
+/* With a JIT running (husk-tl-codewrite.c), a copy into its code goes through the writable view in one piece. */
+static void *b_memcpy(void *d, const void *s, size_t n) { if (__builtin_expect(tl_codewrite_active, 0) && tl_codewrite_copy(d, s, n)) return d; return memcpy(d, s, n); }
+static void *b_memmove(void *d, const void *s, size_t n) { if (__builtin_expect(tl_codewrite_active, 0) && tl_codewrite_copy(d, s, n)) return d; return memmove(d, s, n); }
+static void *b_memset(void *d, int c, size_t n) { if (__builtin_expect(tl_codewrite_active, 0) && tl_codewrite_fill(d, c, n)) return d; return memset(d, c, n); }
+static void *b___memcpy_chk(void *d, const void *s, size_t n, size_t dl) { if (n > dl) chk_fail("__memcpy_chk"); return b_memcpy(d, s, n); }
+static void *b___memmove_chk(void *d, const void *s, size_t n, size_t dl) { if (n > dl) chk_fail("__memmove_chk"); return b_memmove(d, s, n); }
 static void *b___memset_chk(void *d, int c, size_t n, size_t dl) { if (n > dl) chk_fail("__memset_chk"); return memset(d, c, n); }
 static size_t b___strlen_chk(const char *s, size_t dl) { size_t n = strlen(s); if (n >= dl) chk_fail("__strlen_chk"); return n; }
 static char *b___strchr_chk(const char *s, int c, size_t dl) { char *r = strchr(s, c); if (r && (size_t)(r - s) >= dl) chk_fail("__strchr_chk"); return r; }
@@ -539,7 +549,7 @@ static const char *g_sys_signame[32] = { "Unknown signal", "HUP", "INT", "QUIT",
 
 const tl_bionic_entry tl_tab_str[] = {
     /* string.h */
-    TL_DIRECT(memchr), TL_DIRECT(memcmp), TL_DIRECT(memcpy), TL_DIRECT(memmove), TL_DIRECT(memset),
+    TL_DIRECT(memchr), TL_DIRECT(memcmp), TL_WRAP("memcpy", b_memcpy), TL_WRAP("memmove", b_memmove), TL_WRAP("memset", b_memset),
     TL_WRAP("memrchr", b_memrchr), TL_DIRECT(strcasecmp), TL_DIRECT(strcasestr), TL_DIRECT(strcat),
     TL_DIRECT(strchr), TL_DIRECT(strcmp), TL_DIRECT(strcoll), TL_DIRECT(strcoll_l), TL_DIRECT(strcpy),
     TL_DIRECT(strcspn), TL_DIRECT(strdup), TL_DIRECT(strlcpy), TL_DIRECT(strlcat), TL_DIRECT(strlen), TL_DIRECT(strncmp),
@@ -592,6 +602,9 @@ const tl_bionic_entry tl_tab_str[] = {
     TL_DIRECT(pow), TL_DIRECT(powf), TL_DIRECT(scalbn), TL_DIRECT(sin), TL_DIRECT(sinf), TL_DIRECT(sqrtf), TL_DIRECT(tan),
     TL_DIRECT(tanf), TL_WRAP("sincosf", b_sincosf), TL_WRAP("sincos", b_sincos),
     TL_DIRECT(sqrt), TL_DIRECT(fmin), TL_DIRECT(fmax), TL_DIRECT(frexp), TL_DIRECT(asinh), TL_DIRECT(tanh),
+    TL_DIRECT(acoshf), TL_DIRECT(asinhf), TL_DIRECT(atanhf), TL_DIRECT(coshf), TL_DIRECT(tanhf), TL_DIRECT(ilogb),
+    TL_DIRECT(strndup), TL_DIRECT(strtoimax), TL_DATA("in6addr_any", &in6addr_any),
+    TL_WRAP("fgetpos", b_fgetpos), TL_WRAP("fsetpos", b_fsetpos),
     TL_DIRECT(remainder), TL_DIRECT(remainderf),
     TL_WRAP("__isnanf", b___isnanf), TL_WRAP("__fpclassifyd", b___fpclassifyd),
     /* locale.h */

@@ -30,6 +30,7 @@
 #include "husk-tl-xmem.h"
 
 static volatile bool g_on;
+volatile bool tl_codewrite_active;
 static struct sigaction g_prev_bus, g_prev_segv;
 static volatile long g_emulated;
 
@@ -90,6 +91,22 @@ static bool emulate(mcontext_t mc)
 
     unsigned rt = insn & 31, rn = (insn >> 5) & 31;
     bool simd = (insn >> 26) & 1;
+
+    /* STXR / STLXR (Rt2 = 31): an atomic update of a word in code -- a JIT patching a call site. The paired load read the
+     * executable view; the store goes through the other one, and the status register says it succeeded. */
+    if ((insn & 0x3FE07C00u) == 0x08007C00u || (insn & 0x3FE07C00u) == 0x0800FC00u) {
+        unsigned bytes = 1u << (insn >> 30), rs = (insn >> 16) & 31;
+        reg_bytes(mc, false, rt, bytes, buf);
+        if (!put(xreg(ss, rn, true), buf, bytes)) return false;
+        if (rs != 31) set_xreg(ss, rs, 0);
+        return true;
+    }
+    /* STLR: a store with release order, for a pointer published in code. */
+    if ((insn & 0x3FFFFC00u) == 0x089FFC00u) {
+        unsigned bytes = 1u << (insn >> 30);
+        reg_bytes(mc, false, rt, bytes, buf);
+        return put(xreg(ss, rn, true), buf, bytes);
+    }
 
     /* STP / STNP: a pair. */
     if ((insn & 0x3A000000u) == 0x28000000u) {
@@ -164,6 +181,27 @@ static void on_fault(int sig, siginfo_t *info, void *uc)
     chain(sig == SIGBUS ? &g_prev_bus : &g_prev_segv, sig, info, uc);
 }
 
+/* memcpy, memmove and memset with a destination in the executable view, done through the writable one in one go: a JIT
+ * copies each method it compiles into place with memcpy, and a fault for every 32 bytes would cost far more than the copy.
+ * A source in the executable view is read through the writable one too, so overlap is judged on one set of addresses. */
+static bool in_rx(const void *p, size_t n) { return n && tl_xmem_is_rx(p) && tl_xmem_is_rx((const uint8_t *)p + n - 1); }
+bool tl_codewrite_copy(void *d, const void *s, size_t n)
+{
+    if (!g_on || !in_rx(d, n)) return false;
+    ptrdiff_t delta = tl_xmem_delta();
+    const uint8_t *src = in_rx(s, n) ? (const uint8_t *)s + delta : s;
+    memmove((uint8_t *)d + delta, src, n);
+    tl_xmem_flush(d, n);
+    return true;
+}
+bool tl_codewrite_fill(void *d, int c, size_t n)
+{
+    if (!g_on || !in_rx(d, n)) return false;
+    memset((uint8_t *)d + tl_xmem_delta(), c, n);
+    tl_xmem_flush(d, n);
+    return true;
+}
+
 void tl_codewrite_enable(void)
 {
     if (g_on) return;
@@ -175,5 +213,6 @@ void tl_codewrite_enable(void)
     sigaction(SIGBUS, &sa, &g_prev_bus);
     sigaction(SIGSEGV, &sa, &g_prev_segv);
     g_on = true;
+    tl_codewrite_active = true;
     tl_log_line("codewrite: stores into code go through the writable view from now on");
 }

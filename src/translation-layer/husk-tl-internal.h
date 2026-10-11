@@ -85,10 +85,15 @@ typedef struct tl_zip {
     size_t         size;
     tl_zip_entry  *entries;
     size_t         count;
+    bool           borrowed;    /* map belongs to someone else (tl_zip_open_mem) */
 } tl_zip;
 
 /* Reads the central directory. The file stays mapped until tl_zip_close(). */
 bool tl_zip_open(tl_zip *z, const char *path, char *err, size_t errlen);
+/* The same for a ZIP already in memory, such as a stored entry of an APK; the bytes must outlive the tl_zip. */
+bool tl_zip_open_mem(tl_zip *z, const uint8_t *data, size_t size, char *err, size_t errlen);
+/* One entry written to `path`, inflated a few MiB at a time (entries can be far larger than memory). */
+bool tl_zip_extract(const tl_zip *z, const tl_zip_entry *e, const char *path, char *err, size_t errlen);
 void tl_zip_close(tl_zip *z);
 const tl_zip_entry *tl_zip_find(const tl_zip *z, const char *name);
 

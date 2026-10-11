@@ -52,6 +52,13 @@ int tl_godot_major(void);
 /* husk-tl-jni-godot.c */
 void tl_godot_hle_install(const char *pkg, const char *apk, const char *data, int w, int h);
 
+/* An argument for GodotLib.setup after the export's own command line (assets/_cl_), as a launcher passes them. */
+void tl_godot_add_arg(const char *arg);
+
+/* husk-tl-godot-dotnet.c: for a game with Mono beside the engine, the runtime's settings and the files its launcher would
+ * have put in place. True when there is nothing to do or it is all done; false when the game cannot start. */
+bool tl_godot_dotnet_prepare(const char *data_dir);
+
 #ifdef __cplusplus
 }
 #endif
