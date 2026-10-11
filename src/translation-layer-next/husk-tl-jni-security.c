@@ -7,7 +7,10 @@
 #define _DARWIN_C_SOURCE
 #include "husk-tl-jni.h"
 
+#include <CommonCrypto/CommonDigest.h>
+#include <CommonCrypto/CommonHMAC.h>
 #include <Security/Security.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -263,6 +266,136 @@ static void UUID_fromString(tl_jcall *c)
 static void UUID_msb(tl_jcall *c) { c->ret.j = (int64_t)uuid_of(c->self)->msb; }
 static void UUID_lsb(tl_jcall *c) { c->ret.j = (int64_t)uuid_of(c->self)->lsb; }
 
+/* ---------------------------------------------- MessageDigest, Mac, SecureRandom */
+
+/*
+ * What .NET's crypto library on Android (System.Security.Cryptography.Native.Android) hashes with: it has no digests of its
+ * own and asks Java's MessageDigest and Mac, and aborts the process if digest() answers null. Apple's CommonCrypto does the
+ * work here.
+ */
+enum { MD_MD5 = 1, MD_SHA1, MD_SHA256, MD_SHA384, MD_SHA512 };
+static int md_kind(const char *n)
+{
+    char a[32]; size_t k = 0;
+    for (; *n && k + 1 < sizeof(a); n++) if (*n != '-' && *n != '_') a[k++] = (char)((*n >= 'a' && *n <= 'z') ? *n - 32 : *n);
+    a[k] = 0;
+    if (!strncmp(a, "HMAC", 4)) memmove(a, a + 4, strlen(a + 4) + 1);
+    if (!strcmp(a, "MD5")) return MD_MD5;
+    if (!strcmp(a, "SHA1") || !strcmp(a, "SHA")) return MD_SHA1;
+    if (!strcmp(a, "SHA256")) return MD_SHA256;
+    if (!strcmp(a, "SHA384")) return MD_SHA384;
+    if (!strcmp(a, "SHA512")) return MD_SHA512;
+    return 0;
+}
+static size_t md_len(int k) { return k == MD_MD5 ? 16 : k == MD_SHA1 ? 20 : k == MD_SHA256 ? 32 : k == MD_SHA384 ? 48 : 64; }
+
+typedef struct {
+    int kind;
+    union { CC_MD5_CTX md5; CC_SHA1_CTX sha1; CC_SHA256_CTX sha256; CC_SHA512_CTX sha512; } u;
+} mdstate;
+static void md_init(mdstate *m)
+{
+    switch (m->kind) {
+    case MD_MD5: CC_MD5_Init(&m->u.md5); break;
+    case MD_SHA1: CC_SHA1_Init(&m->u.sha1); break;
+    case MD_SHA256: CC_SHA256_Init(&m->u.sha256); break;
+    case MD_SHA384: CC_SHA384_Init(&m->u.sha512); break;
+    default: CC_SHA512_Init(&m->u.sha512); break;
+    }
+}
+static void md_update(mdstate *m, const void *p, size_t n)
+{
+    switch (m->kind) {
+    case MD_MD5: CC_MD5_Update(&m->u.md5, p, (CC_LONG)n); break;
+    case MD_SHA1: CC_SHA1_Update(&m->u.sha1, p, (CC_LONG)n); break;
+    case MD_SHA256: CC_SHA256_Update(&m->u.sha256, p, (CC_LONG)n); break;
+    case MD_SHA384: CC_SHA384_Update(&m->u.sha512, p, (CC_LONG)n); break;
+    default: CC_SHA512_Update(&m->u.sha512, p, (CC_LONG)n); break;
+    }
+}
+static void md_final(mdstate *m, uint8_t *out)
+{
+    switch (m->kind) {
+    case MD_MD5: CC_MD5_Final(out, &m->u.md5); break;
+    case MD_SHA1: CC_SHA1_Final(out, &m->u.sha1); break;
+    case MD_SHA256: CC_SHA256_Final(out, &m->u.sha256); break;
+    case MD_SHA384: CC_SHA384_Final(out, &m->u.sha512); break;
+    default: CC_SHA512_Final(out, &m->u.sha512); break;
+    }
+    md_init(m);                                                     /* digest() leaves the object reset, as Java's does */
+}
+static mdstate *md_of(jobj *o) { if (!o->native) o->native = calloc(1, sizeof(mdstate)); return o->native; }
+static void MD_getInstance(tl_jcall *c)
+{
+    int k = md_kind(S(c->args[0].l));
+    if (!k) { tl_log_line("security: MessageDigest.getInstance(%s): not an algorithm here", S(c->args[0].l)); tl_jni_throw("java/security/NoSuchAlgorithmException", S(c->args[0].l)); return; }
+    jobj *o = tl_jni_new_object(tl_jni_class("java/security/MessageDigest"));
+    mdstate *m = md_of(o); m->kind = k; md_init(m);
+    c->ret = vl(o);
+}
+static void MD_update(tl_jcall *c) { jobj *a = c->args[0].l; if (a) md_update(md_of(c->self), a->arr.data, a->arr.len); }
+static void MD_updateRange(tl_jcall *c)
+{
+    jobj *a = c->args[0].l; int off = c->args[1].i, len = c->args[2].i;
+    if (a && off >= 0 && len >= 0 && (uint32_t)off + (uint32_t)len <= a->arr.len) md_update(md_of(c->self), (uint8_t *)a->arr.data + off, (size_t)len);
+}
+static void MD_updateByte(tl_jcall *c) { uint8_t b = (uint8_t)c->args[0].b; md_update(md_of(c->self), &b, 1); }
+static void MD_digest(tl_jcall *c) { mdstate *m = md_of(c->self); uint8_t out[64]; md_final(m, out); c->ret = vl(bytes_array(out, md_len(m->kind))); }
+static void MD_digestWith(tl_jcall *c) { MD_update(c); MD_digest(c); }
+static void MD_reset(tl_jcall *c) { md_init(md_of(c->self)); }
+static void MD_length(tl_jcall *c) { c->ret.i = (int)md_len(md_of(c->self)->kind); }
+static void MD_clone(tl_jcall *c)
+{
+    jobj *o = tl_jni_new_object(c->self->cls);
+    *md_of(o) = *md_of(c->self);
+    c->ret = vl(o);
+}
+
+/* SecretKeySpec(key, algorithm): a Key whose getEncoded() is the bytes. */
+static void SKS_init(tl_jcall *c)
+{
+    jobj *a = c->args[0].l;
+    jvalue v = vl(a ? bytes_array(a->arr.data, a->arr.len) : NULL);
+    tl_jni_set_field(c->self, "encoded", "[B", v);
+}
+
+typedef struct { int kind; CCHmacContext ctx; uint8_t key[256]; size_t keylen; bool ready; } macstate;
+static macstate *mac_of(jobj *o) { if (!o->native) o->native = calloc(1, sizeof(macstate)); return o->native; }
+static CCHmacAlgorithm mac_alg(int k) { return k == MD_MD5 ? kCCHmacAlgMD5 : k == MD_SHA1 ? kCCHmacAlgSHA1 : k == MD_SHA256 ? kCCHmacAlgSHA256 : k == MD_SHA384 ? kCCHmacAlgSHA384 : kCCHmacAlgSHA512; }
+static void mac_start(macstate *m) { CCHmacInit(&m->ctx, mac_alg(m->kind), m->key, m->keylen); m->ready = true; }
+static void Mac_getInstance(tl_jcall *c)
+{
+    int k = md_kind(S(c->args[0].l));
+    if (!k) { tl_log_line("security: Mac.getInstance(%s): not an algorithm here", S(c->args[0].l)); tl_jni_throw("java/security/NoSuchAlgorithmException", S(c->args[0].l)); return; }
+    jobj *o = tl_jni_new_object(tl_jni_class("javax/crypto/Mac"));
+    mac_of(o)->kind = k;
+    c->ret = vl(o);
+}
+static void Mac_init(tl_jcall *c)
+{
+    macstate *m = mac_of(c->self);
+    jobj *key = c->args[0].l;
+    jvalue v = key ? tl_jni_get_field(key, "encoded", "[B") : vl(NULL);
+    jobj *a = v.l;
+    m->keylen = a ? (a->arr.len < sizeof(m->key) ? a->arr.len : sizeof(m->key)) : 0;
+    if (m->keylen) memcpy(m->key, a->arr.data, m->keylen);
+    mac_start(m);
+}
+static void Mac_update(tl_jcall *c) { macstate *m = mac_of(c->self); jobj *a = c->args[0].l; if (!m->ready) mac_start(m); if (a) CCHmacUpdate(&m->ctx, a->arr.data, a->arr.len); }
+static void Mac_doFinal(tl_jcall *c)
+{
+    macstate *m = mac_of(c->self);
+    if (!m->ready) mac_start(m);
+    uint8_t out[64];
+    CCHmacFinal(&m->ctx, out);
+    mac_start(m);
+    c->ret = vl(bytes_array(out, md_len(m->kind)));
+}
+static void Mac_reset(tl_jcall *c) { mac_start(mac_of(c->self)); }
+static void Mac_clone(tl_jcall *c) { jobj *o = tl_jni_new_object(c->self->cls); *mac_of(o) = *mac_of(c->self); c->ret = vl(o); }
+
+static void SecureRandom_nextBytes(tl_jcall *c) { jobj *a = c->args[0].l; if (a && a->arr.len) arc4random_buf(a->arr.data, a->arr.len); }
+
 static const struct { const char *name, *super; } k_classes[] = {
     { "java/util/UUID", "java/lang/Object" },
     { "java/util/Arrays", "java/lang/Object" }, { "java/lang/ArrayIndexOutOfBoundsException", "java/lang/RuntimeException" },
@@ -270,6 +403,11 @@ static const struct { const char *name, *super; } k_classes[] = {
     { "java/security/spec/KeySpec", "java/lang/Object" }, { "java/security/spec/X509EncodedKeySpec", "java/security/spec/KeySpec" },
     { "java/security/Key", "java/lang/Object" }, { "java/security/PublicKey", "java/security/Key" },
     { "java/security/Signature", "java/lang/Object" }, { "java/lang/IllegalArgumentException", "java/lang/RuntimeException" },
+    { "java/security/MessageDigest", "java/lang/Object" }, { "javax/crypto/Mac", "java/lang/Object" },
+    { "javax/crypto/SecretKey", "java/security/Key" }, { "javax/crypto/spec/SecretKeySpec", "javax/crypto/SecretKey" },
+    { "java/security/SecureRandom", "java/lang/Object" },
+    { "java/security/GeneralSecurityException", "java/lang/Exception" },
+    { "java/security/NoSuchAlgorithmException", "java/security/GeneralSecurityException" },
 };
 
 #define M_(c, n, s, f) { c, n, s, f }
@@ -291,6 +429,17 @@ static const tl_jhle k_hle[] = {
     M_("java/security/Signature", "initVerify", "(Ljava/security/PublicKey;)V", Signature_initVerify),
     M_("java/security/Signature", "update", "([B)V", Signature_update), M_("java/security/Signature", "update", "([BII)V", Signature_updateRange),
     M_("java/security/Signature", "verify", "([B)Z", Signature_verify),
+    M_("java/security/MessageDigest", "getInstance", "(Ljava/lang/String;)Ljava/security/MessageDigest;", MD_getInstance),
+    M_("java/security/MessageDigest", "update", "([B)V", MD_update), M_("java/security/MessageDigest", "update", "([BII)V", MD_updateRange),
+    M_("java/security/MessageDigest", "update", "(B)V", MD_updateByte), M_("java/security/MessageDigest", "digest", "()[B", MD_digest),
+    M_("java/security/MessageDigest", "digest", "([B)[B", MD_digestWith), M_("java/security/MessageDigest", "reset", "()V", MD_reset),
+    M_("java/security/MessageDigest", "getDigestLength", "()I", MD_length), M_("java/security/MessageDigest", "clone", "()Ljava/lang/Object;", MD_clone),
+    M_("javax/crypto/spec/SecretKeySpec", "<init>", "([BLjava/lang/String;)V", SKS_init),
+    M_("javax/crypto/Mac", "getInstance", "(Ljava/lang/String;)Ljavax/crypto/Mac;", Mac_getInstance),
+    M_("javax/crypto/Mac", "init", "(Ljava/security/Key;)V", Mac_init), M_("javax/crypto/Mac", "update", "([B)V", Mac_update),
+    M_("javax/crypto/Mac", "doFinal", "()[B", Mac_doFinal), M_("javax/crypto/Mac", "reset", "()V", Mac_reset),
+    M_("javax/crypto/Mac", "clone", "()Ljava/lang/Object;", Mac_clone),
+    M_("java/security/SecureRandom", "<init>", "()V", Noop), M_("java/security/SecureRandom", "nextBytes", "([B)V", SecureRandom_nextBytes),
     { NULL, NULL, NULL, NULL }
 };
 
