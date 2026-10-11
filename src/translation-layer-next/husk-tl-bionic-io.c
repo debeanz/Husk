@@ -198,6 +198,36 @@ static const vfile *vfile_find(const char *path)
 }
 static bool vfd_is(int fd) { return fd >= 0 && fd < 4096 && g_vfd[fd].on; }
 
+/*
+ * /proc/self/mem: the process's memory as a file, offsets being addresses. Android code patchers write code through it
+ * (MonoMod's libmonomod_android_libc_shim pwrites its detours there), since Linux lets that through page protection. Here
+ * the descriptor is a placeholder and reads and writes are copies; code in the JIT region is written through its
+ * writable view.
+ */
+static bool g_procmem[4096];
+static bool procmem_is(int fd) { return fd >= 0 && fd < 4096 && g_procmem[fd]; }
+static bool procmem_path(const char *p)
+{
+    if (!p || strncmp(p, "/proc/", 6)) return false;
+    p += 6;
+    if (!strncmp(p, "self/", 5)) p += 5;
+    else { char *end; long pid = strtol(p, &end, 10); if (end == p || *end != '/' || pid != getpid()) return false; p = end + 1; }
+    return !strcmp(p, "mem");
+}
+static long procmem_write(const void *src, size_t n, long addr)
+{
+    uint8_t *d = (uint8_t *)(uintptr_t)addr;
+    static int said;
+    if (said++ < 8) tl_log_line("procmem: %zu bytes written at %p%s", n, (void *)d, tl_xmem_is_rx(d) ? " (code, through the writable view)" : "");
+    if (n && tl_xmem_is_rx(d) && tl_xmem_is_rx(d + n - 1)) {
+        memmove(d + tl_xmem_delta(), src, n);
+        tl_xmem_flush(d, n);
+    } else {
+        memmove(d, src, n);
+    }
+    return (long)n;
+}
+
 static void ftrace_open_jar(const char *path, int fd)
 {
     static int tr = -1;
@@ -396,6 +426,11 @@ static int b_open(const char *path, int flags, unsigned mode)
         ftrace_open_jar(path, fd);
         return fd;
     }
+    if (procmem_path(path)) {
+        TL_ERRNO_BEGIN(); int fd = open("/dev/null", O_RDWR); TL_ERRNO_END();
+        if (fd >= 0 && fd < 4096) g_procmem[fd] = true;
+        return fd;
+    }
     const char *real = tl_path_resolve(path, buf, sizeof(buf));
     const char *s = synth_content(path, content, sizeof(content));
     if (s) {
@@ -424,7 +459,7 @@ static int b_open(const char *path, int flags, unsigned mode)
 }
 static int b___open_2(const char *path, int flags) { return b_open(path, flags, 0); }
 static bool net_trace_fd(int fd);
-static int b_close(int fd) { if (vfd_is(fd)) g_vfd[fd].on = false; bool sock = net_trace_fd(fd); TL_ERRNO_BEGIN(); int r = close(fd); tl_atomic_closed(fd); TL_ERRNO_END(); if (sock) tl_log_line("net: close(fd %d)", fd); return r; }
+static int b_close(int fd) { if (vfd_is(fd)) g_vfd[fd].on = false; if (procmem_is(fd)) g_procmem[fd] = false; bool sock = net_trace_fd(fd); TL_ERRNO_BEGIN(); int r = close(fd); tl_atomic_closed(fd); TL_ERRNO_END(); if (sock) tl_log_line("net: close(fd %d)", fd); return r; }
 static bool net_trace_fd(int fd)
 {
     static int on = -1;
@@ -463,6 +498,7 @@ static long b_write(int fd, const void *p, size_t n)
 static long b_writev(int fd, const struct iovec *v, int n) { TL_ERRNO_BEGIN(); long r = writev(fd, v, n); TL_ERRNO_END(); return r; }
 static long b_pread64(int fd, void *p, size_t n, long off)
 {
+    if (procmem_is(fd)) { memmove(p, (const void *)(uintptr_t)off, n); return (long)n; }
     if (vfd_is(fd)) {
         const vfd *v = &g_vfd[fd];
         if (off < 0) { tl_set_guest_errno(22); return -1; }
@@ -473,7 +509,7 @@ static long b_pread64(int fd, void *p, size_t n, long off)
     }
     TL_ERRNO_BEGIN(); long r = pread(fd, p, n, off); TL_ERRNO_END(); return r;
 }
-static long b_pwrite64(int fd, const void *p, size_t n, long off) { TL_ERRNO_BEGIN(); long r = pwrite(fd, p, n, off); TL_ERRNO_END(); return r; }
+static long b_pwrite64(int fd, const void *p, size_t n, long off) { if (procmem_is(fd)) return procmem_write(p, n, off); TL_ERRNO_BEGIN(); long r = pwrite(fd, p, n, off); TL_ERRNO_END(); return r; }
 static long b___pwrite64_chk(int fd, const void *p, size_t n, long off, size_t bufsz)
 {
     if (n > bufsz) { tl_log_line("bionic: __pwrite64_chk overflow"); abort(); }
@@ -1081,7 +1117,12 @@ static int b_madvise(void *a, size_t l, int adv)
 static void *b_mremap(void *old, size_t olds, size_t news, int flags, void *newaddr)
 {
     mm_trace("mremap", old, olds, (long)news, flags);
-    (void)flags; (void)newaddr;
+    (void)newaddr;
+    /* Shrinking stays in place, as on Linux (an allocator trimming a segment -- Mono's for code -- keeps using the start).
+     * The tail is left mapped: pages here are 16 KiB, so giving back the guest's 4 KiB-aligned tail could take live bytes. */
+    if (news <= olds) return old;
+    /* Growing means moving, which only MREMAP_MAYMOVE (1) allows. JIT memory never moves: its code is where it was put. */
+    if (!(flags & 1) || tl_xmem_contains(old)) { tl_set_guest_errno(12); return (void *)-1; }
     void *n = mmap(NULL, news, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
     if (n == MAP_FAILED) { tl_set_guest_errno(12); return (void *)-1; }
     anon_add(n, news);
@@ -1533,6 +1574,8 @@ static int b_msync(void *a, size_t l, int flags)
     TL_ERRNO_BEGIN(); int r = msync(a, l, d); TL_ERRNO_END(); return r;
 }
 static int b_sched_getcpu(void) { return 0; }
+/* Which pages are resident; MonoMod probes with it whether an address is mapped (ENOMEM: not). Pages are 16 KiB on both sides. */
+static int b_mincore(void *a, size_t l, unsigned char *vec) { TL_ERRNO_BEGIN(); int r = mincore(a, l, (char *)vec); TL_ERRNO_END(); return r; }
 static int b_fallocate(int fd, int mode, long off, long len) { (void)fd; (void)mode; (void)off; (void)len; tl_set_guest_errno(95 /* EOPNOTSUPP */); return -1; }
 static int b_inotify_init1(int flags) { (void)flags; return b_inotify_init(); }
 static int b_inotify_rm_watch(int fd, int wd) { (void)fd; (void)wd; return stub_enosys_i("inotify_rm_watch"); }
@@ -1585,7 +1628,7 @@ const tl_bionic_entry tl_tab_io2[] = {
     TL_WRAP("pread", b_pread64), TL_WRAP("pwrite", b_pwrite64), TL_WRAP("fstat64", b_fstat), TL_WRAP("lstat64", b_lstat),
     TL_WRAP("ftruncate64", b_ftruncate), TL_WRAP("mmap64", b_mmap), TL_WRAP("posix_fadvise", b_posix_fadvise),
     TL_WRAP("posix_fadvise64", b_posix_fadvise), TL_WRAP("fstatfs", b_fstatfs), TL_WRAP("fstatfs64", b_fstatfs),
-    TL_WRAP("statfs64", b_statfs), TL_WRAP("msync", b_msync), TL_WRAP("sched_getcpu", b_sched_getcpu), TL_WRAP("fallocate", b_fallocate),
+    TL_WRAP("statfs64", b_statfs), TL_WRAP("msync", b_msync), TL_WRAP("sched_getcpu", b_sched_getcpu), TL_WRAP("mincore", b_mincore), TL_WRAP("fallocate", b_fallocate),
     TL_WRAP("fallocate64", b_fallocate), TL_WRAP("inotify_init1", b_inotify_init1), TL_WRAP("inotify_rm_watch", b_inotify_rm_watch),
     TL_WRAP("getgrgid", b_getgrgid), TL_WRAP("getgrouplist", b_getgrouplist), TL_WRAP("getgroups", b_getgroups), TL_WRAP("getsid", b_getsid),
     TL_WRAP("getpwnam_r", b_getpwnam_r), TL_WRAP("seteuid", b_seteuid), TL_WRAP("setgroups", b_setgroups), TL_WRAP("sync", b_sync),

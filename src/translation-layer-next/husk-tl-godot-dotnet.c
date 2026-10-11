@@ -35,6 +35,7 @@
 #include "husk-tl-bionic.h"
 #include "husk-tl-codewrite.h"
 #include "husk-tl-internal.h"
+#include "husk-tl-jni.h"
 #include "husk-tl-ld.h"
 
 #define PUBLISH "/.godot/mono/publish/arm64"
@@ -844,6 +845,23 @@ static bool prepare_sts2(const tl_zip *apk)
     return true;
 }
 
+/* What GodotApp's static initializer loads before the engine, by System.loadLibrary so that each one's JNI_OnLoad runs: the .NET
+ * crypto library (Godot's own mono template; it keeps the VM for its Java calls), and in this port FMOD, which finds Java
+ * the same way, and MonoMod's code-patching shim. */
+static void preload_libraries(const tl_zip *apk)
+{
+    static const char *const names[] = { "fmod", "fmodstudio", "monomod_android_libc_shim", "System.Security.Cryptography.Native.Android", NULL };
+    for (int i = 0; names[i]; i++) {
+        char entry[200];
+        snprintf(entry, sizeof(entry), "lib/arm64-v8a/lib%s.so", names[i]);
+        if (!tl_zip_find(apk, entry)) continue;
+        jvalue a; a.j = 0; a.l = tl_jni_new_string(names[i]);
+        tl_jni_call(tl_jni_class_object("java/lang/System"), "loadLibrary", "(Ljava/lang/String;)V", &a);
+        if (tl_jni_pending()) { tl_log_line("dotnet: System.loadLibrary(%s) failed", names[i]); tl_jni_clear(); }
+        else tl_log_line("dotnet: lib%s.so loaded, as the launcher does", names[i]);
+    }
+}
+
 /* -------------------------------------------------------------------- entry */
 
 bool tl_godot_dotnet_prepare(const char *data_dir)
@@ -853,6 +871,7 @@ bool tl_godot_dotnet_prepare(const char *data_dir)
     snprintf(FILES, sizeof(FILES), "%s/files", data_dir);
     tl_log_line("dotnet: a Godot .NET game (Mono)");
     runtime_env();
-    if (tl_zip_find(apk, "assets/payload/SlayTheSpire2.zip") && tl_zip_find(apk, "assets/dotnet_bcl/GodotSharp.dll")) return prepare_sts2(apk);
+    if (tl_zip_find(apk, "assets/payload/SlayTheSpire2.zip") && tl_zip_find(apk, "assets/dotnet_bcl/GodotSharp.dll") && !prepare_sts2(apk)) return false;
+    preload_libraries(apk);
     return true;
 }

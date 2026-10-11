@@ -391,6 +391,7 @@ static unsigned long bionic_getauxval(unsigned long type)
     static uint8_t random16[16] = { 0x4a, 0x13, 0x9c, 0x71, 0xe2, 0x05, 0x88, 0x3d, 0xb6, 0x21, 0x5f, 0xc4, 0x90, 0x2e, 0x67, 0xd8 };
     switch (type) {
     case 6:  return 16384;                                   /* AT_PAGESZ */
+    case 15: return (unsigned long)"aarch64";                /* AT_PLATFORM: MonoMod reads the architecture here */
     case 16: return 0xff;                                    /* AT_HWCAP: FP, ASIMD, EVTSTRM, AES, PMULL, SHA1, SHA2, CRC32 */
     case 26: return 0;                                       /* AT_HWCAP2 */
     case 25: return (unsigned long)random16;                 /* AT_RANDOM */
@@ -635,7 +636,7 @@ static char **tl_environ_ptr(void) { return NULL; }
 /* ------------------------------------------------------------- the table */
 
 const tl_bionic_entry tl_tab_core[] = {
-    TL_WRAP("__errno", bionic___errno),
+    TL_WRAP("__errno", bionic___errno), TL_WRAP("__errno_location", bionic___errno),   /* glibc's name, which MonoMod imports */
     TL_WRAP("__system_property_find", bionic___system_property_find),
     TL_WRAP("__system_property_read", bionic___system_property_read),
     TL_WRAP("__system_property_get", bionic___system_property_get),
