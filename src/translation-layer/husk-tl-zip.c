@@ -377,6 +377,16 @@ bool tl_zip_data(const tl_zip *z, const tl_zip_entry *e, size_t limit,
     return true;
 }
 
+const uint8_t *tl_zip_raw(const tl_zip *z, const tl_zip_entry *e)
+{
+    if (!in_file(z, e->local_offset, 30) || rd32(z->map + e->local_offset) != SIG_LOCAL) {
+        return NULL;
+    }
+    const uint8_t *l = z->map + e->local_offset;
+    uint64_t data_off = e->local_offset + 30ull + rd16(l + 26) + rd16(l + 28);
+    return in_file(z, data_off, e->csize) ? z->map + data_off : NULL;
+}
+
 bool tl_zip_extract(const tl_zip *z, const tl_zip_entry *e, const char *path,
                     char *err, size_t errlen)
 {

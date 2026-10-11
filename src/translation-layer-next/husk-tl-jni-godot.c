@@ -24,6 +24,7 @@
 #include "husk-tl-godot.h"
 #include "husk-tl-jni.h"
 #include "husk-tl-ld.h"
+#include "husk-tl-zfile.h"
 #include "husk-tl-internal.h"
 
 const char *tl_path_resolve(const char *path, char *buf, size_t n);
@@ -86,7 +87,7 @@ static void IO_cutouts(tl_jcall *c) { c->ret = vl(tl_jni_new_prim_array('I', 0))
 /* -------------------------------------------------- FileAccessHandler (disk) */
 
 #define MAX_FILES 256
-static struct { int fd; bool eof; } F[MAX_FILES];
+static struct { int fd; bool eof; tl_zfile *z; } F[MAX_FILES];   /* z: a file read in place from the APK (husk-tl-zfile.c) */
 static pthread_mutex_t f_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* Godot's FileAccess mode flags: READ 1, WRITE 2, READ_WRITE 3, WRITE_READ 7. */
@@ -109,12 +110,12 @@ static void FA_open(tl_jcall *c)
     pthread_mutex_lock(&f_lock);
     int id = 0;
     for (int i = 1; i < MAX_FILES; i++) if (!F[i].fd) { id = i; break; }
-    if (id) { F[id].fd = fd + 1; F[id].eof = false; } else close(fd);
+    if (id) { F[id].fd = fd + 1; F[id].eof = false; F[id].z = (flags & 3) == O_RDONLY ? tl_zfile_open_fd(fd) : NULL; } else close(fd);
     pthread_mutex_unlock(&f_lock);
     c->ret = vi(id);
 }
 static int fd_of(int id) { return id > 0 && id < MAX_FILES && F[id].fd ? F[id].fd - 1 : -1; }
-static void FA_close(tl_jcall *c) { int fd = fd_of(c->args[0].i); if (fd >= 0) { close(fd); F[c->args[0].i].fd = 0; } }
+static void FA_close(tl_jcall *c) { int id = c->args[0].i, fd = fd_of(id); if (fd >= 0) { tl_zfile_close(F[id].z); F[id].z = NULL; close(fd); F[id].fd = 0; } }
 static void FA_size(tl_jcall *c) { struct stat st; int fd = fd_of(c->args[0].i); c->ret = vj(fd >= 0 && fstat(fd, &st) == 0 ? st.st_size : 0); }
 static void FA_pos(tl_jcall *c) { int fd = fd_of(c->args[0].i); c->ret = vj(fd >= 0 ? lseek(fd, 0, SEEK_CUR) : 0); }
 static void FA_seek(tl_jcall *c) { int id = c->args[0].i, fd = fd_of(id); if (fd >= 0) { lseek(fd, c->args[1].j, SEEK_SET); F[id].eof = false; } }
@@ -130,7 +131,15 @@ static void FA_read(tl_jcall *c)
     int64_t n = buf ? tl_jni_get_field(buf, "capacity", "J").j : 0;
     if (fd < 0 || !p || n <= 0) { c->ret = vi(0); return; }
     int64_t got = 0;
-    while (got < n) { ssize_t r = read(fd, p + got, (size_t)(n - got)); if (r <= 0) break; got += r; }
+    if (F[id].z) {
+        /* The placeholder holds the size and the position; the bytes come inflated from the APK. */
+        off_t at = lseek(fd, 0, SEEK_CUR);
+        long r = tl_zfile_pread(F[id].z, p, (size_t)n, (uint64_t)at);
+        got = r > 0 ? r : 0;
+        lseek(fd, at + got, SEEK_SET);
+    } else {
+        while (got < n) { ssize_t r = read(fd, p + got, (size_t)(n - got)); if (r <= 0) break; got += r; }
+    }
     if (got < n) F[id].eof = true;
     c->ret = vi((int)got);
 }

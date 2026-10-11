@@ -94,6 +94,8 @@ bool tl_zip_open(tl_zip *z, const char *path, char *err, size_t errlen);
 bool tl_zip_open_mem(tl_zip *z, const uint8_t *data, size_t size, char *err, size_t errlen);
 /* One entry written to `path`, inflated a few MiB at a time (entries can be far larger than memory). */
 bool tl_zip_extract(const tl_zip *z, const tl_zip_entry *e, const char *path, char *err, size_t errlen);
+/* Where an entry's bytes (compressed or stored, csize of them) lie in the mapping, or NULL. */
+const uint8_t *tl_zip_raw(const tl_zip *z, const tl_zip_entry *e);
 void tl_zip_close(tl_zip *z);
 const tl_zip_entry *tl_zip_find(const tl_zip *z, const char *name);
 

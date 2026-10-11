@@ -12,6 +12,7 @@
 #include "husk-tl-internal.h"
 #include "husk-tl-codewrite.h"
 #include "husk-tl-xmem.h"
+#include "husk-tl-zfile.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -205,6 +206,9 @@ static bool vfd_is(int fd) { return fd >= 0 && fd < 4096 && g_vfd[fd].on; }
  * writable view.
  */
 static bool g_procmem[4096];
+/* Descriptors on a file read in place from the APK (husk-tl-zfile.c): reads come inflated from there. */
+static tl_zfile *g_zfd[4096];
+static tl_zfile *zfd_of(int fd) { return fd >= 0 && fd < 4096 ? g_zfd[fd] : NULL; }
 static bool procmem_is(int fd) { return fd >= 0 && fd < 4096 && g_procmem[fd]; }
 static bool procmem_path(const char *p)
 {
@@ -455,11 +459,13 @@ static int b_open(const char *path, int flags, unsigned mode)
     TL_ERRNO_END();
     { static int tr = -1; if (tr < 0) tr = getenv("TL_FILE_TRACE") ? atoi(getenv("TL_FILE_TRACE")) : 0; if (tr) tl_log_line("file: open(%s, %#x) -> %d%s", path, flags, fd, fd < 0 ? (e == ENOENT ? " ENOENT" : " error") : ""); }
     if (fd < 0 && e == ENOENT) note_missing("open", path);
+    /* A descriptor number seen again: whatever was read in place under it before is gone (closed some other way). */
+    if (fd >= 0 && fd < 4096 && tl_zfile_any) { tl_zfile_close(g_zfd[fd]); g_zfd[fd] = (flags & 3) == 0 ? tl_zfile_open_fd(fd) : NULL; }
     return fd;
 }
 static int b___open_2(const char *path, int flags) { return b_open(path, flags, 0); }
 static bool net_trace_fd(int fd);
-static int b_close(int fd) { if (vfd_is(fd)) g_vfd[fd].on = false; if (procmem_is(fd)) g_procmem[fd] = false; bool sock = net_trace_fd(fd); TL_ERRNO_BEGIN(); int r = close(fd); tl_atomic_closed(fd); TL_ERRNO_END(); if (sock) tl_log_line("net: close(fd %d)", fd); return r; }
+static int b_close(int fd) { if (vfd_is(fd)) g_vfd[fd].on = false; if (procmem_is(fd)) g_procmem[fd] = false; if (zfd_of(fd)) { tl_zfile_close(g_zfd[fd]); g_zfd[fd] = NULL; } bool sock = net_trace_fd(fd); TL_ERRNO_BEGIN(); int r = close(fd); tl_atomic_closed(fd); TL_ERRNO_END(); if (sock) tl_log_line("net: close(fd %d)", fd); return r; }
 static bool net_trace_fd(int fd)
 {
     static int on = -1;
@@ -470,6 +476,13 @@ static bool net_trace_fd(int fd)
 }
 static long b_read(int fd, void *p, size_t n)
 {
+    if (zfd_of(fd)) {
+        off_t at = lseek(fd, 0, SEEK_CUR);
+        long r = tl_zfile_pread(g_zfd[fd], p, n, (uint64_t)at);
+        if (r > 0) lseek(fd, at + r, SEEK_SET);
+        if (r < 0) tl_set_guest_errno(5);                                                                         /* EIO */
+        return r;
+    }
     if (vfd_is(fd)) {
         vfd *v = &g_vfd[fd];
         if (v->pos >= v->size) return 0;
@@ -499,6 +512,7 @@ static long b_writev(int fd, const struct iovec *v, int n) { TL_ERRNO_BEGIN(); l
 static long b_pread64(int fd, void *p, size_t n, long off)
 {
     if (procmem_is(fd)) { memmove(p, (const void *)(uintptr_t)off, n); return (long)n; }
+    if (zfd_of(fd)) { long r = tl_zfile_pread(g_zfd[fd], p, n, (uint64_t)off); if (r < 0) tl_set_guest_errno(5); return r; }
     if (vfd_is(fd)) {
         const vfd *v = &g_vfd[fd];
         if (off < 0) { tl_set_guest_errno(22); return -1; }

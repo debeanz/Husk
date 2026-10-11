@@ -37,6 +37,7 @@
 #include "husk-tl-internal.h"
 #include "husk-tl-jni.h"
 #include "husk-tl-ld.h"
+#include "husk-tl-zfile.h"
 
 #define PUBLISH "/.godot/mono/publish/arm64"
 
@@ -521,7 +522,53 @@ static void name_payload(sts2 *g, const char *dll_sha)
 static const char *required[] = { "SlayTheSpire2.pck", "release_info.json", "data_sts2_windows_x86_64/sts2.dll",
                                    "data_sts2_windows_x86_64/sts2.deps.json", "data_sts2_windows_x86_64/sts2.runtimeconfig.json", NULL };
 
-/* assets/payload/SlayTheSpire2.zip unpacked to files/payloads/<id>/game, once. */
+/* Entries of the bundled ZIP too big to unpack: deflated, a quarter of a GB or more, inside a ZIP the APK stores (so their bytes
+ * stay mapped for good). They are read where they lie (husk-tl-zfile.c) through a sparse placeholder at their path. */
+static bool in_place(bool zip_mapped, const tl_zip_entry *e) { return zip_mapped && e->method == 8 && e->usize >= (256ull << 20); }
+
+static void index_path(const char *path, char *out, size_t n)
+{
+    const char *s = strrchr(path, '/');
+    snprintf(out, n, "%.*s/.husk-index-%s", s ? (int)(s - path) : 0, path, s ? s + 1 : path);
+}
+
+/* Put one in-place entry at `path`: the index (made if missing or stale, or when `fresh`), the placeholder, and the reader. */
+static bool attach_in_place(const tl_zip *z, const tl_zip_entry *e, const char *path, bool fresh)
+{
+    char idx[1100], err[300] = "";
+    index_path(path, idx, sizeof(idx));
+    const uint8_t *raw = tl_zip_raw(z, e);
+    if (!raw) { tl_log_line("dotnet: %s: no data in the ZIP", e->name); return false; }
+    if (fresh || !tl_zfile_index_ok(idx, e->csize, e->usize)) {
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        tl_log_line("dotnet:   %s (%.2f GB): read from the APK where it lies, not unpacked -- indexing it once", e->name, e->usize / 1e9);
+        if (!tl_zfile_build_index(raw, e->csize, e->usize, idx, err, sizeof(err))) { tl_log_line("dotnet: indexing %s: %s", e->name, err); return false; }
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        tl_log_line("dotnet:   indexed in %.1f s (%.0f MiB of index)", (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9, file_size(idx) / 1048576.0);
+    }
+    if (fresh || file_size(path) != (long long)e->usize) {
+        int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        bool ok = fd >= 0 && ftruncate(fd, (off_t)e->usize) == 0;
+        if (fd >= 0) close(fd);
+        if (!ok) { tl_log_line("dotnet: cannot make the placeholder %s (%s)", path, strerror(errno)); return false; }
+    }
+    return tl_zfile_register(path, raw, e->csize, e->usize, idx);
+}
+
+/* The first bytes of a file, through the in-place reader when it is one. */
+static bool file_magic(const char *path, char out[4])
+{
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return false;
+    tl_zfile *zf = tl_zfile_open_fd(fd);
+    long r = zf ? tl_zfile_pread(zf, out, 4, 0) : (long)read(fd, out, 4);
+    tl_zfile_close(zf);
+    close(fd);
+    return r == 4;
+}
+
+/* assets/payload/SlayTheSpire2.zip into files/payloads/<id>/game, once: small files unpacked, the game pack read in place. */
 static bool import_payload(const tl_zip *apk, sts2 *g, char *dll_sha)
 {
     const tl_zip_entry *pe = tl_zip_find(apk, "assets/payload/SlayTheSpire2.zip");
@@ -530,34 +577,13 @@ static bool import_payload(const tl_zip *apk, sts2 *g, char *dll_sha)
     snprintf(stamp, sizeof(stamp), "%s/payloads/.husk_payload", FILES);
     snprintf(want, sizeof(want), "%llu %llu", (unsigned long long)pe->csize, (unsigned long long)pe->usize);
 
-    /* Already there: the stamp names the payload id; the game dir is whole when its manifest exists. */
-    char *have = read_file(stamp, NULL);
-    if (have) {
-        char size[64] = "", pay[160] = "";
-        if (sscanf(have, "%63[^\n]\n%159s", size, pay) == 2 && !strcmp(size, want)) {
-            char game[900], man[1000];
-            snprintf(game, sizeof(game), "%s/payloads/%s/game", FILES, pay);
-            snprintf(man, sizeof(man), "%s/.payload_manifest.json", game);
-            char rel[1000], dll[1000];
-            snprintf(rel, sizeof(rel), "%s/release_info.json", game);
-            snprintf(dll, sizeof(dll), "%s/data_sts2_windows_x86_64/sts2.dll", game);
-            if (exists(man) && read_release(g, rel) && sha256_file(dll, dll_sha)) {
-                name_payload(g, dll_sha);
-                snprintf(g->game, sizeof(g->game), "%s", game);
-                free(have);
-                tl_log_line("dotnet: the game is unpacked (%s)", g->pay);
-                return true;
-            }
-        }
-        free(have);
-    }
-
     /* The bundled ZIP, read where it lies when the APK stores it (it does: it is 0.9 GB of already-compressed data). */
     char err[300] = "";
     tl_zip z;
     const uint8_t *zd = NULL; size_t zlen = 0; bool zowned = false;
     char src_copy[800] = "";
-    if (pe->method == 0) {
+    bool mapped = pe->method == 0;
+    if (mapped) {
         if (!tl_zip_data(apk, pe, (size_t)1 << 40, &zd, &zlen, &zowned, err, sizeof(err)) || !tl_zip_open_mem(&z, zd, zlen, err, sizeof(err))) {
             tl_log_line("dotnet: the bundled game: %s", err); return false;
         }
@@ -566,19 +592,6 @@ static bool import_payload(const tl_zip *apk, sts2 *g, char *dll_sha)
         parent_dirs(src_copy);
         if (!tl_zip_extract(apk, pe, src_copy, err, sizeof(err)) || !tl_zip_open(&z, src_copy, err, sizeof(err))) {
             tl_log_line("dotnet: the bundled game: %s", err); return false;
-        }
-    }
-
-    unsigned long long total = 0;
-    for (size_t i = 0; i < z.count; i++) total += z.entries[i].usize;
-    struct statfs sf;
-    if (statfs(FILES, &sf) == 0) {
-        unsigned long long free_b = (unsigned long long)sf.f_bavail * sf.f_bsize;
-        if (free_b < total + (256ull << 20)) {
-            tl_log_line("dotnet: the game needs %.1f GB unpacked and the phone has %.1f GB free -- free some space and start it again",
-                        total / 1e9, free_b / 1e9);
-            tl_zip_close(&z);
-            return false;
         }
     }
 
@@ -594,11 +607,57 @@ static bool import_payload(const tl_zip *apk, sts2 *g, char *dll_sha)
     }
     size_t strip = one_top ? strlen(top) : 0;
 
+    /* Already there: the stamp names the payload id; the game dir is whole when its manifest exists. */
+    char *have = read_file(stamp, NULL);
+    if (have) {
+        char size[64] = "", pay[160] = "";
+        if (sscanf(have, "%63[^\n]\n%159s", size, pay) == 2 && !strcmp(size, want)) {
+            char game[900], man[1000], rel[1000], dll[1000];
+            snprintf(game, sizeof(game), "%s/payloads/%s/game", FILES, pay);
+            snprintf(man, sizeof(man), "%s/.payload_manifest.json", game);
+            snprintf(rel, sizeof(rel), "%s/release_info.json", game);
+            snprintf(dll, sizeof(dll), "%s/data_sts2_windows_x86_64/sts2.dll", game);
+            bool ok = exists(man) && read_release(g, rel) && sha256_file(dll, dll_sha);
+            for (size_t i = 0; i < z.count && ok; i++) {
+                if (!in_place(mapped, &z.entries[i])) continue;
+                char to[1100];
+                snprintf(to, sizeof(to), "%s/%s", game, z.entries[i].name + strip);
+                ok = attach_in_place(&z, &z.entries[i], to, false);
+            }
+            if (ok) {
+                name_payload(g, dll_sha);
+                snprintf(g->game, sizeof(g->game), "%s", game);
+                free(have);
+                tl_zip_close(&z);
+                tl_log_line("dotnet: the game is unpacked (%s)", g->pay);
+                return true;
+            }
+        }
+        free(have);
+    }
+
+    unsigned long long total = 0, need = 0;
+    for (size_t i = 0; i < z.count; i++) {
+        total += z.entries[i].usize;
+        need += in_place(mapped, &z.entries[i]) ? z.entries[i].usize / 30 : z.entries[i].usize;      /* an index is ~1/32 of its file */
+    }
+    struct statfs sf;
+    if (statfs(FILES, &sf) == 0) {
+        unsigned long long free_b = (unsigned long long)sf.f_bavail * sf.f_bsize;
+        if (free_b < need + (256ull << 20)) {
+            tl_log_line("dotnet: the game needs %.2f GB of space and the phone has %.2f GB free -- free some space and start it again",
+                        (need + (256ull << 20)) / 1e9, free_b / 1e9);
+            tl_zip_close(&z);
+            return false;
+        }
+    }
+
     char staging[700];
     snprintf(staging, sizeof(staging), "%s/payload_import/staging-husk", FILES);
     rm_rf(staging);
     mkdirs(staging);
-    tl_log_line("dotnet: unpacking the game (%.2f GB, %zu files) -- the first start takes a while", total / 1e9, z.count);
+    tl_log_line("dotnet: setting up the game (%.2f GB in %zu files, %.2f GB of it written out) -- the first start takes a while",
+                total / 1e9, z.count, need / 1e9);
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     bool ok = true;
@@ -613,16 +672,15 @@ static bool import_payload(const tl_zip *apk, sts2 *g, char *dll_sha)
         char to[1100];
         snprintf(to, sizeof(to), "%s/%s", staging, n + strip);
         parent_dirs(to);
+        if (in_place(mapped, e)) { ok = attach_in_place(&z, e, to, true); if (ok) files++; continue; }
         if (e->usize > (64u << 20)) tl_log_line("dotnet:   %s (%.2f GB)", n + strip, e->usize / 1e9);
         if (!tl_zip_extract(&z, e, to, err, sizeof(err))) { tl_log_line("dotnet: %s", err); ok = false; }
         else files++;
     }
     tl_zip_close(&z);
-    if (zowned) free((void *)zd);
-    if (src_copy[0]) unlink(src_copy);
     clock_gettime(CLOCK_MONOTONIC, &t1);
-    if (!ok) { rm_rf(staging); return false; }
-    tl_log_line("dotnet: %d files unpacked in %.1f s", files, (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9);
+    if (!ok) { rm_rf(staging); if (zowned) free((void *)zd); if (src_copy[0]) unlink(src_copy); return false; }
+    tl_log_line("dotnet: %d files in place in %.1f s", files, (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9);
 
     for (int i = 0; required[i]; i++) {
         char p[1100];
@@ -631,9 +689,7 @@ static bool import_payload(const tl_zip *apk, sts2 *g, char *dll_sha)
     }
     char pck[1000], magic[4] = "";
     snprintf(pck, sizeof(pck), "%s/SlayTheSpire2.pck", staging);
-    FILE *pf = fopen(pck, "rb");
-    if (pf) { if (fread(magic, 1, 4, pf) != 4) magic[0] = 0; fclose(pf); }
-    if (memcmp(magic, "GDPC", 4)) { tl_log_line("dotnet: SlayTheSpire2.pck is not a Godot pack"); rm_rf(staging); return false; }
+    if (!file_magic(pck, magic) || memcmp(magic, "GDPC", 4)) { tl_log_line("dotnet: SlayTheSpire2.pck is not a Godot pack"); rm_rf(staging); return false; }
 
     char rel[1000], dll[1000];
     snprintf(rel, sizeof(rel), "%s/release_info.json", staging);
@@ -643,13 +699,15 @@ static bool import_payload(const tl_zip *apk, sts2 *g, char *dll_sha)
 
     /* .payload_manifest.json, as the launcher writes it (less the PCK's own hash, which costs a full read of 1.8 GB). */
     char src_sha[65] = "";
-    if (zd) {
+    if (zd && !zowned) {
         uint8_t h[32];
         CC_SHA256_CTX c; CC_SHA256_Init(&c);
         for (size_t o = 0; o < zlen; o += 1u << 30) CC_SHA256_Update(&c, zd + o, (CC_LONG)(zlen - o > (1u << 30) ? (1u << 30) : zlen - o));
         CC_SHA256_Final(h, &c);
         for (int b = 0; b < 32; b++) snprintf(src_sha + 2 * b, 3, "%02x", h[b]);
     }
+    if (zowned) free((void *)zd);
+    if (src_copy[0]) unlink(src_copy);
     long long now = (long long)time(NULL);
     char buf[4096], q1[200], q2[200], q3[200], q4[200], q5[200];
     jstr(q1, sizeof(q1), g->version); jstr(q2, sizeof(q2), g->commit); jstr(q3, sizeof(q3), g->branch); jstr(q4, sizeof(q4), dll_sha);
