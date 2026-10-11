@@ -1838,3 +1838,22 @@ bool tl_ld_init(tl_lib *lib)
     pthread_mutex_unlock(&g_big);
     return ok;
 }
+
+/* /proc/self/maps as an Android process would show its libraries: each image's code view and data view, named by its path in
+ * the APK's library folder. What runs here never maps files itself, so this is the part a guest looks for. */
+size_t tl_ld_describe_maps(char *buf, size_t n, const char *lib_dir)
+{
+    size_t o = 0;
+    for (int i = 0; i < G.nlibs && o + 200 < n; i++) {
+        tl_lib *L = G.libs[i];
+        size_t span = L->npages * PAGE;
+        o += (size_t)snprintf(buf + o, n - o, "%012lx-%012lx r-xp 00000000 fd:00 %d %s/%s\n", (unsigned long)(uintptr_t)L->rx,
+                              (unsigned long)(uintptr_t)(L->rx + span), 1000 + i, lib_dir, L->name);
+        if (o + 200 < n)
+            o += (size_t)snprintf(buf + o, n - o, "%012lx-%012lx rw-p 00000000 fd:00 %d %s/%s\n", (unsigned long)(uintptr_t)L->rw,
+                                  (unsigned long)(uintptr_t)(L->rw + span), 1000 + i, lib_dir, L->name);
+    }
+    if (o >= n) o = n - 1;
+    buf[o] = 0;
+    return o;
+}

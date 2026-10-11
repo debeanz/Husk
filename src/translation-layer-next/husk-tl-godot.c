@@ -23,6 +23,7 @@ jobj *tl_hle_activity(void);
 jobj *tl_hle_assets(void);
 void tl_set_data_dir(const char *dir);
 void tl_nwindow_configure(int w, int h, void *layer);
+void tl_fmod_install(void);
 void *tl_nwindow_get(void);
 
 #define LIB "org/godotengine/godot/GodotLib"
@@ -123,6 +124,8 @@ bool tl_godot_start(const tl_godot_config *cfg)
     tl_hle_configure(cfg->package_name, cfg->apk_path, cfg->data_dir, cfg->width, cfg->height);
     tl_jni_hle_install();
     tl_godot_hle_install(cfg->package_name, cfg->apk_path, cfg->data_dir, cfg->width, cfg->height);
+    /* FMOD's Java side, for games with the FMOD extension (Slay the Spire 2): its output is an AudioTrack written from its mixer. */
+    tl_fmod_install();
     /* A .NET game: Mono's settings, and whatever the game's launcher puts on disk before the engine starts. */
     if (!tl_godot_dotnet_prepare(cfg->data_dir)) return false;
 

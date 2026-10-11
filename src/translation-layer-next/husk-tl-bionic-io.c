@@ -13,6 +13,7 @@
 #include "husk-tl-codewrite.h"
 #include "husk-tl-xmem.h"
 #include "husk-tl-zfile.h"
+#include "husk-tl-ld.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -73,6 +74,8 @@ void tl_set_data_dir(const char *dir)
     if (g_data_dir[0]) drop_unfinished(g_data_dir, 0);
 }
 const char *tl_data_dir(void) { return g_data_dir[0] ? g_data_dir : "/tmp"; }
+static char g_package[128];
+void tl_set_package_name(const char *pkg) { snprintf(g_package, sizeof(g_package), "%s", pkg ? pkg : ""); }
 
 /* A file holding `content`, already unlinked. Where it can be made depends on the host: iOS gives an app no /tmp. */
 static int synth_file(const char *content)
@@ -111,6 +114,18 @@ static const char *synth_content(const char *path, char *buf, size_t n)
     }
     if (!strncmp(path, "/sys/devices/system/cpu/", 24) && (strstr(path, "/present") || strstr(path, "/possible") || strstr(path, "/online"))) {
         snprintf(buf, n, "0-%ld\n", (getenv("TL_NCPU") ? atol(getenv("TL_NCPU")) : sysconf(_SC_NPROCESSORS_ONLN)) - 1);
+        return buf;
+    }
+    /* Mono will not start without /proc ("Mono requires /proc to be mounted": it checks /proc/self/maps exists). */
+    if (!strcmp(path, "/proc/self/maps")) {
+        char dir[200];
+        snprintf(dir, sizeof(dir), "/data/app/%s-1/lib/arm64", g_package[0] ? g_package : "app");
+        tl_ld_describe_maps(buf, n, dir);
+        return buf;
+    }
+    /* An app process's command line is its package name (code that wants to know which app it is in reads it). */
+    if (!strcmp(path, "/proc/self/cmdline")) {
+        snprintf(buf, n, "%s", g_package[0] ? g_package : "app_process64");
         return buf;
     }
     if (!strcmp(path, "/proc/self/status")) {
@@ -580,7 +595,7 @@ static void ftrace(const char *what, const char *path, int r, int e)
     if (tr) tl_log_line("file: %s(%s) -> %d%s", what, path ? path : "(null)", r, r < 0 ? (e == ENOENT ? " ENOENT" : " error") : "");
     if (r < 0 && e == ENOENT) note_missing(what, path);
 }
-static int b_access(const char *p, int m) { char b[1024]; jar_entry jar; if (jar_lookup(p, &jar)) { if (!jar.found) { tl_set_guest_errno(2); return -1; } if (m & 2) { tl_set_guest_errno(13); return -1; } return 0; } if (vfile_find(p)) { if (m & 2) { tl_set_guest_errno(13); return -1; } return 0; } TL_ERRNO_BEGIN(); int r = access(tl_path_resolve(p, b, sizeof(b)), m); int e = errno; TL_ERRNO_END(); ftrace("access", p, r, e); return r; }
+static int b_access(const char *p, int m) { char b[1024]; jar_entry jar; if (p && !strncmp(p, "/proc/", 6)) { char content[256]; if (synth_content(p, content, sizeof(content))) { if (m & 2) { tl_set_guest_errno(13); return -1; } return 0; } } if (jar_lookup(p, &jar)) { if (!jar.found) { tl_set_guest_errno(2); return -1; } if (m & 2) { tl_set_guest_errno(13); return -1; } return 0; } if (vfile_find(p)) { if (m & 2) { tl_set_guest_errno(13); return -1; } return 0; } TL_ERRNO_BEGIN(); int r = access(tl_path_resolve(p, b, sizeof(b)), m); int e = errno; TL_ERRNO_END(); ftrace("access", p, r, e); return r; }
 static int b_chmod(const char *p, unsigned m) { char b[1024]; TL_ERRNO_BEGIN(); int r = chmod(tl_path_resolve(p, b, sizeof(b)), (mode_t)m); TL_ERRNO_END(); return r; }
 static int b_fchmod(int fd, unsigned m) { TL_ERRNO_BEGIN(); int r = fchmod(fd, (mode_t)m); TL_ERRNO_END(); return r; }
 static int b_link(const char *a, const char *b2) { char x[1024], y[1024]; TL_ERRNO_BEGIN(); int r = link(tl_path_resolve(a, x, sizeof(x)), tl_path_resolve(b2, y, sizeof(y))); TL_ERRNO_END(); return r; }

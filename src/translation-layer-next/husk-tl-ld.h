@@ -74,6 +74,8 @@ tl_lib *tl_ld_lib_of(const void *addr);
 void *tl_ld_lib_base(const tl_lib *lib);
 const char *tl_ld_lib_name(const tl_lib *lib);
 const char *tl_ld_symbol_at(const void *addr, const char **lib_name, const void **sym_addr);
+/* /proc/self/maps lines for the loaded libraries, named as files in `lib_dir`. */
+size_t tl_ld_describe_maps(char *buf, size_t n, const char *lib_dir);
 
 /*
  * Walk loaded libraries the way dl_iterate_phdr does. The callback gets the load
