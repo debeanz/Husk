@@ -204,11 +204,14 @@ static int system_property_get(const char *name, char *value)
 /* ---------------------------------------------------------------- logging */
 
 void tl_jni_recent_dump(const char *why);
+void (*tl_log_watch)(const char *tag, const char *text);               /* a driver that wants to know what its game says */
+void (*tl_game_failed_hook)(const char *why);                          /* the app, told that the game did not start even if it is drawing frames */
 static void log_emit(int prio, const char *tag, const char *text)
 {
     static const char letters[] = "??VDIWEF";
     char p = (prio >= 0 && prio < 8) ? letters[prio] : '?';
     tl_log_line("%c/%s: %s", p, tag ? tag : "guest", text ? text : "");
+    if (tl_log_watch) tl_log_watch(tag, text);
     /* An exception the game reports (an error, from C# or Java): what it last asked Java is usually what it tripped over. */
     static atomic_int dumps;
     if (prio >= 6 && text && strstr(text, "Exception") && atomic_fetch_add(&dumps, 1) < 4) tl_jni_recent_dump("the game reported an exception");

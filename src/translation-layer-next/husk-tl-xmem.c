@@ -27,7 +27,7 @@ void tl_log_line(const char *fmt, ...);
 
 static struct {
     uint8_t *rx, *rw;
-    size_t size, used;
+    size_t size, used, top;       /* top: bytes at the high end set aside by tl_xmem_reserve_straddle */
     bool open;
     pthread_mutex_t lock;
 } g_x = { .lock = PTHREAD_MUTEX_INITIALIZER };
@@ -209,10 +209,30 @@ bool tl_xmem_alloc(size_t bytes, uint8_t **rx, uint8_t **rw)
     size_t n = (bytes + TL_XMEM_PAGE - 1) & ~(size_t)(TL_XMEM_PAGE - 1);
     bool ok = false;
     pthread_mutex_lock(&g_x.lock);
-    if (g_x.open && n <= g_x.size - g_x.used) {
+    if (g_x.open && n <= g_x.size - g_x.top - g_x.used) {
         if (rx) *rx = g_x.rx + g_x.used;
         if (rw) *rw = g_x.rw + g_x.used;
         g_x.used += n;
+        ok = true;
+    }
+    pthread_mutex_unlock(&g_x.lock);
+    return ok;
+}
+
+bool tl_xmem_reserve_straddle(size_t low_bytes, size_t high_bytes, uint8_t **high_rx, char *err, size_t errlen)
+{
+    size_t low = (low_bytes + TL_XMEM_PAGE - 1) & ~(size_t)(TL_XMEM_PAGE - 1);
+    size_t high = (high_bytes + TL_XMEM_PAGE - 1) & ~(size_t)(TL_XMEM_PAGE - 1);
+    bool ok = false;
+    pthread_mutex_lock(&g_x.lock);
+    if (!g_x.open) snprintf(err, errlen, "the JIT region is not open");
+    else if (g_x.rw != g_x.rx + g_x.size) snprintf(err, errlen, "the JIT region's writable view (%p) does not directly follow its executable view (%p, %zu MiB)", (void *)g_x.rw, (void *)g_x.rx, g_x.size >> 20);
+    else if (g_x.used || g_x.top) snprintf(err, errlen, "%zu bytes of the JIT region are already in use", g_x.used + g_x.top);
+    else if (low > g_x.size || high > g_x.size - low) snprintf(err, errlen, "%zu + %zu bytes do not fit in the %zu MiB JIT region", low, high, g_x.size >> 20);
+    else {
+        g_x.used = low;
+        g_x.top = high;
+        *high_rx = g_x.rx + g_x.size - high;
         ok = true;
     }
     pthread_mutex_unlock(&g_x.lock);

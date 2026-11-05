@@ -798,6 +798,11 @@ struct TLCocosAttemptView: View {
                         .font(.system(size: 28, weight: .medium)).foregroundStyle(.white.opacity(0.7))
                     Text(model.state == Int32(HUSK_UNITY_FAILED) ? "\(app.label) could not start" : "\(app.label) exited")
                         .font(.system(size: 17, weight: .semibold)).foregroundStyle(.white)
+                    if model.state == Int32(HUSK_UNITY_FAILED), let why = husk_native_failure_reason().map({ String(cString: $0) }) {
+                        Text(why)
+                            .font(.system(size: 13)).foregroundStyle(.white.opacity(0.8))
+                            .frame(maxWidth: 480)
+                    }
                     Label("Tap with three fingers to close or see the log", systemImage: "hand.tap")
                         .font(.system(size: 13, weight: .medium)).foregroundStyle(.white.opacity(0.55))
                 }

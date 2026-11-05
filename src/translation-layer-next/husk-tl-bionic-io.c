@@ -11,6 +11,7 @@
 #include "husk-tl-bionic.h"
 #include "husk-tl-internal.h"
 #include "husk-tl-codewrite.h"
+#include "husk-tl-macho.h"
 #include "husk-tl-xmem.h"
 #include "husk-tl-zfile.h"
 #include "husk-tl-ld.h"
@@ -526,6 +527,12 @@ static long b_write(int fd, const void *p, size_t n)
 static long b_writev(int fd, const struct iovec *v, int n) { TL_ERRNO_BEGIN(); long r = writev(fd, v, n); TL_ERRNO_END(); return r; }
 static long b_pread64(int fd, void *p, size_t n, long off)
 {
+    /* A Mach-O's code being read into place: the kernel can not write to the executable view. */
+    if (tl_macho_is_code(p, n)) {
+        long r = b_pread64(fd, (uint8_t *)p + tl_xmem_delta(), n, off);
+        if (r > 0) tl_xmem_flush(p, (size_t)r);
+        return r;
+    }
     if (procmem_is(fd)) { memmove(p, (const void *)(uintptr_t)off, n); return (long)n; }
     if (zfd_of(fd)) { long r = tl_zfile_pread(g_zfd[fd], p, n, (uint64_t)off); if (r < 0) tl_set_guest_errno(5); return r; }
     if (vfd_is(fd)) {
@@ -1057,6 +1064,9 @@ static void note_wrong_place(void *want, size_t len, void *got)
 
 static void *b_mmap(void *addr, size_t len, int prot, int flags, int fd, long off)
 {
+    /* A Mach-O executable a guest's own loader is mapping (husk-tl-macho.c). */
+    void *macho;
+    if (tl_macho_mmap(addr, len, prot, flags, &macho)) { mm_trace("mmap", macho, len, prot, flags); return macho; }
     /* A hooking library's trampolines (Geode): executable memory is a piece of the JIT region, written through the other view. */
     if ((prot & PROT_EXEC) && (flags & 0x20) && !(flags & 0x10) && tl_codewrite_enabled()) {
         uint8_t *rx, *rw;

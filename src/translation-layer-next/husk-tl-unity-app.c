@@ -132,6 +132,15 @@ static void install_crash_reporter(void)
 /* ------------------------------------------------------------------- launch */
 
 /* exit() from the game ends the game, and the thread that asked. */
+/* A driver that knows its game did not start, even if it is drawing frames: the reason, for the player, and the state the library goes by. */
+static char g_failure[900];
+static void game_failed(const char *why)
+{
+    snprintf(g_failure, sizeof(g_failure), "%s", why ? why : "");
+    atomic_store(&A.state, HUSK_UNITY_FAILED);
+}
+const char *husk_native_failure_reason(void) { return g_failure[0] ? g_failure : NULL; }
+
 static void guest_exit(int status)
 {
     tl_log_line("native: the game exited (%d)", status);
@@ -228,6 +237,7 @@ static void *launch_thread(void *arg)
     (void)arg;
     pthread_setname_np("husk-native-start");
     tl_guest_exit_hook = guest_exit;
+    tl_game_failed_hook = game_failed;
     {
         char path[1100];
         snprintf(path, sizeof(path), "%s/%s", A.data, A.engine == ENGINE_UNITY ? "unity-run.log" : "native-run.log");
@@ -313,7 +323,8 @@ static void *launch_thread(void *arg)
         atomic_store(&A.state, HUSK_UNITY_FAILED);
         return NULL;
     }
-    atomic_store(&A.state, HUSK_UNITY_RUNNING);
+    /* Only from starting: the game may already have said it could not start. */
+    { int starting = HUSK_UNITY_STARTING; atomic_compare_exchange_strong(&A.state, &starting, HUSK_UNITY_RUNNING); }
     pthread_t hb;
     if (pthread_create(&hb, NULL, heartbeat_thread, NULL) == 0) pthread_detach(hb);
     /*

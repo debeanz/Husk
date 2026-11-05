@@ -100,6 +100,8 @@ void husk_gamepad_update(int slot, unsigned buttons, float lx, float ly, float r
 
 /* The APK of the game started this session, or NULL. An engine cannot be loaded twice, nor two games at once. */
 const char *husk_native_loaded_apk(void);
+/* Why the game could not start, in words for the player, when its driver knows; NULL otherwise. */
+const char *husk_native_failure_reason(void);
 
 int  husk_unity_state(void);
 unsigned long husk_unity_frames(void);

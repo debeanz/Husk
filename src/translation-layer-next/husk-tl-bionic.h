@@ -84,6 +84,8 @@ const char *tl_sysprop(const char *name);
 
 /* The log. */
 void tl_log_line(const char *fmt, ...);
+extern void (*tl_log_watch)(const char *tag, const char *text);
+extern void (*tl_game_failed_hook)(const char *why);
 
 /* A thread being watched: what it asks of Android -- Java, libraries, system properties -- goes in the log, up to a limit.
  * For an engine that gives up on something without saying what (FMOD setting up its sound: see husk-tl-opensles.c).

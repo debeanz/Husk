@@ -28,6 +28,8 @@ void tl_nwindow_configure(int w, int h, void *layer);
 void tl_fmod_install(void);
 void tl_assetstream_install(void);
 void tl_sdl_apps_install(const char *package);
+bool tl_sdl_app_prepare(const char *package, const char *apk, const char *data, char *why, size_t whylen);
+void tl_sdl_app_before_main(void *activity);
 
 #define SDLA "org/libsdl/app/SDLActivity"
 #define SDLAUDIO "org/libsdl/app/SDLAudioManager"
@@ -637,6 +639,14 @@ bool tl_sdl_start(const tl_ga_config *cfg, const char *activity_class)
     int n = tl_dexidx_open(cfg->apk_path);
     tl_log_line("sdl: %d classes in the APK's DEX", n);
     if (!tl_ld_add_apk(cfg->apk_path)) return false;
+    {
+        char why[900] = "";
+        if (!tl_sdl_app_prepare(S.pkg, S.apk, S.data, why, sizeof(why))) {
+            tl_log_line("sdl: %s", why);
+            if (tl_game_failed_hook) tl_game_failed_hook(why);
+            return false;
+        }
+    }
     /* The activity SDL runs under: the one the caller named if it is an SDLActivity, else the manifest's activity that is (Dungeon Crawl and Wesnoth put a menu in front). */
     {
         bool ok = false;
@@ -807,6 +817,7 @@ static void *ui_main(void *arg)
     /* No nativeResume: SDLActivity does not send one when it starts the app thread, and SDL starts un-paused. A resume that was not preceded by a pause makes SDL release
      * the GL context it believes it saved, and with nothing saved there is nothing to put back. */
     tl_log_line("sdl: lifecycle delivered");
+    tl_sdl_app_before_main(S.activity);
 
     pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 8u << 20);
     if (pthread_create(&S.sdl, &a, sdl_main_thread, NULL) != 0) tl_log_line("sdl: cannot start the SDL thread");
