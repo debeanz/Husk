@@ -125,6 +125,19 @@ static int b_mutex_lock(void *g)
         }
     }
 }
+/* Android has this and Darwin does not: try until the absolute time on the realtime clock. */
+static int b_mutex_timedlock(void *g, const struct timespec *until)
+{
+    pthread_mutex_t *m = obj_host(g, make_mutex);
+    for (;;) {
+        int r = pthread_mutex_trylock(m);
+        if (r != EBUSY) return rc(r);
+        struct timespec now;
+        clock_gettime(CLOCK_REALTIME, &now);
+        if (now.tv_sec > until->tv_sec || (now.tv_sec == until->tv_sec && now.tv_nsec >= until->tv_nsec)) return rc(ETIMEDOUT);
+        usleep(500);
+    }
+}
 static int b_mutex_trylock(void *g) { int r = pthread_mutex_trylock(obj_host(g, make_mutex)); if (r == 0 && mutex_trace()) note_owner(g, __builtin_return_address(0)); return rc(r); }
 static int b_mutex_unlock(void *g)  { if (mutex_trace()) ((uint64_t *)g)[2] = 0; return rc(pthread_mutex_unlock(obj_host(g, make_mutex))); }
 
@@ -461,7 +474,7 @@ static int b_sigmask(int how, const uint64_t *set, uint64_t *old)
 
 const tl_bionic_entry tl_tab_pthread[] = {
     TL_WRAP("pthread_mutex_init", b_mutex_init), TL_WRAP("pthread_mutex_destroy", b_mutex_destroy),
-    TL_WRAP("pthread_mutex_lock", b_mutex_lock), TL_WRAP("pthread_mutex_trylock", b_mutex_trylock),
+    TL_WRAP("pthread_mutex_lock", b_mutex_lock), TL_WRAP("pthread_mutex_trylock", b_mutex_trylock), TL_WRAP("pthread_mutex_timedlock", b_mutex_timedlock),
     TL_WRAP("pthread_mutex_unlock", b_mutex_unlock),
     TL_WRAP("pthread_mutexattr_init", b_mutexattr_init), TL_WRAP("pthread_mutexattr_destroy", b_mutexattr_destroy),
     TL_WRAP("pthread_mutexattr_settype", b_mutexattr_settype), TL_WRAP("pthread_mutexattr_gettype", b_mutexattr_gettype),

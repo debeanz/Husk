@@ -38,6 +38,7 @@
 /* The room libmachismo's loader leaves after the image for its islands, and where it notes their address. */
 #define POOL_BYTES ((size_t)2 << 20)
 #define RESULTS_POOL_BASE 0x17
+#define RESULTS_STACK_TOP 0xe
 
 /* Where Darwin's commpage is, which is also where machismo builds an imitation of it. On a phone the real one is there and in use. */
 #define COMMPAGE_ADDR ((uintptr_t)0xfffffc000ull)
@@ -205,10 +206,22 @@ bool tl_macho_mmap(void *addr, size_t len, int prot, int flags, void **result)
         *result = MAP_FAILED;
         return true;
     }
-    /* A stack it makes just below the commpage, fixed if need be, and does not go on to use. Nothing of the guest's belongs that close to the system's page, so it gets ordinary memory. */
+    /* The stack it builds the game's argv and environment on, which ends where the commpage begins. It is the guest's to use at that address. If the phone will not have it there,
+     * it goes elsewhere and machismo is told where the top now is. */
     if ((uintptr_t)addr + len == COMMPAGE_ADDR) {
-        void *r = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-        if (r == MAP_FAILED) tl_set_guest_errno(12);                                                                       /* ENOMEM */
+        void *r = mmap(addr, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+        if (r == MAP_FAILED) {
+            r = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+            tl_lib *lib = tl_ld_find_lib("libmachismo.so");
+            uint64_t *results = lib ? tl_ld_sym(lib, "machismo_load_results") : NULL;
+            if (r != MAP_FAILED && results) {
+                results[RESULTS_STACK_TOP] = (uint64_t)(uintptr_t)r + len;
+                tl_log_line("macho: no room for the stack below the commpage: it is at %p", r);
+                *result = addr;                                                                                            /* the address it asked for, so it looks no further */
+                return true;
+            }
+            tl_set_guest_errno(12);                                                                                        /* ENOMEM */
+        }
         *result = r;
         return true;
     }
