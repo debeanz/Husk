@@ -30,6 +30,7 @@ void tl_assetstream_install(void);
 void tl_sdl_apps_install(const char *package);
 bool tl_sdl_app_prepare(const char *package, const char *apk, const char *data, char *why, size_t whylen);
 void tl_sdl_app_before_main(void *activity);
+int (*tl_sdl_app_own_main(void))(void);
 
 #define SDLA "org/libsdl/app/SDLActivity"
 #define SDLAUDIO "org/libsdl/app/SDLAudioManager"
@@ -668,6 +669,9 @@ bool tl_sdl_start(const tl_ga_config *cfg, const char *activity_class)
     tl_ld_apk_libs(scan_lib, &ls);
     snprintf(S.sdl_lib, sizeof(S.sdl_lib), "%s", ls.sdl3 ? "libSDL3.so" : ls.sdl2 ? "libSDL2.so" : "");
     snprintf(S.main_lib, sizeof(S.main_lib), "%s", ls.main ? "libmain.so" : ls.best);
+    /* A game whose main is not in a library of its own: none of the others is opened as if it were. */
+    bool own_main = tl_sdl_app_own_main() != NULL;
+    if (own_main) S.main_lib[0] = 0;
     {
         bool st;
         if (tl_dexidx_has_class(SDLA)) S.sdl2 = !tl_dexidx_declares_method(SDLA, "nativeSetNaturalOrientation", "", &st);
@@ -701,7 +705,7 @@ bool tl_sdl_start(const tl_ga_config *cfg, const char *activity_class)
             if (tl_jni_pending()) { tl_log_line("sdl: loading lib%s.so failed", load[i]); return false; }
         }
         /* Several libraries of the game's own and none called libmain (LOVE: a big liblove library and a small one that holds SDL_main): the one that exports SDL_main is the entry. */
-        if (!ls.main && ls.ncand > 1) {
+        if (!ls.main && ls.ncand > 1 && !own_main) {
             for (int i = 0; i < ls.ncand; i++) {
                 snprintf(name, sizeof(name), "%s", ls.cand[i] + 3); name[strlen(name) - 3] = 0;
                 if (strcmp(ls.cand[i], S.main_lib)) { load_library(name); if (tl_jni_pending()) tl_jni_clear(); }
@@ -742,6 +746,17 @@ static void *sdl_main_thread(void *arg)
     void (*init_main)(void *, void *) = find_native(SDLA, "nativeInitMainThread", "()V");
     int (*run_main)(void *, void *, void *, void *, void *) = native_of(SDLA, "nativeRunMain", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/Object;)I");
     void (*cleanup)(void *, void *) = find_native(SDLA, "nativeCleanupMainThread", "()V");
+    /* The game's own activity overrides SDLActivity.main and does not call nativeRunMain. */
+    int (*own_main)(void) = tl_sdl_app_own_main();
+    if (own_main) {
+        if (init_main) init_main(env, cls);
+        tl_log_line("sdl: the game's main starting");
+        int own_r = own_main();
+        tl_log_line("sdl: the game's main returned %d", own_r);
+        if (own_r != 0 && tl_game_failed_hook) tl_game_failed_hook("The game could not start. The log says why.");
+        if (cleanup) cleanup(env, cls);
+        return NULL;
+    }
     if (!run_main) return NULL;
     if (init_main) init_main(env, cls);
     tl_log_line("sdl: SDL_main starting");

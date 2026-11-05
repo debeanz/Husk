@@ -27,9 +27,7 @@ concurrency:
 
 jobs:
   build:
-    # Intel: on 2026-11-05 this repository got no Apple Silicon machine (macos-26, macos-15) while macos-26-intel started at once.
-    # It has the same Xcode, and everything is built for iOS arm64 whatever the Mac is. Go back to macos-26 once that works again.
-    runs-on: macos-26-intel
+    runs-on: macos-26
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4

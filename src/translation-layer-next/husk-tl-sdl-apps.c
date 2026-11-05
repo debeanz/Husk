@@ -145,6 +145,15 @@ static void luajit_openlibs(void *L)
     if (g_jit_setmode) g_jit_setmode(L, 0, 0 /* LUAJIT_MODE_ENGINE | LUAJIT_MODE_OFF */);
 }
 
+/* ------------------------------------------------------------------ Celeste */
+
+/* husk-tl-celeste.c */
+#define CELESTE_PACKAGE "org.celesteandroid.celeste"
+bool tl_celeste_prepare(const char *apk, const char *data, char *why, size_t whylen);
+void tl_celeste_before_main(void);
+bool tl_celeste_on(void);
+int tl_celeste_main(void);
+
 /* -------------------------------------------------------- Mina the Hollower */
 
 /*
@@ -341,13 +350,21 @@ static void mina_before_main(void *activity)
 bool tl_sdl_app_prepare(const char *package, const char *apk, const char *data, char *why, size_t whylen)
 {
     if (!strcmp(package, MINA_PACKAGE)) return mina_prepare(apk, data, why, whylen);
+    if (!strcmp(package, CELESTE_PACKAGE)) return tl_celeste_prepare(apk, data, why, whylen);
     return true;
+}
+
+/* A game with no SDL_main of its own to find: what runs on SDL's thread instead. */
+int (*tl_sdl_app_own_main(void))(void)
+{
+    return tl_celeste_on() ? tl_celeste_main : NULL;
 }
 
 /* What the game's activity does in onCreate, just before SDL_main's thread starts. */
 void tl_sdl_app_before_main(void *activity)
 {
     if (MN.on) mina_before_main(activity);
+    tl_celeste_before_main();
 }
 
 void tl_sdl_apps_install(const char *package)

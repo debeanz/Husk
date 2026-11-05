@@ -65,7 +65,7 @@ static bool is_dex(const char *name)
 
 /* Recognised by the libraries an engine always ships. */
 typedef struct engine_scan {
-    bool il2cpp, unity, mono_unity, flutter, react, dotnet, godot, unreal, cocos, gdx, minecraft, sdl, sdl2, mainlib, rockstar_game, openal, mpg123, sdl_symbols, native_activity;
+    bool il2cpp, unity, mono_unity, flutter, react, dotnet, fna, godot, unreal, cocos, gdx, minecraft, sdl, sdl2, mainlib, rockstar_game, openal, mpg123, sdl_symbols, native_activity;
 } engine_scan;
 
 static void note_engine(engine_scan *s, const char *f)
@@ -76,6 +76,7 @@ static void note_engine(engine_scan *s, const char *f)
     else if (!strcmp(f, "libflutter.so")) s->flutter = true;
     else if (!strcmp(f, "libreactnativejni.so") || !strcmp(f, "libhermes.so")) s->react = true;
     else if (!strcmp(f, "libmonosgen-2.0.so") || !strcmp(f, "libmonodroid.so")) s->dotnet = true;
+    else if (!strcmp(f, "libFNA3D.so")) s->fna = true;
     else if (!strcmp(f, "libgodot_android.so")) s->godot = true;
     else if (!strcmp(f, "libUE4.so") || !strcmp(f, "libUnreal.so")) s->unreal = true;
     else if (!strncmp(f, "libcocos", 8)) s->cocos = true;
@@ -99,6 +100,8 @@ static const char *engine_name(const engine_scan *s)
     if (s->react) return "React Native";
     /* A Godot .NET export ships Mono (libmonosgen-2.0.so) beside the engine: the engine is what runs it. */
     if (s->godot) return "Godot";
+    /* FNA on .NET for Android: a game on SDL 3 with Mono beneath it, which the SDL driver runs. */
+    if (s->dotnet && s->fna && s->sdl) return "SDL";
     if (s->dotnet) return ".NET / Xamarin";
     if (s->unreal) return "Unreal Engine";
     if (s->cocos) return "Cocos";

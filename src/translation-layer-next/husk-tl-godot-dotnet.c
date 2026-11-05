@@ -231,6 +231,9 @@ static void runtime_env(void)
     tl_codewrite_enable();
 }
 
+/* For anything else here that starts Mono. */
+void tl_dotnet_runtime_env(void) { runtime_env(); }
+
 /* ------------------------------------------------------- Slay the Spire 2 */
 
 static const char *const STS2_ARGS_LOG[] = { "-log", "Generic", "Info", "-log", "Network", "Info", "-log", "Actions", "Info",

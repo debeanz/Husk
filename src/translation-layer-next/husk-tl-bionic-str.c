@@ -461,6 +461,7 @@ static double b_strtod_l(const char *s, char **e, locale_t l) { TL_ERRNO_BEGIN()
 static float b_strtof_l(const char *s, char **e, locale_t l) { TL_ERRNO_BEGIN(); float r = strtof_l(s, e, l); TL_ERRNO_END(); return r; }
 /* The item numbers are the guest's, which are not Darwin's. "No information" is an empty string, which callers treat as the C locale; a null would crash them. */
 static const char *b_nl_langinfo_l(int item, locale_t l) { (void)item; (void)l; return ""; }
+static const char *b_nl_langinfo(int item) { (void)item; return ""; }
 static int b_get_nprocs(void) { return (int)sysconf(_SC_NPROCESSORS_ONLN); }
 
 /* ------------------------------------------------------------------ misc */
@@ -599,7 +600,7 @@ const tl_bionic_entry tl_tab_str[] = {
     TL_DIRECT(_Exit), TL_DIRECT(aligned_alloc), TL_WRAP("get_nprocs", b_get_nprocs),
     /* The rest of what a program built against glibc or Darwin's libc++ expects, which Android's libc has too. */
     TL_DIRECT(memmem), TL_DIRECT(getline), TL_DIRECT(wcscasecmp), TL_DIRECT(wcsncasecmp), TL_DIRECT(wcslcat), TL_DIRECT(wcslcpy),
-    TL_DIRECT(duplocale), TL_DIRECT(iswctype_l), TL_DIRECT(wctype_l), TL_DIRECT(wcsftime_l), TL_WRAP("nl_langinfo_l", b_nl_langinfo_l),
+    TL_DIRECT(duplocale), TL_DIRECT(iswctype_l), TL_DIRECT(wctype_l), TL_DIRECT(wcsftime_l), TL_WRAP("nl_langinfo_l", b_nl_langinfo_l), TL_WRAP("nl_langinfo", b_nl_langinfo),
     TL_DIRECT(getenv), TL_DIRECT(setenv), TL_DIRECT(unsetenv), TL_DATA("environ", &g_environ_var),
     TL_DIRECT(setjmp), TL_DIRECT(longjmp), TL_DIRECT(fnmatch), TL_DIRECT(getopt_long),
     TL_DATA("optarg", &optarg), TL_DATA("optind", &optind),
