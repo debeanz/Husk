@@ -457,6 +457,11 @@ static long long b_strtoll_l(const char *s, char **e, int b, locale_t l) { TL_ER
 static unsigned long long b_strtoull_l(const char *s, char **e, int b, locale_t l) { TL_ERRNO_BEGIN(); unsigned long long r = strtoull_l(s, e, b, l); TL_ERRNO_END(); return r; }
 static double b_strtod(const char *s, char **e) { TL_ERRNO_BEGIN(); double r = strtod(s, e); TL_ERRNO_END(); return r; }
 static float b_strtof(const char *s, char **e) { TL_ERRNO_BEGIN(); float r = strtof(s, e); TL_ERRNO_END(); return r; }
+static double b_strtod_l(const char *s, char **e, locale_t l) { TL_ERRNO_BEGIN(); double r = strtod_l(s, e, l); TL_ERRNO_END(); return r; }
+static float b_strtof_l(const char *s, char **e, locale_t l) { TL_ERRNO_BEGIN(); float r = strtof_l(s, e, l); TL_ERRNO_END(); return r; }
+/* The item numbers are the guest's, which are not Darwin's. "No information" is an empty string, which callers treat as the C locale; a null would crash them. */
+static const char *b_nl_langinfo_l(int item, locale_t l) { (void)item; (void)l; return ""; }
+static int b_get_nprocs(void) { return (int)sysconf(_SC_NPROCESSORS_ONLN); }
 
 /* ------------------------------------------------------------------ misc */
 
@@ -590,7 +595,11 @@ const tl_bionic_entry tl_tab_str[] = {
     TL_DIRECT(rand), TL_DIRECT(srand), TL_DIRECT(srand48), TL_DIRECT(lrand48),
     TL_WRAP("strtol", b_strtol), TL_WRAP("strtoll", b_strtoll), TL_WRAP("strtoul", b_strtoul), TL_WRAP("strtoull", b_strtoull),
     TL_WRAP("strtoll_l", b_strtoll_l), TL_WRAP("strtoull_l", b_strtoull_l), TL_WRAP("strtod", b_strtod), TL_WRAP("strtof", b_strtof),
-    TL_WRAP("strtold", b_strtold), TL_WRAP("strtold_l", b_strtold_l),
+    TL_WRAP("strtold", b_strtold), TL_WRAP("strtold_l", b_strtold_l), TL_WRAP("strtod_l", b_strtod_l), TL_WRAP("strtof_l", b_strtof_l),
+    TL_DIRECT(_Exit), TL_DIRECT(aligned_alloc), TL_WRAP("get_nprocs", b_get_nprocs),
+    /* The rest of what a program built against glibc or Darwin's libc++ expects, which Android's libc has too. */
+    TL_DIRECT(memmem), TL_DIRECT(getline), TL_DIRECT(wcscasecmp), TL_DIRECT(wcsncasecmp), TL_DIRECT(wcslcat), TL_DIRECT(wcslcpy),
+    TL_DIRECT(duplocale), TL_DIRECT(iswctype_l), TL_DIRECT(wctype_l), TL_DIRECT(wcsftime_l), TL_WRAP("nl_langinfo_l", b_nl_langinfo_l),
     TL_DIRECT(getenv), TL_DIRECT(setenv), TL_DIRECT(unsetenv), TL_DATA("environ", &g_environ_var),
     TL_DIRECT(setjmp), TL_DIRECT(longjmp), TL_DIRECT(fnmatch), TL_DIRECT(getopt_long),
     TL_DATA("optarg", &optarg), TL_DATA("optind", &optind),

@@ -786,7 +786,29 @@ static void *b_readdir(void *dp)
     snprintf(g->ent.d_name, sizeof(g->ent.d_name), "%s", e->d_name);
     return &g->ent;
 }
+static int b_readdir_r(void *dp, guest_dirent *entry, guest_dirent **result)
+{
+    guest_dirent *e = b_readdir(dp);
+    if (!e) { *result = NULL; return 0; }
+    *entry = *e;
+    *result = entry;
+    return 0;
+}
 static int b_closedir(void *dp) { guest_dir *g = dp; int r = closedir(g->dir); free(g); return r; }
+
+/* memfd_create: anonymous memory with a file descriptor. An unlinked temporary file is the same thing to anyone who only has the descriptor. */
+static int b_memfd_create(const char *name, unsigned flags)
+{
+    (void)name; (void)flags;
+    const char *tmp = getenv("TMPDIR");
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/memfd-XXXXXX", tmp && tmp[0] ? tmp : "/tmp");
+    TL_ERRNO_BEGIN();
+    int fd = mkstemp(path);
+    if (fd >= 0) unlink(path);
+    TL_ERRNO_END();
+    return fd;
+}
 
 /* scandir: the entries of a directory, optionally filtered and sorted by functions of the guest's own (the same ISA, so they are called directly). */
 static int b_alphasort(const guest_dirent **a, const guest_dirent **b) { return strcoll((*a)->d_name, (*b)->d_name); }
@@ -1511,7 +1533,7 @@ const tl_bionic_entry tl_tab_io[] = {
     TL_WRAP("__umask_chk", b___umask_chk), TL_WRAP("sendfile", b_sendfile),
     TL_WRAP("stat", b_stat), TL_WRAP("fstatat", b_fstatat), TL_WRAP("fstatat64", b_fstatat), TL_WRAP("lstat", b_lstat), TL_WRAP("fstat", b_fstat), TL_WRAP("statfs", b_statfs),
     TL_WRAP("fcntl", b_fcntl), TL_WRAP("ioctl", b_ioctl),
-    TL_WRAP("scandir", b_scandir), TL_WRAP("alphasort", b_alphasort), TL_WRAP("versionsort", b_alphasort), TL_WRAP("opendir", b_opendir), TL_WRAP("fdopendir", b_fdopendir), TL_WRAP("dirfd", b_dirfd), TL_WRAP("rewinddir", b_rewinddir), TL_WRAP("readdir", b_readdir), TL_WRAP("closedir", b_closedir),
+    TL_WRAP("readdir_r", b_readdir_r), TL_WRAP("memfd_create", b_memfd_create), TL_WRAP("scandir", b_scandir), TL_WRAP("alphasort", b_alphasort), TL_WRAP("versionsort", b_alphasort), TL_WRAP("opendir", b_opendir), TL_WRAP("fdopendir", b_fdopendir), TL_WRAP("dirfd", b_dirfd), TL_WRAP("rewinddir", b_rewinddir), TL_WRAP("readdir", b_readdir), TL_WRAP("closedir", b_closedir),
     TL_WRAP("mmap", b_mmap), TL_WRAP("munmap", b_munmap), TL_WRAP("mprotect", b_mprotect), TL_WRAP("madvise", b_madvise),
     TL_WRAP("mremap", b_mremap),
     TL_WRAP("clock_gettime", b_clock_gettime), TL_WRAP("clock_getres", b_clock_getres), TL_WRAP("gettimeofday", b_gettimeofday),
