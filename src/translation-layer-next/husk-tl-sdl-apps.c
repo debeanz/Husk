@@ -319,6 +319,8 @@ static bool mina_prepare(const char *apk, const char *data, char *why, size_t wh
     if (!tl_macho_prepare(MN.binary, merr, sizeof(merr))) { snprintf(why, whylen, "cannot make room for the game: %s", merr); return false; }
     tl_codewrite_enable();
     tl_log_watch = mina_log_watch;
+    /* libmain.so turns on machismo's stderr-to-logcat pipe, which would feed the log back into itself here. Its stderr already reaches the log. */
+    tl_keep_stdio = true;
     MN.on = true;
     return true;
 }

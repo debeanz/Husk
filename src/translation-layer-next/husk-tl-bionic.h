@@ -84,6 +84,7 @@ const char *tl_sysprop(const char *name);
 
 /* The log. */
 void tl_log_line(const char *fmt, ...);
+extern bool tl_keep_stdio;
 extern void (*tl_log_watch)(const char *tag, const char *text);
 extern void (*tl_game_failed_hook)(const char *why);
 

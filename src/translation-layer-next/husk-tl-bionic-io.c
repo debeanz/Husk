@@ -568,7 +568,10 @@ static long b_lseek(int fd, long off, int whence)
     TL_ERRNO_BEGIN(); long r = lseek(fd, off, whence); TL_ERRNO_END(); return r;
 }
 static int b_dup(int fd) { TL_ERRNO_BEGIN(); int r = dup(fd); TL_ERRNO_END(); return r; }
-static int b_dup2(int a, int b) { TL_ERRNO_BEGIN(); int r = dup2(a, b); if (r >= 0 && a != b) tl_atomic_closed(b); TL_ERRNO_END(); return r; }
+/* Set by a driver whose guest points stdout and stderr at a pipe and logs what it reads from it, as Android's log does not come back round. Here the log is written to stderr,
+ * so each line would come back to be logged again, and once the pipe filled the only thread emptying it would block writing to it, and every other thread that logged with it. */
+bool tl_keep_stdio;
+static int b_dup2(int a, int b) { if (tl_keep_stdio && (b == 1 || b == 2)) return b; TL_ERRNO_BEGIN(); int r = dup2(a, b); if (r >= 0 && a != b) tl_atomic_closed(b); TL_ERRNO_END(); return r; }
 static int b_pipe(int fds[2]) { TL_ERRNO_BEGIN(); int r = pipe(fds); TL_ERRNO_END(); return r; }
 /* pipe2(fds, flags), with Linux's flags: O_CLOEXEC is 02000000 and O_NONBLOCK 04000. NativeActivity's app glue makes the pipe that carries the
  * activity's events to the game's main loop with it (Hades); without it the game never hears that it has a window. */
