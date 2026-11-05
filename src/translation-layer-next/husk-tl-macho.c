@@ -46,6 +46,7 @@
 #define FAT_MAGIC_BE 0xcafebabeu
 #define CPU_ARM64 0x0100000cu
 #define LC_SEGMENT_64 0x19u
+#define LC_SYMTAB 0x2u
 
 /* Linux's flag values, which are what a guest passes. */
 #define G_MAP_FIXED 0x10
@@ -128,6 +129,54 @@ out:
     free(cmds);
     close(fd);
     return ok;
+}
+
+unsigned long long tl_macho_symbol_address(const char *path, const char *name)
+{
+    uint64_t found = 0;
+    uint8_t head[32], *cmds = NULL, *syms = NULL;
+    char *strs = NULL;
+    off_t slice = 0;
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return 0;
+    if (pread(fd, head, sizeof(head), 0) != (ssize_t)sizeof(head)) goto out;
+    if (be32(head) == FAT_MAGIC_BE) {
+        uint32_t n = be32(head + 4);
+        bool have = false;
+        for (uint32_t i = 0; i < n && i < 16 && !have; i++) {
+            uint8_t a[20];
+            if (pread(fd, a, sizeof(a), 8 + (off_t)i * 20) != (ssize_t)sizeof(a)) break;
+            if (be32(a) == CPU_ARM64) { slice = be32(a + 8); have = true; }
+        }
+        if (!have || pread(fd, head, sizeof(head), slice) != (ssize_t)sizeof(head)) goto out;
+    }
+    if (le32(head) != MH_MAGIC_64) goto out;
+    uint32_t ncmds = le32(head + 16), sizecmds = le32(head + 20);
+    if (sizecmds == 0 || sizecmds > (16u << 20) || !(cmds = malloc(sizecmds)) || pread(fd, cmds, sizecmds, slice + 32) != (ssize_t)sizecmds) goto out;
+    size_t off = 0;
+    for (uint32_t i = 0; i < ncmds && off + 24 <= sizecmds; i++) {
+        uint32_t cmd = le32(cmds + off), size = le32(cmds + off + 4);
+        if (size < 8 || off + size > sizecmds) break;
+        if (cmd == LC_SYMTAB) {
+            uint32_t symoff = le32(cmds + off + 8), nsyms = le32(cmds + off + 12), stroff = le32(cmds + off + 16), strsize = le32(cmds + off + 20);
+            if (nsyms > (8u << 20) || strsize == 0 || strsize > (256u << 20)) break;
+            if (!(syms = malloc((size_t)nsyms * 16)) || !(strs = malloc((size_t)strsize + 1))) break;
+            if (pread(fd, syms, (size_t)nsyms * 16, slice + symoff) != (ssize_t)((size_t)nsyms * 16) || pread(fd, strs, strsize, slice + stroff) != (ssize_t)strsize) break;
+            strs[strsize] = 0;
+            for (uint32_t k = 0; k < nsyms; k++) {
+                const uint8_t *e = syms + (size_t)k * 16;
+                uint32_t sx = le32(e);
+                if ((e[4] & 0xe0) || (e[4] & 0x0e) != 0x0e || sx >= strsize) continue;     /* debug entries, and anything not defined in a section */
+                if (!strcmp(strs + sx, name)) { found = le64(e + 8); break; }
+            }
+            break;
+        }
+        off += size;
+    }
+out:
+    free(cmds); free(syms); free(strs);
+    close(fd);
+    return found;
 }
 
 bool tl_macho_is_code(const void *p, size_t n)

@@ -155,7 +155,7 @@ static void luajit_openlibs(void *L)
  */
 #define MINA_PACKAGE "com.teampacheworks.minathehollower"
 #define MINA_APP "Mina the Hollower.app"
-static struct { bool on; char conf[800], lib[800], ext[800], gamedata[800], apk[1024]; } MN;
+static struct { bool on; char conf[800], lib[800], ext[800], gamedata[800], apk[1024], binary[1100]; } MN;
 
 static void make_dirs(const char *path)
 {
@@ -193,6 +193,21 @@ static char *replace_all(char *text, const char *from, const char *to)
     return out;
 }
 
+/*
+ * The patch file finds Game::InitFromSave's write to s_bufferIntScale by its exact instruction, `str w8, [x9, #page offset]`, written for version 1.0.6, where that offset is
+ * 0xe44. The offset moves between builds of the game while the code around it stays the same (1.0.4's is 0xfc0), and any pattern that is not found stops the game. So the
+ * instruction is worked out from where this copy has the variable, which for 1.0.6 gives back what the file says.
+ */
+static char *mina_adapt_patches(char *text)
+{
+    unsigned long long addr = tl_macho_symbol_address(MN.binary, "__ZN12_GLOBAL__N_116s_bufferIntScaleE");
+    if (!addr || (addr & 3)) { tl_log_line("mina: the game has no s_bufferIntScale, so its patches are left as they are"); return text; }
+    char word[16];
+    snprintf(word, sizeof(word), "%08x", 0xb9000128u | ((unsigned)((addr & 0xfff) / 4) << 10));
+    if (strcmp(word, "b90e4528")) tl_log_line("mina: this copy of the game keeps s_bufferIntScale at %#llx: its patch looks for %s", addr, word);
+    return replace_all(text, "b90e4528", word);
+}
+
 /* One configuration file out of the APK, with this device's directories in it. The app's folder moves between installs, so it is written at every launch. */
 static bool mina_conf(tl_zip *z, const char *asset, const char *name)
 {
@@ -206,6 +221,7 @@ static bool mina_conf(tl_zip *z, const char *asset, const char *name)
     if (owned) free((void *)data);
     text = replace_all(text, "{CONF_DIR}", MN.conf);
     text = replace_all(text, "{LIB_DIR}", MN.lib);
+    if (!strcmp(name, "patches/gothic.conf")) text = mina_adapt_patches(text);
     snprintf(path, sizeof(path), "%s/%s", MN.conf, name);
     bool ok = write_file(path, text, strlen(text));
     free(text);
@@ -273,10 +289,9 @@ static bool mina_prepare(const char *apk, const char *data, char *why, size_t wh
     make_dirs(MN.gamedata);
     make_dirs(MN.ext);
 
-    char binary[1100];
-    snprintf(binary, sizeof(binary), "%s/" MINA_APP "/Contents/MacOS/MinaTheHollower", MN.gamedata);
+    snprintf(MN.binary, sizeof(MN.binary), "%s/" MINA_APP "/Contents/MacOS/MinaTheHollower", MN.gamedata);
     struct stat st;
-    if (stat(binary, &st) != 0) {
+    if (stat(MN.binary, &st) != 0) {
         snprintf(why, whylen, "This port runs your own copy of the game's Mac version, and it is not here yet. In Files, copy \"" MINA_APP "\" into Husk's folder: %s", from_documents(MN.gamedata));
         return false;
     }
@@ -301,7 +316,7 @@ static bool mina_prepare(const char *apk, const char *data, char *why, size_t wh
 
     /* The image's memory comes first: it is the low end of the JIT region. */
     char merr[300];
-    if (!tl_macho_prepare(binary, merr, sizeof(merr))) { snprintf(why, whylen, "cannot make room for the game: %s", merr); return false; }
+    if (!tl_macho_prepare(MN.binary, merr, sizeof(merr))) { snprintf(why, whylen, "cannot make room for the game: %s", merr); return false; }
     tl_codewrite_enable();
     tl_log_watch = mina_log_watch;
     MN.on = true;

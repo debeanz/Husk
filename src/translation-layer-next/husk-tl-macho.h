@@ -12,6 +12,9 @@
  */
 bool tl_macho_prepare(const char *path, char *err, size_t errlen);
 
+/* The linked address of a symbol the executable defines, from its symbol table (a Mach-O name, with its leading underscore). 0 if it has none. */
+unsigned long long tl_macho_symbol_address(const char *path, const char *name);
+
 /* The guest's mmap, when it concerns the image: true if handled, with the result in `*result`. */
 bool tl_macho_mmap(void *addr, size_t len, int prot, int flags, void **result);
 
