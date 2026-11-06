@@ -18,6 +18,7 @@
 #include "husk-tl-bionic.h"
 #include "husk-tl-codewrite.h"
 #include "husk-tl-dexindex.h"
+#include "husk-tl-egl.h"
 #include "husk-tl-internal.h"
 #include "husk-tl-ld.h"
 #include "husk-tl-macho.h"
@@ -322,6 +323,9 @@ static bool mina_prepare(const char *apk, const char *data, char *why, size_t wh
     /* This phone's CPU has the atomics and load-acquire instructions the Mac build uses, so nothing needs rewriting down to older ones. Bionic's getauxval here does not list them. */
     setenv("MACHISMO_ISA_EMUL", "0", 1);
     setenv("MACHISMO_VERBOSE", "1", 1);
+
+    /* The port's shaders are all "#version 310 es" and ANGLE over Metal stops at 3.0. They use nothing of 3.1 but layout(binding) and varyings with a location, which the shim writes down. */
+    tl_egl_es31_shim(true);
 
     /* The image's memory comes first: it is the low end of the JIT region. */
     char merr[300];
