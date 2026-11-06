@@ -56,6 +56,26 @@ static void Audio_write(tl_jcall *c)
     }
 }
 
+/* Older FMOD (Celeste's) hands over bytes: write(byte[] data, int size), 16-bit samples, `size` counted in bytes. */
+static void Audio_write_bytes(tl_jcall *c)
+{
+    jobj *arr = c->args[0].l;
+    int bytes = c->args[1].i;
+    int ch = tl_jni_get_field(c->self, "channels", "I").i, rate = tl_jni_get_field(c->self, "rate", "I").i;
+    if (ch <= 0) ch = 2;
+    if (rate <= 0) rate = 48000;
+    if (!arr || arr->kind != TL_K_PRIM_ARRAY || bytes <= 0) return;
+    if ((uint32_t)bytes > arr->arr.len) bytes = (int)arr->arr.len;
+    int frames = bytes / (2 * ch);
+    if (frames <= 0) return;
+    if (tl_cocos_audio_hook) {
+        tl_cocos_audio_hook((const int16_t *)arr->arr.data, frames, ch, rate);     /* the hook blocks until it has room */
+    } else {
+        struct timespec ts = { 0, (long)((double)frames * 1e9 / rate) };
+        nanosleep(&ts, NULL);
+    }
+}
+
 static const struct { const char *name, *super; } k_classes[] = {
     { "org/fmod/FMOD", "java/lang/Object" }, { "org/fmod/AudioDevice", "java/lang/Object" }, { "org/fmod/MediaCodec", "java/lang/Object" },
     { "android/media/AudioDeviceInfo", "java/lang/Object" },
@@ -71,7 +91,7 @@ static const tl_jhle k_hle[] = {
     M("org/fmod/FMOD", "getAssetManager", "()Landroid/content/res/AssetManager;", FMOD_assets),
     M("org/fmod/FMOD", "getAudioDevices", "(I)[Landroid/media/AudioDeviceInfo;", FMOD_audioDevices),
     M("org/fmod/AudioDevice", "<init>", "()V", Noop), M("org/fmod/AudioDevice", "init", "(IIII)Z", Audio_init),
-    M("org/fmod/AudioDevice", "write", "([SI)V", Audio_write), M("org/fmod/AudioDevice", "close", "()V", Noop),
+    M("org/fmod/AudioDevice", "write", "([SI)V", Audio_write), M("org/fmod/AudioDevice", "write", "([BI)V", Audio_write_bytes), M("org/fmod/AudioDevice", "close", "()V", Noop),
     M("org/fmod/MediaCodec", "<init>", "()V", Noop), M("org/fmod/MediaCodec", "init", "(J)Z", RetFalse),
     { NULL, NULL, NULL, NULL }
 };

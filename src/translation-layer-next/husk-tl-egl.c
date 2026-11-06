@@ -321,9 +321,51 @@ static struct { int64_t start, held, swap; } g_swapstat;
 static atomic_ulong g_glt_n, g_glt_draws, g_glt_uploads;
 void tl_egl_gl_histogram(char *out, size_t cap);
 void tl_egl_recent_calls(char *out, size_t n, int count);
+/* TL_GL_PROBE: what is actually in the frame about to be shown, and in the buffer it was copied from, sampled across the surface. A black screen is either a game that draws nothing or a copy that goes wrong, and this says which. */
+static void probe_buffer(const char *what, unsigned fb, int w, int h)
+{
+    a_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, fb);
+    int lit = 0, total = 0;
+    uint8_t first[4] = { 0 }, center[4] = { 0 };
+    for (int y = 0; y < 9; y++) for (int x = 0; x < 16; x++) {
+        uint8_t px[4] = { 0 };
+        a_glReadPixels((2 * x + 1) * w / 32, (2 * y + 1) * h / 18, 1, 1, 0x1908 /* GL_RGBA */, 0x1401 /* GL_UNSIGNED_BYTE */, px);
+        total++;
+        if (px[0] | px[1] | px[2]) { if (!lit) memcpy(first, px, 4); lit++; }
+        if (y == 4 && x == 8) memcpy(center, px, 4);
+    }
+    tl_log_line("gl probe: %s (framebuffer %u): %d of %d samples not black; centre rgba %u,%u,%u,%u; first lit %u,%u,%u,%u", what, fb, lit, total,
+                center[0], center[1], center[2], center[3], first[0], first[1], first[2], first[3]);
+}
+static void probe_frame(EGLDisplay d, EGLSurface s, unsigned long n)
+{
+    EGLint w = 0, h = 0;
+    a_eglQuerySurface(d, s, EGL_WIDTH, &w);
+    a_eglQuerySurface(d, s, EGL_HEIGHT, &h);
+    if (w <= 0 || h <= 0 || !a_glReadPixels) return;
+    int read_fb = 0, draw_fb = 0, pack = 0;
+    a_glGetIntegerv(0x8CAA /* GL_READ_FRAMEBUFFER_BINDING */, &read_fb);
+    a_glGetIntegerv(0x8CA6 /* GL_DRAW_FRAMEBUFFER_BINDING */, &draw_fb);
+    a_glGetIntegerv(0x0D05 /* GL_PACK_ALIGNMENT */, &pack);
+    a_glPixelStorei(0x0D05, 1);
+    int (*get_error)(void) = a_eglGetProcAddress("glGetError");
+    int err = get_error ? get_error() : 0;
+    tl_log_line("gl probe: swap #%lu, surface %dx%d, read framebuffer %d, draw framebuffer %d, GL error before %#x", n, w, h, read_fb, draw_fb, err);
+    probe_buffer("on screen", 0, w, h);
+    if (read_fb) probe_buffer("the copy's source", (unsigned)read_fb, w, h);
+    if (get_error && (err = get_error())) tl_log_line("gl probe: reading gave GL error %#x", err);
+    a_glPixelStorei(0x0D05, pack);
+    a_glBindFramebuffer(0x8CA8, (unsigned)read_fb);
+}
+
 static EGLBoolean w_eglSwapBuffers(EGLDisplay d, EGLSurface s)
 {
     unsigned long n = atomic_fetch_add(&E.presented, 1) + 1;
+    {
+        static int probe = -1;
+        if (probe < 0) probe = getenv("TL_GL_PROBE") ? 1 : 0;
+        if (probe && (n == 60 || n == 300 || n == 600 || n == 1200 || n == 2400)) probe_frame(d, s, n);
+    }
     if (n <= 3 || n % 600 == 0) {
         int64_t now = mono_ns(), span = now - g_swapstat.start;
         if (getenv("TL_GL_TRACE")) tl_log_line("egl: swap #%lu (%lu GL calls, %lu draws, %lu uploads so far)", n, (unsigned long)atomic_load(&g_glt_n), (unsigned long)atomic_load(&g_glt_draws), (unsigned long)atomic_load(&g_glt_uploads));
