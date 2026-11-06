@@ -27,7 +27,8 @@ concurrency:
 
 jobs:
   build:
-    runs-on: macos-26
+    # Intel for now: macos-26 has been failing to get a machine in this repository (not acquired by Runner).
+    runs-on: macos-26-intel
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
