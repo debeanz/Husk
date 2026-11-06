@@ -138,6 +138,7 @@ bool tl_celeste_on(void) { return C.on; }
 typedef struct {
     int (*coreclr_initialize)(const char *, const char *, int, const char **, const char **, void **, unsigned *);
     void *(*jit_init)(const char *);
+    void *(*enter_gc_unsafe)(void **);
     void *(*get_root_domain)(void);
     void *(*thread_attach)(void *);
     void *(*domain_assembly_open)(void *, const char *);
@@ -168,6 +169,7 @@ static bool mono_bind(void)
 #define BIND(field, name) do { *(void **)&M.field = tl_ld_sym(lib, name); if (!M.field) { tl_log_line("celeste: Mono has no %s", name); ok = false; } } while (0)
     BIND(coreclr_initialize, "coreclr_initialize");
     BIND(jit_init, "mono_jit_init");
+    BIND(enter_gc_unsafe, "mono_threads_enter_gc_unsafe_region");
     BIND(get_root_domain, "mono_get_root_domain");
     BIND(thread_attach, "mono_thread_attach");
     BIND(domain_assembly_open, "mono_domain_assembly_open");
@@ -214,6 +216,10 @@ static bool mono_start(void)
     if (!g_domain) g_domain = M.get_root_domain();
     if (!g_domain) { tl_log_line("celeste: Mono did not start: it has no root domain"); return false; }
     M.thread_attach(g_domain);
+    /* With cooperative suspend, mono_jit_init leaves this thread "blocking": the collector does not wait for it, and it may not touch managed state. A host stays out of that state to
+     * use the runtime, and this thread now does for good, as what runs on it next is the game. Managed code polls for the collector; its native calls step back out by themselves. */
+    static void *stackdata;
+    M.enter_gc_unsafe(&stackdata);
     tl_log_line("celeste: Mono is up");
     return true;
 }
