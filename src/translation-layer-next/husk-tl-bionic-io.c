@@ -1439,6 +1439,10 @@ static long linux_syscall_impl(long a0, long a1, long a2, long a3, long a4, long
         return fd < 0 ? -*tl_guest_errno_ptr() : fd;
     }
     case 57: { int r = close((int)a0); if (r == 0) tl_atomic_closed((int)a0); return r < 0 ? -tl_errno_to_guest(errno) : r; }
+    case 79: {                                                                          /* newfstatat: how Mina's libSystem shim reads a Mac stat */
+        int r = b_fstatat((int)a0, (const char *)a1, (guest_stat *)a2, (int)a3);
+        return r < 0 ? -*tl_guest_errno_ptr() : 0;
+    }
     case 63: { long r = read((int)a0, (void *)a1, (size_t)a2); return r < 0 ? -tl_errno_to_guest(errno) : r; }
     case 64: { long r = write((int)a0, (const void *)a1, (size_t)a2); return r < 0 ? -tl_errno_to_guest(errno) : r; }
     case 113: { int r = clock_gettime(clock_to_darwin((int)a0), (struct timespec *)a1); return r < 0 ? -tl_errno_to_guest(errno) : 0; }

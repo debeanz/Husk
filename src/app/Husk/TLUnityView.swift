@@ -719,9 +719,11 @@ struct TLCocosAttemptView: View {
     }
 
     /// Whether an on-screen controller may be offered: not when the game's settings say never, not while a real one is connected, and
-    /// without "Always" only for Unreal, whose menus answer nothing else.
+    /// without "Always" only for what cannot be played by touch: Unreal, whose menus answer nothing else, and Mina the Hollower, the game's Mac
+    /// build, whose port draws its touch controls in Java, which does not run here.
     private var padOffered: Bool {
-        settings.pad != .never && pads.names.isEmpty && (settings.pad == .always || engine == .ue4)
+        settings.pad != .never && pads.names.isEmpty
+            && (settings.pad == .always || engine == .ue4 || app.packageName == "com.teampacheworks.minathehollower")
     }
 
     /// Another game is already loaded in this session, and an engine cannot be loaded twice.

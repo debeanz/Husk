@@ -89,6 +89,9 @@ HUSK_EXPORT bool husk_ios_jit_prewarm(size_t bytes);
    layer's loader places game libraries in it. */
 HUSK_EXPORT HuskDualMapping *husk_ios_jit_get_mapping(void);
 
+/* Try to move the prewarmed region's writable view directly after its executable one. True if it is there. */
+HUSK_EXPORT bool husk_ios_jit_place_writable_after(void);
+
 /* Release a mapping obtained from husk_ios_jit_allocate(). */
 void husk_ios_jit_release(HuskDualMapping *m);
 

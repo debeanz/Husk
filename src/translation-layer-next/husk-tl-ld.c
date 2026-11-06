@@ -374,6 +374,21 @@ static void build_scope(tl_lib *L)
     L->deps_ready = true;
 }
 
+/*
+ * A symbol's address as whoever asked for it wants it. An IFUNC's is what its resolver answers, as under Android's linker. The port of Mina
+ * relies on that: libglibc_bridge's __pthread_key_create is one, and the libstdc++ that imports it takes its absence to mean a program with
+ * no threads, whose std::mutex does nothing. A resolver is guest code that may call through its library's imports, so another library's
+ * waits until that library is relocated (NULL until then); a library relocating itself has only itself to blame, as with R_IRELATIVE.
+ */
+static void *sym_target(const tl_lib *owner, const elf_sym *s, const tl_lib *asker)
+{
+    void *v = sym_value(owner, s);
+    if ((s->st_info & 0xf) != STT_GNU_IFUNC_) return v;
+    if (owner != asker && owner->state < 2) return NULL;
+    /* Bionic passes the hardware capabilities: none claimed here makes a resolver pick its plainest version, which every phone runs. */
+    return ((void *(*)(uint64_t, void *))v)(0, NULL);
+}
+
 /* Symbol lookup the way a library sees it: its own scope, then the system. */
 /* Functions a driver puts in front of whatever the libraries define: an import of one of these names is bound to the replacement, which can still call the original. */
 #define MAX_INTERPOSE 8
@@ -404,7 +419,7 @@ static void *lookup_for(tl_lib *L, const char *name, bool *weak_hit)
     for (int i = 0; i < g_ninterpose; i++) if (!strcmp(g_interpose[i].name, name)) return g_interpose[i].fn;
     build_scope(L);
     const elf_sym *s = lib_find(L, name);
-    if (s && (s->st_info & 0xf) != STT_GNU_IFUNC_) return sym_value(L, s);
+    if (s) { void *own = sym_target(L, s, L); if (own) return own; }
     if (strcmp(L->soname, "libcocos2dcpp.so") != 0 && is_cxx_runtime_symbol(name)) {
         for (int i = 0; i < L->ndeps; i++) {
             if (strcmp(L->deps[i]->soname, "libc++_shared.so") != 0) continue;
@@ -414,7 +429,7 @@ static void *lookup_for(tl_lib *L, const char *name, bool *weak_hit)
     }
     for (int i = 0; i < L->ndeps; i++) {
         s = lib_find(L->deps[i], name);
-        if (s && (s->st_info & 0xf) != STT_GNU_IFUNC_) return sym_value(L->deps[i], s);
+        if (s) { void *dep = sym_target(L->deps[i], s, L); if (dep) return dep; }
     }
     return tl_bionic_find(name);
 }
@@ -423,11 +438,12 @@ void *tl_ld_sym(tl_lib *lib, const char *name)
 {
     if (lib) {
         const elf_sym *s = lib_find(lib, name);
-        return s ? sym_value(lib, s) : NULL;
+        return s ? sym_target(lib, s, NULL) : NULL;
     }
     for (int i = 0; i < G.nlibs; i++) {
         const elf_sym *s = lib_find(G.libs[i], name);
-        if (s) return sym_value(G.libs[i], s);
+        void *v = s ? sym_target(G.libs[i], s, NULL) : NULL;
+        if (v) return v;
     }
     return NULL;
 }
@@ -444,7 +460,8 @@ void *tl_ld_sym_scope(tl_lib *lib, const char *name)
     build_scope(lib);
     for (int i = 0; i < lib->ndeps; i++) {
         const elf_sym *s = lib_find(lib->deps[i], name);
-        if (s && (s->st_info & 0xf) != STT_GNU_IFUNC_) return sym_value(lib->deps[i], s);
+        void *v = s ? sym_target(lib->deps[i], s, NULL) : NULL;
+        if (v) return v;
     }
     return tl_bionic_find(name);
 }
@@ -1198,8 +1215,7 @@ static uint64_t bind_symbol(tl_lib *L, uint32_t symidx, bool *failed)
         /* Defined here. Search the scope anyway so an earlier library's definition
          * wins, as it does under ELF interposition... except that a library's own
          * definition is what Android's linker uses first for its own symbols. */
-        if ((s->st_info & 0xf) == STT_GNU_IFUNC_) { *failed = true; return 0; }
-        val = (uint64_t)(uintptr_t)sym_value(L, s);
+        val = (uint64_t)(uintptr_t)sym_target(L, s, L);
     } else {
         void *a = lookup_for(L, name, NULL);
         if (a) {

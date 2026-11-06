@@ -354,6 +354,53 @@ HUSK_EXPORT __attribute__((used)) HuskDualMapping *husk_ios_jit_get_mapping(void
     return &husk_prewarmed;
 }
 
+/*
+ * A game placed across the seam of the two views (Mina the Hollower's Mach-O, husk-tl-macho.c) needs the writable one directly after the executable one, which
+ * is the first place husk_alias_near tries. What was in the way when the region was made may have gone: tries again, for a moment, before the game gives up.
+ */
+HUSK_EXPORT bool husk_ios_jit_place_writable_after(void)
+{
+    if (!husk_prewarmed.rw_addr) {
+        return false;
+    }
+    vm_address_t want = (vm_address_t)husk_prewarmed.rx_addr + husk_prewarmed.size;
+    if ((vm_address_t)husk_prewarmed.rw_addr == want) {
+        return true;
+    }
+    for (int attempt = 0; attempt < 5; attempt++) {
+        if (attempt) {
+            usleep(100 * 1000);
+        }
+        vm_address_t at = want;
+        vm_prot_t cur = VM_PROT_NONE, max = VM_PROT_NONE;
+        if (vm_remap(mach_task_self(), &at, (vm_size_t)husk_prewarmed.size, /*mask=*/0, VM_FLAGS_FIXED,
+                     mach_task_self(), (vm_address_t)husk_prewarmed.rx_addr,
+                     /*copy=*/FALSE, &cur, &max, VM_INHERIT_NONE) != KERN_SUCCESS) {
+            continue;
+        }
+        if (vm_protect(mach_task_self(), at, (vm_size_t)husk_prewarmed.size, FALSE,
+                       VM_PROT_READ | VM_PROT_WRITE) != KERN_SUCCESS) {
+            vm_deallocate(mach_task_self(), at, (vm_size_t)husk_prewarmed.size);
+            return false;
+        }
+        HUSK_LOG("writable view moved from %p to %p, directly after the executable one", (void *)husk_prewarmed.rw_addr, (void *)at);
+        vm_deallocate(mach_task_self(), (vm_address_t)husk_prewarmed.rw_addr, (vm_size_t)husk_prewarmed.size);
+        husk_prewarmed.rw_addr = (uint8_t *)at;
+        return true;
+    }
+    /* What is there, for the log: it tells whether this could be avoided. */
+    vm_address_t at = want;
+    vm_size_t size = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t object = MACH_PORT_NULL;
+    if (vm_region_64(mach_task_self(), &at, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &count, &object) == KERN_SUCCESS) {
+        HUSK_LOG("the place after the executable view (%p) stays taken: %zu MiB at %p, protection %d",
+                 (void *)want, (size_t)(size >> 20), (void *)at, info.protection);
+    }
+    return false;
+}
+
 HuskDualMapping husk_ios_jit_allocate(size_t bytes)
 {
     /*
@@ -684,6 +731,7 @@ HuskDualMapping husk_ios_jit_allocate(size_t bytes)
 }
 bool husk_ios_jit_prewarm(size_t bytes) { (void)bytes; return false; }
 HuskDualMapping *husk_ios_jit_get_mapping(void) { return NULL; }
+bool husk_ios_jit_place_writable_after(void) { return false; }
 void husk_ios_jit_release(HuskDualMapping *m) { (void)m; }
 void husk_ios_jit_detach(void) {}
 bool husk_ios_jit_is_available(void) { return false; }

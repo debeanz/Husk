@@ -13,6 +13,7 @@
 #include "husk-tl-bionic.h"
 #include "husk-tl-dexindex.h"
 #include "husk-tl-egl.h"
+#include "husk-tl-gamepad.h"
 #include "husk-tl-jni.h"
 #include "husk-tl-ld.h"
 #include "husk-tl-internal.h"
@@ -189,7 +190,7 @@ bool tl_godot_start(const tl_godot_config *cfg)
 /* ------------------------------------------------------------------ input */
 
 typedef struct { int kind, phase, id, key; bool down; float x, y; } event;
-enum { EV_TOUCH, EV_KEY };
+enum { EV_TOUCH, EV_KEY, EV_PAD_BUTTON, EV_PAD_AXIS, EV_PAD_HAT };
 static pthread_mutex_t q_lock = PTHREAD_MUTEX_INITIALIZER;
 static event q[256];
 static int q_n;
@@ -204,6 +205,96 @@ static void enqueue(event e)
 
 void tl_godot_touch(int phase, int id, float x, float y) { enqueue((event){ .kind = EV_TOUCH, .phase = phase, .id = id, .x = x, .y = y }); }
 void tl_godot_key(int keycode, bool down) { enqueue((event){ .kind = EV_KEY, .key = keycode, .down = down }); }
+
+/*
+ * Controllers. Godot's Java side reads a controller's events and calls GodotLib.joybutton, joyaxis and joyhat with the numbers its default Android
+ * mapping expects: the buttons below, the sticks on axes 0-3, the triggers on 4 and 5, the D-pad as a hat. Like touches they wait for the GL thread. A stick
+ * moves faster than a loading game draws: only the latest value of an axis or hat is kept, so that the queue has room for the buttons.
+ */
+static void enqueue_latest(event e)
+{
+    pthread_mutex_lock(&q_lock);
+    int i = q_n - 1;
+    while (i >= 0 && !(q[i].kind == e.kind && q[i].id == e.id && q[i].key == e.key)) i--;
+    if (i >= 0) q[i] = e;
+    else if (q_n < 256) q[q_n++] = e;
+    pthread_mutex_unlock(&q_lock);
+}
+
+static int godot_button(int keycode)
+{
+    switch (keycode) {
+    case 96: return 0;      /* KEYCODE_BUTTON_A */
+    case 97: return 1;      /* B */
+    case 99: return 2;      /* X */
+    case 100: return 3;     /* Y */
+    case 109: return 4;     /* SELECT */
+    case 110: return 5;     /* MODE */
+    case 108: return 6;     /* START */
+    case 106: return 7;     /* THUMBL */
+    case 107: return 8;     /* THUMBR */
+    case 102: return 9;     /* L1 */
+    case 103: return 10;    /* R1 */
+    default: return -1;     /* the triggers are axes */
+    }
+}
+
+static void pad_key(jobj *ev, int device, int action, int keycode, int64_t down_ms, int64_t event_ms)
+{
+    (void)down_ms; (void)event_ms;
+    int button = godot_button(keycode);
+    if (button >= 0) enqueue((event){ .kind = EV_PAD_BUTTON, .id = device - 41, .key = button, .down = action == 0 });
+    tl_jni_unref(ev);
+}
+
+static void pad_motion(jobj *ev, int device, int source, int64_t down_ms, int64_t event_ms)
+{
+    (void)source; (void)down_ms; (void)event_ms;
+    float a[48];
+    if (tl_input_event_axes(ev, a)) {
+        static const int android_axis[6] = { 0, 1, 11, 14, 17, 18 };     /* X, Y, Z, RZ, LTRIGGER, RTRIGGER */
+        for (int i = 0; i < 6; i++) enqueue_latest((event){ .kind = EV_PAD_AXIS, .id = device - 41, .key = i, .x = a[android_axis[i]] });
+        enqueue_latest((event){ .kind = EV_PAD_HAT, .id = device - 41, .x = a[15], .y = a[16] });
+    }
+    tl_jni_unref(ev);
+}
+
+/* Says which controllers have come and gone: GodotLib.joyconnectionchanged. Godot takes the slot as its device id. */
+static void sync_pads(void)
+{
+    static bool announced[TL_PADS];
+    typedef void (*conn_fn)(void *env, void *cls, int device, uint8_t connected, void *name);
+    static conn_fn fn;
+    static bool looked;
+    if (!looked) { looked = true; fn = (conn_fn)native_of("joyconnectionchanged", "(IZLjava/lang/String;)V"); }
+    if (!fn) return;
+    for (int slot = 0; slot < TL_PADS; slot++) {
+        bool now = tl_pad_connected(slot);
+        if (now == announced[slot]) continue;
+        announced[slot] = now;
+        tl_log_line("godot: controller %d %s", slot, now ? "connected" : "disconnected");
+        fn(tl_jni_env(), tl_jni_class_object(LIB), slot, now, tl_jni_new_string("Xbox Wireless Controller"));
+    }
+}
+
+static void send_pad(const event *e)
+{
+    typedef void (*button_fn)(void *env, void *cls, int device, int button, uint8_t pressed);
+    typedef void (*axis_fn)(void *env, void *cls, int device, int axis, float value);
+    typedef void (*hat_fn)(void *env, void *cls, int device, int x, int y);
+    static button_fn button; static axis_fn axis; static hat_fn hat;
+    static bool looked;
+    if (!looked) {
+        looked = true;
+        button = (button_fn)native_of("joybutton", "(IIZ)V");
+        axis = (axis_fn)native_of("joyaxis", "(IIF)V");
+        hat = (hat_fn)native_of("joyhat", "(III)V");
+    }
+    void *env = tl_jni_env(), *cls = tl_jni_class_object(LIB);
+    if (e->kind == EV_PAD_BUTTON && button) button(env, cls, e->id, e->key, e->down);
+    else if (e->kind == EV_PAD_AXIS && axis) axis(env, cls, e->id, e->key, e->x);
+    else if (e->kind == EV_PAD_HAT && hat) hat(env, cls, e->id, (int)e->x, (int)e->y);
+}
 
 /*
  * GodotLib.dispatchTouchEvent(event, actionPointerId, pointerCount, positions, doubleTap): an Android MotionEvent's
@@ -269,8 +360,11 @@ static void drain_events(void)
     pthread_mutex_lock(&q_lock);
     n = q_n; memcpy(local, q, sizeof(event) * (size_t)n); q_n = 0;
     pthread_mutex_unlock(&q_lock);
+    sync_pads();
     for (int i = 0; i < n; i++) {
-        if (local[i].kind == EV_TOUCH) send_touch(&local[i]); else send_key(&local[i]);
+        if (local[i].kind == EV_TOUCH) send_touch(&local[i]);
+        else if (local[i].kind == EV_KEY) send_key(&local[i]);
+        else send_pad(&local[i]);
         if (tl_jni_pending()) tl_jni_clear();
     }
 }
@@ -342,6 +436,8 @@ static void *gl_main(void *arg)
     void_fn paused_fn = (void_fn)native_of("onRendererPaused", "()V"), resumed_fn = (void_fn)native_of("onRendererResumed", "()V");
     if (!step) { atomic_store(&U.ended, true); return NULL; }
     tl_log_line("godot: rendering at %dx%d", U.cfg.width, U.cfg.height);
+    static const tl_pad_sink sink = { pad_key, pad_motion };
+    tl_pad_set_sink(&sink);
 
     bool was_paused = false;
     int64_t next = now_ns();

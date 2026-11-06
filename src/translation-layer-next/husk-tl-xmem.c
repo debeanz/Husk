@@ -219,14 +219,28 @@ bool tl_xmem_alloc(size_t bytes, uint8_t **rx, uint8_t **rw)
     return ok;
 }
 
+#if defined(__APPLE__) && !TARGET_OS_OSX
+extern bool husk_ios_jit_place_writable_after(void);
+#endif
+
 bool tl_xmem_reserve_straddle(size_t low_bytes, size_t high_bytes, uint8_t **high_rx, char *err, size_t errlen)
 {
     size_t low = (low_bytes + TL_XMEM_PAGE - 1) & ~(size_t)(TL_XMEM_PAGE - 1);
     size_t high = (high_bytes + TL_XMEM_PAGE - 1) & ~(size_t)(TL_XMEM_PAGE - 1);
     bool ok = false;
     pthread_mutex_lock(&g_x.lock);
+#if defined(__APPLE__) && !TARGET_OS_OSX
+    /* Where iOS left room when the region was made is chance. Nothing is in the region yet, so its writable view can still move. */
+    if (g_x.open && g_x.rw != g_x.rx + g_x.size && !g_x.used && !g_x.top && husk_ios_jit_place_writable_after()) {
+        tl_dual_mapping *m = tl_find_stikdebug_prewarmed();
+        if (m) g_x.rw = m->rw_addr;
+    }
+#endif
     if (!g_x.open) snprintf(err, errlen, "the JIT region is not open");
-    else if (g_x.rw != g_x.rx + g_x.size) snprintf(err, errlen, "the JIT region's writable view (%p) does not directly follow its executable view (%p, %zu MiB)", (void *)g_x.rw, (void *)g_x.rx, g_x.size >> 20);
+    else if (g_x.rw != g_x.rx + g_x.size) {
+        tl_log_line("xmem: the JIT region's writable view (%p) does not directly follow its executable view (%p, %zu MiB)", (void *)g_x.rw, (void *)g_x.rx, g_x.size >> 20);
+        snprintf(err, errlen, "iOS put Husk's memory where this game cannot use it, which happens now and then. Close Husk and open it again.");
+    }
     else if (g_x.used || g_x.top) snprintf(err, errlen, "%zu bytes of the JIT region are already in use", g_x.used + g_x.top);
     else if (low > g_x.size || high > g_x.size - low) snprintf(err, errlen, "%zu + %zu bytes do not fit in the %zu MiB JIT region", low, high, g_x.size >> 20);
     else {

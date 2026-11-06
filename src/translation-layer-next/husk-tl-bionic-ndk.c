@@ -169,6 +169,17 @@ typedef struct { const uint8_t *data; size_t len; size_t pos; uint8_t *owned; } 
 
 static void *b_AAssetManager_fromJava(void *env, void *obj) { (void)env; (void)obj; static int mgr; return &mgr; }
 
+/*
+ * Five functions of a Mac's libSystem that a game run by machismo imports and nothing else provides. Unbound, a call to one is a jump to nowhere.
+ * Signposts are tracing, which stays off. "Is this OS version here?" is answered no, so that code takes its way for older systems and leaves Apple's
+ * frameworks, which are not here, alone.
+ */
+static int b_os_signpost_enabled(void *log) { (void)log; return 0; }
+static uint64_t b_os_signpost_id_generate(void *log) { (void)log; return 0; }
+static void b__os_signpost_emit_with_name_impl(void *dso, void *log, int type, uint64_t id, const char *name, const char *fmt, void *buf, unsigned size) { (void)dso; (void)log; (void)type; (void)id; (void)name; (void)fmt; (void)buf; (void)size; }
+static uint32_t b__availability_version_check(uint32_t count, const void *versions) { (void)count; (void)versions; return 0; }
+static int b_fcopyfile(int from, int to, void *state, uint32_t flags) { (void)from; (void)to; (void)state; (void)flags; return -1; }
+
 static void *b_AAssetManager_open(void *mgr, const char *name, int mode)
 {
     (void)mgr; (void)mode;
@@ -1098,6 +1109,9 @@ const tl_bionic_entry tl_tab_ndk[] = {
     TL_WRAP("AAudioStream_isMMapUsed", b_AAudioStream_isMMapUsed), TL_WRAP("AAudio_convertStreamStateToText", b_AAudio_convertStreamStateToText),
     TL_WRAP("AAudioStream_getHardwareSampleRate", b_AAudioStream_getHardwareSampleRate), TL_WRAP("AAudioStream_getHardwareChannelCount", b_AAudioStream_getHardwareChannelCount),
     TL_WRAP("AAudioStream_getHardwareFormat", b_AAudioStream_getHardwareFormat),
+    TL_WRAP("os_signpost_enabled", b_os_signpost_enabled), TL_WRAP("os_signpost_id_generate", b_os_signpost_id_generate),
+    TL_WRAP("_os_signpost_emit_with_name_impl", b__os_signpost_emit_with_name_impl), TL_WRAP("_availability_version_check", b__availability_version_check),
+    TL_WRAP("fcopyfile", b_fcopyfile),
     TL_WRAP("AAssetManager_openDir", b_AAssetManager_openDir), TL_WRAP("AAssetDir_getNextFileName", b_AAssetDir_getNextFileName),
     TL_WRAP("AAssetDir_close", b_AAssetDir_close), TL_WRAP("deflateBound", b_deflateBound),
     TL_WRAP("AAssetManager_fromJava", b_AAssetManager_fromJava), TL_WRAP("AAssetManager_open", b_AAssetManager_open),
