@@ -118,6 +118,8 @@ bool tl_celeste_prepare(const char *apk, const char *data, char *why, size_t why
     tl_dotnet_runtime_env();
     /* OpenGL ES through ANGLE: what every other game here draws with. */
     setenv("FNA3D_FORCE_DRIVER", "OpenGL", 1);
+    /* ES 3.0 has no base-vertex draws: FNA3D has its own way when it cannot find them. */
+    setenv("TL_GL_NO_BASE_VERTEX", "1", 1);
     /* While the picture is being brought up: which GL calls it makes, and what ends up in the frame. */
     setenv("TL_GL_TRACE", "1", 1);
     setenv("TL_GL_PROBE", "1", 1);

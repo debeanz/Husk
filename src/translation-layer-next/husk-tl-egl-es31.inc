@@ -524,7 +524,7 @@ static void w_glDeleteTextures(int n, const unsigned *t)
 }
 /* Draws: what the buffer textures show is brought up to date first. */
 static void (*r_glDrawArrays)(unsigned, int, int);
-static void w_glDrawArrays(unsigned m, int f, int c) { if (g_es31_shim) tb_flush(); r_glDrawArrays(m, f, c); }
+static void w_glDrawArrays(unsigned m, int f, int c) { if (g_es31_shim) tb_flush(); probe_draw("glDrawArrays", false, m, c); r_glDrawArrays(m, f, c); probe_draw("glDrawArrays", true, m, c); }
 static void (*r_glDrawElements)(unsigned, int, unsigned, const void *);
 static void w_glDrawElements(unsigned m, int c, unsigned t, const void *i) { if (g_es31_shim) tb_flush(); r_glDrawElements(m, c, t, i); }
 static void (*r_glDrawArraysInstanced)(unsigned, int, int, int);
@@ -532,7 +532,7 @@ static void w_glDrawArraysInstanced(unsigned m, int f, int c, int n) { if (g_es3
 static void (*r_glDrawElementsInstanced)(unsigned, int, unsigned, const void *, int);
 static void w_glDrawElementsInstanced(unsigned m, int c, unsigned t, const void *i, int n) { if (g_es31_shim) tb_flush(); r_glDrawElementsInstanced(m, c, t, i, n); }
 static void (*r_glDrawRangeElements)(unsigned, unsigned, unsigned, int, unsigned, const void *);
-static void w_glDrawRangeElements(unsigned m, unsigned s, unsigned e, int c, unsigned t, const void *i) { if (g_es31_shim) tb_flush(); r_glDrawRangeElements(m, s, e, c, t, i); }
+static void w_glDrawRangeElements(unsigned m, unsigned s, unsigned e, int c, unsigned t, const void *i) { if (g_es31_shim) tb_flush(); probe_draw("glDrawRangeElements", false, m, c); r_glDrawRangeElements(m, s, e, c, t, i); probe_draw("glDrawRangeElements", true, m, c); }
 static void (*r_glBindBufferRange)(unsigned, unsigned, unsigned, long, long);
 static void w_glBindBufferRange(unsigned t, unsigned i, unsigned b, long o, long n)
 {

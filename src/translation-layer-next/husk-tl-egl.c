@@ -358,6 +358,22 @@ static void probe_frame(EGLDisplay d, EGLSurface s, unsigned long n)
     a_glBindFramebuffer(0x8CA8, (unsigned)read_fb);
 }
 
+/* TL_GL_PROBE: the first few GL errors around a draw, and whether the draw itself or something before it caused them. */
+static void probe_draw(const char *what, bool after, unsigned mode, int count)
+{
+    static int probe = -1, said;
+    static int (*get_error)(void);
+    if (probe < 0) { probe = getenv("TL_GL_PROBE") ? 1 : 0; get_error = probe ? a_eglGetProcAddress("glGetError") : NULL; }
+    if (!get_error || said >= 12) return;
+    int err = get_error();
+    if (!err) return;
+    int program = 0, fb = 0;
+    a_glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &program);
+    a_glGetIntegerv(0x8CA6 /* GL_DRAW_FRAMEBUFFER_BINDING */, &fb);
+    said++;
+    tl_log_line("gl probe: GL error %#x %s %s (mode %u, count %d, program %d, framebuffer %d)", err, after ? "from" : "before", what, mode, count, program, fb);
+}
+
 static EGLBoolean w_eglSwapBuffers(EGLDisplay d, EGLSurface s)
 {
     unsigned long n = atomic_fetch_add(&E.presented, 1) + 1;
@@ -721,6 +737,13 @@ void *tl_egl_resolve(const char *name)
     }
     for (size_t i = 0; i < sizeof(k_egl) / sizeof(k_egl[0]); i++) if (!strcmp(k_egl[i].name, name)) return k_egl[i].fn;
     if (!E.ready || !a_eglGetProcAddress) return NULL;
+    /* ANGLE hands these out on any context, but on ES 3.0 each call is refused with GL_INVALID_OPERATION and draws nothing.
+     * FNA3D decides by whether the name resolves: without them it draws with the 3.0 calls and moves the vertex attributes
+     * by the base vertex itself. Only for a game that asks (TL_GL_NO_BASE_VERTEX): another may rely on the extension. */
+    if (!strncmp(name, "glDraw", 6) && strstr(name, "BaseVertex") && getenv("TL_GL_NO_BASE_VERTEX")) {
+        tl_log_line("gl: %s hidden, this context is ES 3.0", name);
+        return NULL;
+    }
     void *real = a_eglGetProcAddress(name);
     if (!real && E.gles) {
         /* dlsym on the handle also searches what ANGLE links against, and on a Mac that is the system's desktop OpenGL:
