@@ -218,7 +218,7 @@ static bool mono_start(void)
     M.thread_attach(g_domain);
     /* With cooperative suspend, mono_jit_init leaves this thread "blocking": the collector does not wait for it, and it may not touch managed state. A host stays out of that state to
      * use the runtime, and this thread now does for good, as what runs on it next is the game. Managed code polls for the collector; its native calls step back out by themselves. */
-    static void *stackdata;
+    void *stackdata;                                                /* on the stack: Mono measures the stack from this address */
     M.enter_gc_unsafe(&stackdata);
     tl_log_line("celeste: Mono is up");
     return true;
