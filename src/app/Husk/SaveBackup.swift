@@ -15,7 +15,9 @@ enum SaveBackup {
     }
 
     /// Folders that are made again by the game or by Husk, and are left out of a backup.
-    private static let skipped: Set<String> = ["cache", "il2cpp", "UnityShaderCache", "geode-bin", "code_cache", "tmp"]
+    private static let skipped: Set<String> = ["cache", "il2cpp", "UnityShaderCache", "geode-bin", "code_cache", "tmp", stampsFolder]
+    /// Where the runtime lists what it unpacked from an APK (husk-tl-bundled.c). Left out with those files, it unpacks them again after a restore.
+    private static let stampsFolder = ".husk-unpacked"
     private static let manifestName = "husk-backup.json"
 
     private static func dataFolders(_ appDir: URL) -> [URL] {
@@ -34,7 +36,12 @@ enum SaveBackup {
     static func export(_ app: TLApp) throws -> URL {
         let appDir = TranslationLayer.root.appendingPathComponent(app.id)
         var files: [(name: String, url: URL)] = []
-        for folder in dataFolders(appDir) { collect(folder, prefix: folder.lastPathComponent, into: &files) }
+        for folder in dataFolders(appDir) {
+            let fromAPK = unpackedFromAPK(folder)
+            var found: [(name: String, url: URL)] = []
+            collect(folder, prefix: folder.lastPathComponent, into: &found)
+            files += found.filter { !fromAPK.contains($0.name) }
+        }
         guard !files.isEmpty else { throw Failure("\(app.label) has not saved anything yet.") }
 
         let manifest: [String: Any] = [
@@ -53,6 +60,24 @@ enum SaveBackup {
         return out
     }
 
+    /// The files the runtime unpacked from the game's APK and the game has not changed since, by their names in a backup.
+    private static func unpackedFromAPK(_ folder: URL) -> Set<String> {
+        let fm = FileManager.default
+        let stamps = folder.appendingPathComponent(stampsFolder)
+        func modified(_ url: URL) -> Date? { (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate }
+        var names = Set<String>()
+        for stamp in (try? fm.contentsOfDirectory(at: stamps, includingPropertiesForKeys: nil)) ?? [] {
+            guard !stamp.lastPathComponent.hasPrefix("."), stamp.pathExtension != "part",
+                  let when = modified(stamp), let list = try? String(contentsOf: stamp, encoding: .utf8) else { continue }
+            for line in list.split(separator: "\n").dropFirst() {
+                if let changed = modified(folder.appendingPathComponent(String(line))), changed <= when {
+                    names.insert(folder.lastPathComponent + "/" + line)
+                }
+            }
+        }
+        return names
+    }
+
     private static func collect(_ dir: URL, prefix: String, into files: inout [(name: String, url: URL)]) {
         let fm = FileManager.default
         for item in (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey])) ?? [] {
@@ -61,6 +86,7 @@ enum SaveBackup {
             if values?.isSymbolicLink == true { continue }
             if values?.isDirectory == true {
                 if skipped.contains(name) { continue }
+                if name == "obb", prefix.hasSuffix("/Android") { continue }     // OBBs: the game's data, not its saves, and they come back with it
                 collect(item, prefix: prefix + "/" + name, into: &files)
             } else if !name.hasSuffix(".husk-new") {
                 files.append((prefix + "/" + name, item))

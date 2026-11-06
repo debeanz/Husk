@@ -149,10 +149,12 @@ bool tl_ld_add_apk(const char *path)
         for (int i = 0; i < g_nsplits; i++) {
             if (add_one(g_splits[i])) tl_log_line("ld: split %s", strrchr(g_splits[i], '/') ? strrchr(g_splits[i], '/') + 1 : g_splits[i]);
         }
-    return true;
+    /* Every engine's APKs come through here, before anything of the game is loaded: so this needs nothing from any engine. */
+    return tl_bundled_data_unpack();
 }
 
 const tl_zip *tl_ld_apk_at(int i) { return (i >= 0 && i < G.napks) ? &G.apks[i] : NULL; }
+const char *tl_ld_apk_path_at(int i) { return (i >= 0 && i < G.napks) ? g_apk_paths[i] : NULL; }
 
 /* Every arm64 library the APKs carry, by file name and size: a game that links SDL into its own library names no SDL library to look for. */
 int tl_ld_apk_libs(void (*cb)(const char *name, uint64_t size, void *user), void *user)

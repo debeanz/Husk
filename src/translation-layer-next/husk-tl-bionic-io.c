@@ -75,6 +75,7 @@ void tl_set_data_dir(const char *dir)
     if (g_data_dir[0]) drop_unfinished(g_data_dir, 0);
 }
 const char *tl_data_dir(void) { return g_data_dir[0] ? g_data_dir : "/tmp"; }
+bool tl_data_dir_is_set(void) { return g_data_dir[0] != 0; }
 static char g_package[128];
 void tl_set_package_name(const char *pkg) { snprintf(g_package, sizeof(g_package), "%s", pkg ? pkg : ""); }
 

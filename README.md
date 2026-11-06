@@ -73,6 +73,13 @@ split bundles (`.xapk`, `.apkm`, `.apks`, or a Play download's separate split
 APKs and asset packs) can all be added. Apps written only
 in Java, with no native engine, are not supported.
 
+Game data that comes with an APK is put where the game looks for it before it
+starts, whichever engine it uses: ZIPs of app data in `assets/` (`data0`,
+`data1`, `something.zip`, with `files/`, `Android/obb/`, `Android/data/` and so
+on inside), `.obb` files in the APK or an `.xapk`, and an `.obb` picked together
+with its APK. What is inside the APK is unpacked at the first start, which needs
+that much free space again.
+
 One game runs per launch of Husk. To switch, press **Close Husk to Play** on
 the other game's page; when you open Husk again, that game starts by itself.
 

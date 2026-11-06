@@ -27,7 +27,7 @@ final class IncomingFiles: ObservableObject {
         try? FileManager.default.removeItem(at: folder)
     }
 
-    static let extensions: Set<String> = ["apk", "xapk", "apkm", "apks"]
+    static let extensions: Set<String> = ["apk", "xapk", "apkm", "apks", "obb"]
 
     /// Copies under way, said in one line while they last.
     @Published private(set) var preparing: String?

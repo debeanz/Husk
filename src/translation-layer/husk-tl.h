@@ -45,6 +45,13 @@ void *husk_tl_read_entry(const char *apk, const char *name, size_t limit,
                          size_t *out_len);
 
 /*
+ * Take an app bundle (.xapk, .apkm, .apks) apart into `dir`: its APKs beside
+ * each other, and any OBBs in `dir`/obb. Returns the names, a line each; free
+ * with husk_tl_free(). NULL if it could not be done, with the reason in `err`.
+ */
+char *husk_tl_bundle_unpack(const char *bundle, const char *dir, char *err, size_t errlen);
+
+/*
  * Measure what the translation layer depends on that only the device itself
  * can answer: whether the thread register Android code reads its stack guard
  * from is ours to set, whether x18 survives, and whether a library image can

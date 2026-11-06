@@ -44,6 +44,11 @@ const char *tl_ld_queued_split(int index);              /* NULL past the last */
 /* The APKs added, in order, for asset access; NULL past the last. */
 struct tl_zip;
 const struct tl_zip *tl_ld_apk_at(int index);
+const char *tl_ld_apk_path_at(int index);
+
+/* The game data that comes with the APKs added so far (ZIPs of app data, OBBs) put where the game will look (husk-tl-bundled.c). Called for every APK added, so no engine has to.
+ * False if the game cannot start, and the app has been told why. */
+bool tl_bundled_data_unpack(void);
 
 /* Bind every later import of `name` to `fn` instead of the library that defines it (the original is still reachable with tl_ld_sym). Call before the libraries load. */
 void tl_ld_interpose(const char *name, void *fn);

@@ -331,8 +331,11 @@ final class TranslationLayerStore: ObservableObject {
                     continue
                 }
                 var name = url.lastPathComponent
-                if !name.lowercased().hasSuffix(".apk") { name += ".apk" }
-                let dest = dir.appendingPathComponent(name)
+                // An OBB picked with its APK: kept apart from the APKs, and put in the game's OBB folder when it starts.
+                let isOBB = name.lowercased().hasSuffix(".obb")
+                if !isOBB, !name.lowercased().hasSuffix(".apk") { name += ".apk" }
+                if isOBB { try fm.createDirectory(at: dir.appendingPathComponent("obb"), withIntermediateDirectories: true) }
+                let dest = isOBB ? dir.appendingPathComponent("obb").appendingPathComponent(name) : dir.appendingPathComponent(name)
                 if move {
                     try fm.moveItem(at: url, to: dest)
                 } else {
@@ -355,6 +358,10 @@ final class TranslationLayerStore: ObservableObject {
         let apks = ((try? fm.contentsOfDirectory(atPath: dir.path)) ?? [])
             .filter { $0.hasSuffix(".apk") }.sorted()
             .map { dir.appendingPathComponent($0).path }
+        guard !apks.isEmpty else {
+            try? fm.removeItem(at: dir)
+            return "An OBB file needs its game: pick the APK and the OBB together."
+        }
         describe(apks, into: dir)
         let json = scan(apks)
         try? Data(json.utf8).write(to: dir.appendingPathComponent("report.json"))

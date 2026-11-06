@@ -155,9 +155,9 @@ static void *ui_main(void *arg)
         "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Landroid/content/res/AssetManager;[BLandroid/content/res/Configuration;)J",
         "Java_com_google_androidgamesdk_GameActivity_initializeNativeCode");
     if (!init) return NULL;
-    char files[600], obb[600], ext[700];
+    char files[600], obb[700], ext[700];
     snprintf(files, sizeof(files), "%s/files", G.data);
-    snprintf(obb, sizeof(obb), "%s/obb", G.data);
+    snprintf(obb, sizeof(obb), "%s/sdcard/Android/obb/%s", G.data, G.pkg);
     snprintf(ext, sizeof(ext), "%s/sdcard/Android/data/%s/files", G.data, G.pkg);
     tl_log_line("minecraft: initializeNativeCode");
     G.handle = init(env, activity, tl_jni_new_string(files), tl_jni_new_string(obb), tl_jni_new_string(ext), tl_hle_assets(), NULL, tl_hle_config());

@@ -12,6 +12,8 @@
  *   files/dotnet/           the app's assemblies, out of its assembly store
  *   files/patcher/          what the patch is built from, out of the APK
  *   files/patched/          Celeste.dll, patched at the first launch
+ *
+ * An APK with the game inside it has files/Celeste/ and files/patched/ in assets/data0, unpacked before this runs (husk-tl-bundled.c).
  */
 #define _DARWIN_C_SOURCE
 #include <errno.h>

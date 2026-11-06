@@ -28,7 +28,7 @@
 void tl_http_install(void);
 
 static struct {
-    char pkg[128], apk[1024], data[512], files[600], cache[600], ext_files[700], ext_cache[700], native_lib[64];
+    char pkg[128], apk[1024], data[512], files[600], cache[600], ext_files[700], ext_cache[700], obb[700], native_lib[64];
     int width, height;
     float density;
     char version_name[64];
@@ -1036,12 +1036,12 @@ static void Coll_size(tl_jcall *c) { c->ret = vi(0); }
 static void Coll_isEmpty(tl_jcall *c) { c->ret = vz(1); }
 static void SP_getAll(tl_jcall *c) { c->ret = vl(make("java/util/HashMap")); }
 static void Intent_getExtras(tl_jcall *c) { c->ret = vl(NULL); }
-static void Context_getObbDir(tl_jcall *c) { char p[700]; snprintf(p, sizeof(p), "%s/obb", H.ext_files); mkdirs(p); c->ret = vl(new_file(p)); }
+static void Context_getObbDir(tl_jcall *c) { mkdirs(H.obb); c->ret = vl(new_file(H.obb)); }
 static void Context_getObbDirs(tl_jcall *c)
 {
     jobj *a = tl_jni_new_obj_array(C("java/io/File"), 1);
-    char p[700]; snprintf(p, sizeof(p), "%s/obb", H.ext_files); mkdirs(p);
-    a->oarr.v[0] = new_file(p);
+    mkdirs(H.obb);
+    a->oarr.v[0] = new_file(H.obb);
     c->ret = vl(a);
 }
 static void Activity_setRequestedOrientation(tl_jcall *c) { (void)c; }
@@ -1591,6 +1591,7 @@ void tl_hle_configure(const char *pkg, const char *apk, const char *data, int w,
     snprintf(H.cache, sizeof(H.cache), "%s/cache", data);
     snprintf(H.ext_files, sizeof(H.ext_files), "%s/sdcard/Android/data/%s/files", data, pkg);
     snprintf(H.ext_cache, sizeof(H.ext_cache), "%s/sdcard/Android/data/%s/cache", data, pkg);
+    snprintf(H.obb, sizeof(H.obb), "%s/sdcard/Android/obb/%s", data, pkg);
     snprintf(H.native_lib, sizeof(H.native_lib), "/data/app/lib/arm64");
     H.width = w; H.height = h; H.density = 3.0f;
     H.version_name[0] = 0; H.version_code = 0;
