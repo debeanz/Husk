@@ -137,6 +137,7 @@ bool tl_celeste_on(void) { return C.on; }
 
 typedef struct {
     int (*coreclr_initialize)(const char *, const char *, int, const char **, const char **, void **, unsigned *);
+    void *(*jit_init)(const char *);
     void *(*get_root_domain)(void);
     void *(*thread_attach)(void *);
     void *(*domain_assembly_open)(void *, const char *);
@@ -166,6 +167,7 @@ static bool mono_bind(void)
     bool ok = true;
 #define BIND(field, name) do { *(void **)&M.field = tl_ld_sym(lib, name); if (!M.field) { tl_log_line("celeste: Mono has no %s", name); ok = false; } } while (0)
     BIND(coreclr_initialize, "coreclr_initialize");
+    BIND(jit_init, "mono_jit_init");
     BIND(get_root_domain, "mono_get_root_domain");
     BIND(thread_attach, "mono_thread_attach");
     BIND(domain_assembly_open, "mono_domain_assembly_open");
@@ -207,8 +209,10 @@ static bool mono_start(void)
     void *host = NULL; unsigned domain_id = 0;
     int rc = M.coreclr_initialize(C.dotnet, "Celeste", (int)(sizeof(keys) / sizeof(keys[0])), keys, vals, &host, &domain_id);
     if (rc != 0) { tl_log_line("celeste: coreclr_initialize failed (%#x)", (unsigned)rc); return false; }
-    g_domain = M.get_root_domain();
-    if (!g_domain) { tl_log_line("celeste: Mono has no root domain"); return false; }
+    /* On Mono that only records the properties and how to find assemblies. This starts the runtime, and attaches this thread to it. */
+    g_domain = M.jit_init("Celeste");
+    if (!g_domain) g_domain = M.get_root_domain();
+    if (!g_domain) { tl_log_line("celeste: Mono did not start: it has no root domain"); return false; }
     M.thread_attach(g_domain);
     tl_log_line("celeste: Mono is up");
     return true;
