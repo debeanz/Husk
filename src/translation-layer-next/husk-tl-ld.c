@@ -432,6 +432,23 @@ void *tl_ld_sym(tl_lib *lib, const char *name)
     return NULL;
 }
 
+/*
+ * What dlsym(handle, name) searches on Android: the library, then what it needs, breadth first, libc among them (here, Husk's).
+ * Mina's loader depends on it: it binds a Mac import of libSystem by asking that library's shim, and only an answer from there gets
+ * the thunk that turns a Mac variadic call into an Android one. The shim defines no vsnprintf: libc, which it needs, does.
+ */
+void *tl_ld_sym_scope(tl_lib *lib, const char *name)
+{
+    void *r = tl_ld_sym(lib, name);
+    if (r) return r;
+    build_scope(lib);
+    for (int i = 0; i < lib->ndeps; i++) {
+        const elf_sym *s = lib_find(lib->deps[i], name);
+        if (s && (s->st_info & 0xf) != STT_GNU_IFUNC_) return sym_value(lib->deps[i], s);
+    }
+    return tl_bionic_find(name);
+}
+
 /* Where the library's vaddr 0 lies in the executable view: what dladdr calls its base. */
 void *tl_ld_lib_base(const tl_lib *L) { return L ? (void *)(L->rx - L->base_vaddr) : NULL; }
 

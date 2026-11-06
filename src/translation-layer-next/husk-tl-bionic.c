@@ -586,7 +586,7 @@ static void *bionic_dlsym(void *handle, const char *name)
         r = tl_bionic_find(name);
         if (!r) note_unprovided(name, "");
     } else {
-        r = tl_ld_sym((tl_lib *)handle, name);
+        r = tl_ld_sym_scope((tl_lib *)handle, name);
     }
     if (getenv("TL_DL_TRACE") || tl_watch_line()) tl_log_line("dl: dlsym(%s) -> %s", name, r ? "found" : "missing");
     if (!r) dl_fail("undefined symbol: %s", name);
