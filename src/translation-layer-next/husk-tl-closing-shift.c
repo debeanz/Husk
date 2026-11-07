@@ -27,6 +27,7 @@
 #define STICK_FLAT 0.08f                /* what InputDevice.MotionRange.getFlat says for a stick here (husk-tl-gamepad.c) */
 
 const char *tl_hle_ext_files(void);
+int tl_frame_hz(void);          /* the frame rate games are held to, 60 or 120 (husk-tl-egl.c) */
 
 static jvalue vl(void *p) { jvalue v; v.j = 0; v.l = p; return v; }
 
@@ -62,14 +63,19 @@ static void seed_config(const char *apk)
 
 /* ------------------------------------------------------------- PortDisplay */
 
-/* PortDisplay.rates: 30, then each refresh rate of the screen's modes and its half if that is 30 or more, in order, and a 0 at the end. Husk holds games to 60 Hz. */
+/* PortDisplay.rates: 30, then each refresh rate of the screen's modes and its half if that is 30 or more, in order, and a 0 at the end. The screen here
+ * has the one rate games are held to, which the game's "Display" frame rate setting goes by. */
 static void PD_frameRates(tl_jcall *c)
 {
-    static const int rates[] = { 30, 60, 0 };
-    jobj *a = tl_jni_new_prim_array('I', 3);
-    memcpy(a->arr.data, rates, sizeof(rates));
+    static const int at_60[] = { 30, 60, 0 }, at_120[] = { 30, 60, 120, 0 };
+    bool fast = tl_frame_hz() > 60;
+    uint32_t n = fast ? 4 : 3;
+    jobj *a = tl_jni_new_prim_array('I', n);
+    memcpy(a->arr.data, fast ? at_120 : at_60, n * sizeof(int));
     c->ret = vl(a);
 }
+/* PortDisplay.setFrameRate asks Android for the screen mode nearest the game's cap. Here the screen's rate is Husk's setting, and the cap is the game's own to keep. */
+static void PD_setFrameRate(tl_jcall *c) { tl_log_line("closing shift: the game caps itself at %d frames a second (0: the screen's rate, %d)", c->args[0].i, tl_frame_hz()); }
 static void P_void(tl_jcall *c) { (void)c; }
 
 /* ------------------------------------------------------------- ControllerBridge */
@@ -219,7 +225,7 @@ static void CB_back(tl_jcall *c) { (void)c; pthread_mutex_lock(&B.mu); B.backs =
 static const tl_jhle k_port[] = {
     { PORT "PortStorage", "saveRoot", "()Ljava/lang/String;", PS_saveRoot },
     { PORT "PortDisplay", "frameRates", "()[I", PD_frameRates },
-    { PORT "PortDisplay", "setFrameRate", "(I)V", P_void },
+    { PORT "PortDisplay", "setFrameRate", "(I)V", PD_setFrameRate },
     { PORT "PortDisplay", "haptic", "()V", P_void },
     { PORT "ControllerBridge", "poll", "()[F", CB_poll },
     { PORT "ControllerBridge", "cancel", "()V", CB_cancel },

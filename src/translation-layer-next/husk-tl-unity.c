@@ -3,6 +3,7 @@
 #include "husk-tl-unity.h"
 
 #include <pthread.h>
+#include <sched.h>
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -498,7 +499,8 @@ static void *unity_main(void *arg)
         }
         atomic_fetch_add(&U.frames, 1);
         if (!keep) { tl_log_line("unity: nativeRender returned false: the engine asked to quit"); break; }
-        usleep(2000);
+        /* A breath between frames for the other threads. At 120 Hz a frame has 8.3 ms, and this would be a quarter of them: they are only let in. */
+        if (tl_frame_hz() > 60) sched_yield(); else usleep(2000);
     }
     return NULL;
 }
