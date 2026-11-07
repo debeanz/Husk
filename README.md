@@ -80,6 +80,9 @@ on inside), `.obb` files in the APK or an `.xapk`, and an `.obb` picked together
 with its APK. What is inside the APK is unpacked at the first start, which needs
 that much free space again.
 
+Several games can be picked at once: each becomes a game of its own, by its
+package name, and a base APK with its splits stays one.
+
 One game runs per launch of Husk. To switch, press **Close Husk to Play** on
 the other game's page; when you open Husk again, that game starts by itself.
 
