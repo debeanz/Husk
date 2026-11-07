@@ -268,6 +268,21 @@ static bool redirect(tl_lib *lib, const char *symbol, void *to)
     return true;
 }
 
+/*
+ * Compute shaders. The context is ES 3.0, which has none, and an engine told 3.1 dispatches them all the same, to clear a buffer if nothing else. Its program cannot
+ * link, which it takes as a fatal error: it stops drawing and the last frame stays up. A dispatch does nothing here instead. What it would have written stays as it
+ * was, so an effect built on one may be missing, but the game goes on. The count says how much a game leans on them.
+ */
+static void no_compute_note(void)
+{
+    static atomic_ulong dispatches;
+    unsigned long n = atomic_fetch_add(&dispatches, 1) + 1, power = 1;
+    while (power * 10 <= n) power *= 10;
+    if (n == power) tl_log_line("ue4: compute dispatch #%lu skipped: OpenGL ES 3.0 has no compute shaders", n);
+}
+static void no_compute_dispatch(void *rhi, unsigned x, unsigned y, unsigned z) { (void)rhi; (void)x; (void)y; (void)z; no_compute_note(); }
+static void no_compute_dispatch_indirect(void *rhi, void *arguments, unsigned offset) { (void)rhi; (void)arguments; (void)offset; no_compute_note(); }
+
 static void answer_play_core(void)
 {
     tl_lib *ue = tl_ld_find_lib(tl_ue_lib_name());
@@ -548,6 +563,10 @@ bool tl_na_start(const tl_ga_config *cfg)
         tl_lib *ue = tl_ld_find_lib(tl_ue_lib_name());
         if (ue && N.vulkan) { patch_return(ue, "_ZN12FAndroidMisc15ShouldUseVulkanEv", 1); patch_return(ue, "_ZN12FAndroidMisc17IsVulkanAvailableEv", 1); }
         if (ue && N.gl_only) { patch_return(ue, "_ZN12FAndroidMisc15ShouldUseVulkanEv", 0); patch_return(ue, "_ZN12FAndroidMisc22ShouldUseDesktopVulkanEv", 0); }
+        if (ue && !N.vulkan) {
+            redirect(ue, "_ZN17FOpenGLDynamicRHI24RHIDispatchComputeShaderEjjj", (void *)no_compute_dispatch);
+            redirect(ue, "_ZN17FOpenGLDynamicRHI32RHIDispatchIndirectComputeShaderEP16FRHIVertexBufferj", (void *)no_compute_dispatch_indirect);
+        }
         /* Over OpenGL ES the engine paces its frames itself, sleeping before each swap for its sync interval -- counted in sixtieths of a second
          * (rhi.SyncInterval, 1 unless a game asks otherwise), whatever the screen's refresh rate. A game held to 120 Hz here stopped at 60 with its
          * own cap set to 120 (Little Nightmares: t.MaxFPS 120). With no interval the game's cap (t.MaxFPS) and Husk's 120 Hz are what hold it. */
