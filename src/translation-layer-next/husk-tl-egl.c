@@ -160,9 +160,12 @@ PASS_BOOL(eglDestroyContext, (EGLDisplay d, EGLContext c), (d, c))
 PASS_BOOL(eglDestroySurface, (EGLDisplay d, EGLSurface s), (d, s))
 PASS_BOOL(eglQuerySurface, (EGLDisplay d, EGLSurface s, EGLint at, EGLint *v), (d, s, at, v))
 PASS_BOOL(eglSurfaceAttrib, (EGLDisplay d, EGLSurface s, EGLint at, EGLint v), (d, s, at, v))
+typedef struct vab_state vab_state;
+static __thread vab_state *t_vab;      /* for the context and vertex array current on this thread (husk-tl-egl-es31.inc) */
 static EGLBoolean w_eglMakeCurrent(EGLDisplay d, EGLSurface dr, EGLSurface rd, EGLContext c)
 {
     EGLBoolean ok = E.ready ? a_eglMakeCurrent(d, dr, rd, c) : EGL_FALSE;
+    t_vab = NULL;
     static int trace = -1;
     if (trace < 0) trace = getenv("TL_EGL_TRACE") ? 1 : 0;
     if (trace || !ok) {
@@ -448,8 +451,6 @@ static void (*r_glDepthMask)(unsigned);
 static void w_glDepthMask(unsigned f) { r_glDepthMask(f & 0xff); }
 static void (*r_glVertexAttribPointer)(unsigned, int, unsigned, unsigned, int, const void *);
 static void w_glVertexAttribPointer(unsigned i, int s, unsigned t, unsigned n, int st, const void *p) { r_glVertexAttribPointer(i, s, t, n & 0xff, st, p); }
-static void (*r_glVertexAttribFormat)(unsigned, int, unsigned, unsigned, unsigned);
-static void w_glVertexAttribFormat(unsigned i, int s, unsigned t, unsigned n, unsigned o) { r_glVertexAttribFormat(i, s, t, n & 0xff, o); }
 static void (*r_glUniformMatrix2fv)(int, int, unsigned, const float *);
 static void w_glUniformMatrix2fv(int l, int c, unsigned t, const float *v) { r_glUniformMatrix2fv(l, c, t & 0xff, v); }
 static void (*r_glUniformMatrix3fv)(int, int, unsigned, const float *);
@@ -614,7 +615,9 @@ static const struct { const char *name; void *wrap; void **real; } k_adapt[] = {
     /* buffer textures under the 3.1 shim (es31_tb) */
     ADAPT(glUnmapBuffer), ADAPT(glMapBufferRange), ADAPT(glCopyBufferSubData), ADAPT(glBindTexture), ADAPT(glDeleteTextures),
     ADAPT(glDrawArrays), ADAPT(glDrawElements), ADAPT(glDrawArraysInstanced), ADAPT(glDrawElementsInstanced), ADAPT(glDrawRangeElements),
-    ADAPT(glVertexAttribFormat), ADAPT(glBindVertexBuffer),
+    /* vertex attribute binding under the 3.1 shim (vab_state) */
+    ADAPT(glVertexAttribFormat), ADAPT(glVertexAttribIFormat), ADAPT(glVertexAttribBinding), ADAPT(glVertexBindingDivisor), ADAPT(glBindVertexBuffer),
+    ADAPT(glBindVertexArray), ADAPT(glEnableVertexAttribArray),
 };
 
 static const struct { const char *name; void *fn; } k_egl[] = {

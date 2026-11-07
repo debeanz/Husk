@@ -551,21 +551,126 @@ static void w_glDeleteTextures(int n, const unsigned *t)
     }
     r_glDeleteTextures(n, t);
 }
-/* Draws: what the buffer textures show is brought up to date first. */
-static void (*r_glDrawArrays)(unsigned, int, int);
-static void w_glDrawArrays(unsigned m, int f, int c) { if (g_es31_shim) tb_flush(); probe_draw("glDrawArrays", false, m, c); r_glDrawArrays(m, f, c); probe_draw("glDrawArrays", true, m, c); }
-static void (*r_glDrawElements)(unsigned, int, unsigned, const void *);
-static void w_glDrawElements(unsigned m, int c, unsigned t, const void *i) { if (g_es31_shim) tb_flush(); r_glDrawElements(m, c, t, i); }
-static void (*r_glDrawArraysInstanced)(unsigned, int, int, int);
-static void w_glDrawArraysInstanced(unsigned m, int f, int c, int n) { if (g_es31_shim) tb_flush(); r_glDrawArraysInstanced(m, f, c, n); }
-static void (*r_glDrawElementsInstanced)(unsigned, int, unsigned, const void *, int);
-static void w_glDrawElementsInstanced(unsigned m, int c, unsigned t, const void *i, int n) { if (g_es31_shim) tb_flush(); r_glDrawElementsInstanced(m, c, t, i, n); }
-static void (*r_glDrawRangeElements)(unsigned, unsigned, unsigned, int, unsigned, const void *);
-static void w_glDrawRangeElements(unsigned m, unsigned s, unsigned e, int c, unsigned t, const void *i) { if (g_es31_shim) tb_flush(); probe_draw("glDrawRangeElements", false, m, c); r_glDrawRangeElements(m, s, e, c, t, i); probe_draw("glDrawRangeElements", true, m, c); }
 /*
- * A vertex stream with no buffer. Unreal Engine 4 binds buffer 0 for a stream it has nothing in and leaves the attribute on, which Android's drivers let pass.
- * ANGLE takes it as the game's own memory, at address 0, and copies from there at the draw. The stream gets a buffer of zeros instead. Its stride fits any
- * attribute, and is one ANGLE has no need to convert (it divides by the stride, so not 0) and Metal accepts.
+ * Vertex attribute binding, how an ES 3.1 engine describes its vertices; Unreal Engine 4.27 knows no other way. The context here is ES 3.0, where ANGLE refuses
+ * all of it, while glEnableVertexAttribArray still works: each attribute is left on with no buffer and no pointer, and ANGLE copies its vertices from address 0 at
+ * the draw. So the description is kept here, for each context and vertex array, and given to GL at the draw through ES 3.0's glVertexAttribPointer.
+ */
+enum { VAB_ATTRIBS = 16, VAB_STATES = 32 };
+#define VAB_ONE_ELEMENT 0x7fffffffu
+struct vab_state {
+    EGLContext context;
+    int vao;
+    unsigned dirty;                                 /* the attributes GL has not been told of */
+    struct { int size; unsigned type, offset, binding; bool normalized, integer; } attr[VAB_ATTRIBS];
+    struct { unsigned buffer, divisor; long offset; int stride; } bind[VAB_ATTRIBS];
+    unsigned divisor_set[VAB_ATTRIBS];
+};
+static struct {
+    void (*attrib)(unsigned, int, unsigned, unsigned char, int, const void *), (*iattrib)(unsigned, int, unsigned, int, const void *);
+    void (*divisor)(unsigned, unsigned), (*bind)(unsigned, unsigned), (*geti)(unsigned, int *);
+} VAB;
+static atomic_bool g_vab_used;
+
+static vab_state *vab_now(void)
+{
+    if (t_vab) return t_vab;
+    if (!VAB.geti) {
+        if (!a_eglGetProcAddress) return NULL;
+        VAB.attrib = a_eglGetProcAddress("glVertexAttribPointer"); VAB.iattrib = a_eglGetProcAddress("glVertexAttribIPointer");
+        VAB.divisor = a_eglGetProcAddress("glVertexAttribDivisor"); VAB.bind = a_eglGetProcAddress("glBindBuffer");
+        VAB.geti = a_eglGetProcAddress("glGetIntegerv");
+        if (!VAB.attrib || !VAB.iattrib || !VAB.divisor || !VAB.bind || !VAB.geti) { VAB.geti = NULL; return NULL; }
+    }
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static vab_state *states[VAB_STATES];
+    static int nstates;
+    EGLContext context = a_eglGetCurrentContext();
+    int vao = 0;
+    VAB.geti(0x85B5 /* GL_VERTEX_ARRAY_BINDING */, &vao);
+    vab_state *s = NULL;
+    pthread_mutex_lock(&mu);
+    for (int i = 0; i < nstates && !s; i++) if (states[i]->context == context && states[i]->vao == vao) s = states[i];
+    if (!s && nstates < VAB_STATES && (s = calloc(1, sizeof(*s)))) {
+        s->context = context;
+        s->vao = vao;
+        for (unsigned a = 0; a < VAB_ATTRIBS; a++) {       /* as GL starts them */
+            s->attr[a].size = 4; s->attr[a].type = 0x1406 /* GL_FLOAT */; s->attr[a].binding = a;
+            s->bind[a].stride = 16;
+        }
+        states[nstates++] = s;
+    }
+    pthread_mutex_unlock(&mu);
+    atomic_store_explicit(&g_vab_used, true, memory_order_relaxed);
+    return t_vab = s;
+}
+static void vab_binding_changed(vab_state *s, unsigned binding)
+{
+    for (unsigned a = 0; a < VAB_ATTRIBS; a++) if (s->attr[a].binding == binding) s->dirty |= 1u << a;
+}
+
+static void (*r_glVertexAttribFormat)(unsigned, int, unsigned, unsigned, unsigned);
+static void w_glVertexAttribFormat(unsigned a, int size, unsigned type, unsigned normalized, unsigned offset)
+{
+    if (!g_es31_shim) { r_glVertexAttribFormat(a, size, type, normalized & 0xff, offset); return; }
+    vab_state *s = a < VAB_ATTRIBS ? vab_now() : NULL;
+    if (!s) return;
+    s->attr[a].size = size; s->attr[a].type = type; s->attr[a].offset = offset;
+    s->attr[a].normalized = (normalized & 0xff) != 0; s->attr[a].integer = false;
+    s->dirty |= 1u << a;
+}
+static void (*r_glVertexAttribIFormat)(unsigned, int, unsigned, unsigned);
+static void w_glVertexAttribIFormat(unsigned a, int size, unsigned type, unsigned offset)
+{
+    if (!g_es31_shim) { r_glVertexAttribIFormat(a, size, type, offset); return; }
+    vab_state *s = a < VAB_ATTRIBS ? vab_now() : NULL;
+    if (!s) return;
+    s->attr[a].size = size; s->attr[a].type = type; s->attr[a].offset = offset;
+    s->attr[a].normalized = false; s->attr[a].integer = true;
+    s->dirty |= 1u << a;
+}
+static void (*r_glVertexAttribBinding)(unsigned, unsigned);
+static void w_glVertexAttribBinding(unsigned a, unsigned binding)
+{
+    if (!g_es31_shim) { r_glVertexAttribBinding(a, binding); return; }
+    vab_state *s = a < VAB_ATTRIBS && binding < VAB_ATTRIBS ? vab_now() : NULL;
+    if (!s) return;
+    s->attr[a].binding = binding;
+    s->dirty |= 1u << a;
+}
+static void (*r_glBindVertexBuffer)(unsigned, unsigned, long, int);
+static void w_glBindVertexBuffer(unsigned binding, unsigned buffer, long offset, int stride)
+{
+    if (!g_es31_shim) { r_glBindVertexBuffer(binding, buffer, offset, stride); return; }
+    vab_state *s = binding < VAB_ATTRIBS ? vab_now() : NULL;
+    if (!s) return;
+    s->bind[binding].buffer = buffer; s->bind[binding].offset = offset; s->bind[binding].stride = stride;
+    vab_binding_changed(s, binding);
+}
+static void (*r_glVertexBindingDivisor)(unsigned, unsigned);
+static void w_glVertexBindingDivisor(unsigned binding, unsigned divisor)
+{
+    if (!g_es31_shim) { r_glVertexBindingDivisor(binding, divisor); return; }
+    vab_state *s = binding < VAB_ATTRIBS ? vab_now() : NULL;
+    if (!s) return;
+    s->bind[binding].divisor = divisor;
+    vab_binding_changed(s, binding);
+}
+static void (*r_glBindVertexArray)(unsigned);
+static void w_glBindVertexArray(unsigned vao) { r_glBindVertexArray(vao); t_vab = NULL; }
+static void (*r_glEnableVertexAttribArray)(unsigned);
+static void w_glEnableVertexAttribArray(unsigned a)
+{
+    r_glEnableVertexAttribArray(a);
+    if (g_es31_shim && a < VAB_ATTRIBS && atomic_load_explicit(&g_vab_used, memory_order_relaxed)) {
+        vab_state *s = vab_now();
+        if (s) s->dirty |= 1u << a;
+    }
+}
+
+/*
+ * A stream with no buffer, which Unreal Engine has for what it has nothing to put in: a buffer of zeros, as ANGLE would otherwise read address 0. The stride fits
+ * any attribute and is one ANGLE has no need to convert.
  */
 #define ZERO_VERTICES_BYTES (4u << 20)
 #define ZERO_VERTICES_STRIDE 16
@@ -574,20 +679,17 @@ static unsigned zero_vertices(void)
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
     static unsigned name;
     pthread_mutex_lock(&mu);
-    if (!name && a_eglGetProcAddress) {
+    if (!name) {
         void (*gen)(int, unsigned *) = a_eglGetProcAddress("glGenBuffers");
-        void (*bind)(unsigned, unsigned) = a_eglGetProcAddress("glBindBuffer");
         void (*data)(unsigned, long, const void *, unsigned) = a_eglGetProcAddress("glBufferData");
-        void (*geti)(unsigned, int *) = a_eglGetProcAddress("glGetIntegerv");
         void *zeros = calloc(1, ZERO_VERTICES_BYTES);
-        if (gen && bind && data && geti && zeros) {
+        if (gen && data && zeros) {
             int old = 0;
-            geti(0x8F36 /* GL_COPY_READ_BUFFER_BINDING */, &old);
+            VAB.geti(0x8F36 /* GL_COPY_READ_BUFFER_BINDING */, &old);
             gen(1, &name);
-            bind(0x8F36, name);
+            VAB.bind(0x8F36, name);
             data(0x8F36, ZERO_VERTICES_BYTES, zeros, 0x88E4 /* GL_STATIC_DRAW */);
-            bind(0x8F36, (unsigned)old);
-            tl_log_line("es31: a vertex stream with no buffer reads zeros");
+            VAB.bind(0x8F36, (unsigned)old);
         }
         free(zeros);
     }
@@ -595,12 +697,48 @@ static unsigned zero_vertices(void)
     pthread_mutex_unlock(&mu);
     return r;
 }
-static void (*r_glBindVertexBuffer)(unsigned, unsigned, long, int);
-static void w_glBindVertexBuffer(unsigned binding, unsigned buffer, long offset, int stride)
+
+/* The draw is here: GL is told what has changed. A stride of 0 is one element for every vertex under this API, but "tightly packed" to glVertexAttribPointer; only
+ * a divisor too large to reach keeps an attribute on its first element. */
+static void vab_flush(void)
 {
-    if (!buffer && g_es31_shim) { buffer = zero_vertices(); offset = 0; stride = ZERO_VERTICES_STRIDE; }
-    r_glBindVertexBuffer(binding, buffer, offset, stride);
+    if (!atomic_load_explicit(&g_vab_used, memory_order_relaxed)) return;
+    vab_state *s = vab_now();
+    if (!s || !s->dirty) return;
+    static atomic_int said;
+    if (!atomic_exchange(&said, 1)) tl_log_line("es31: vertex attribute binding is kept here and given to GL as ES 3.0's glVertexAttribPointer");
+    int old = 0;
+    VAB.geti(0x8894 /* GL_ARRAY_BUFFER_BINDING */, &old);
+    unsigned bound = (unsigned)old;
+    for (unsigned a = 0, left = s->dirty; left; a++, left >>= 1) {
+        if (!(left & 1)) continue;
+        const unsigned binding = s->attr[a].binding;
+        unsigned buffer = s->bind[binding].buffer, divisor = s->bind[binding].divisor;
+        long at = s->bind[binding].offset + (long)s->attr[a].offset;
+        int stride = s->bind[binding].stride;
+        if (!buffer) { buffer = zero_vertices(); at = 0; stride = ZERO_VERTICES_STRIDE; }
+        else if (!stride) divisor = VAB_ONE_ELEMENT;
+        if (buffer != bound) { VAB.bind(0x8892 /* GL_ARRAY_BUFFER */, buffer); bound = buffer; }
+        if (s->attr[a].integer) VAB.iattrib(a, s->attr[a].size, s->attr[a].type, stride, (const void *)(uintptr_t)at);
+        else VAB.attrib(a, s->attr[a].size, s->attr[a].type, s->attr[a].normalized, stride, (const void *)(uintptr_t)at);
+        if (s->divisor_set[a] != divisor) { VAB.divisor(a, divisor); s->divisor_set[a] = divisor; }
+    }
+    if (bound != (unsigned)old) VAB.bind(0x8892, (unsigned)old);
+    s->dirty = 0;
 }
+
+/* Draws: what the buffer textures show is brought up to date first. */
+static void es31_before_draw(void) { tb_flush(); vab_flush(); }
+static void (*r_glDrawArrays)(unsigned, int, int);
+static void w_glDrawArrays(unsigned m, int f, int c) { if (g_es31_shim) es31_before_draw(); probe_draw("glDrawArrays", false, m, c); r_glDrawArrays(m, f, c); probe_draw("glDrawArrays", true, m, c); }
+static void (*r_glDrawElements)(unsigned, int, unsigned, const void *);
+static void w_glDrawElements(unsigned m, int c, unsigned t, const void *i) { if (g_es31_shim) es31_before_draw(); r_glDrawElements(m, c, t, i); }
+static void (*r_glDrawArraysInstanced)(unsigned, int, int, int);
+static void w_glDrawArraysInstanced(unsigned m, int f, int c, int n) { if (g_es31_shim) es31_before_draw(); r_glDrawArraysInstanced(m, f, c, n); }
+static void (*r_glDrawElementsInstanced)(unsigned, int, unsigned, const void *, int);
+static void w_glDrawElementsInstanced(unsigned m, int c, unsigned t, const void *i, int n) { if (g_es31_shim) es31_before_draw(); r_glDrawElementsInstanced(m, c, t, i, n); }
+static void (*r_glDrawRangeElements)(unsigned, unsigned, unsigned, int, unsigned, const void *);
+static void w_glDrawRangeElements(unsigned m, unsigned s, unsigned e, int c, unsigned t, const void *i) { if (g_es31_shim) es31_before_draw(); probe_draw("glDrawRangeElements", false, m, c); r_glDrawRangeElements(m, s, e, c, t, i); probe_draw("glDrawRangeElements", true, m, c); }
 static void (*r_glBindBufferRange)(unsigned, unsigned, unsigned, long, long);
 static void w_glBindBufferRange(unsigned t, unsigned i, unsigned b, long o, long n)
 {
