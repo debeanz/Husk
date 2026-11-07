@@ -519,6 +519,12 @@ static long b___read_chk(int fd, void *p, size_t n, size_t bufsz)
     if (n > bufsz) { tl_log_line("bionic: __read_chk overflow"); abort(); }
     return b_read(fd, p, n);
 }
+static long b_write(int fd, const void *p, size_t n);
+static long b___write_chk(int fd, const void *p, size_t n, size_t bufsz)
+{
+    if (n > bufsz) { tl_log_line("bionic: __write_chk overflow"); abort(); }
+    return b_write(fd, p, n);
+}
 static long b_write(int fd, const void *p, size_t n)
 {
     TL_ERRNO_BEGIN(); long r = write(fd, p, n); int e = errno; TL_ERRNO_END();
@@ -1544,7 +1550,7 @@ static int b_inotify_add_watch(int a, const char *b, unsigned c) { (void)a; (voi
 
 const tl_bionic_entry tl_tab_io[] = {
     TL_WRAP("open", b_open), TL_WRAP("__open_2", b___open_2), TL_WRAP("close", b_close), TL_WRAP("read", b_read),
-    TL_WRAP("__read_chk", b___read_chk), TL_WRAP("write", b_write), TL_WRAP("writev", b_writev),
+    TL_WRAP("__read_chk", b___read_chk), TL_WRAP("__write_chk", b___write_chk), TL_WRAP("write", b_write), TL_WRAP("writev", b_writev),
     TL_WRAP("pread64", b_pread64), TL_WRAP("pwrite64", b_pwrite64), TL_WRAP("__pread64_chk", b___pread64_chk), TL_WRAP("__pwrite64_chk", b___pwrite64_chk), TL_WRAP("__pwrite_chk", b___pwrite64_chk), TL_WRAP("__pread_chk", b___pread64_chk), TL_WRAP("lseek", b_lseek), TL_WRAP("lseek64", b_lseek),
     TL_WRAP("dup", b_dup), TL_WRAP("dup2", b_dup2), TL_WRAP("pipe", b_pipe), TL_WRAP("pipe2", b_pipe2), TL_WRAP("fsync", b_fsync), TL_WRAP("fdatasync", b_fsync),
     TL_WRAP("ftruncate", b_ftruncate), TL_WRAP("truncate", b_truncate), TL_WRAP("isatty", b_isatty), TL_WRAP("flock", b_flock),

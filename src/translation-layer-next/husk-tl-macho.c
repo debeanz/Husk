@@ -53,13 +53,13 @@
 #define G_MAP_FIXED 0x10
 #define G_MAP_ANON 0x20
 
-/* Kept back after the image for a loader that asks for a little more than the image's size. */
-#define ANY_LOADER_SLACK ((size_t)8 << 20)
+/* Kept back after the image for a loader that asks for more than the image's size, as room of its own (Hades: 24.25 MiB). */
+#define ANY_LOADER_SLACK ((size_t)32 << 20)
 
 static struct {
     bool armed, reserved, pool_noted, any;
     uint64_t vm_base;
-    size_t total, text_bytes, linkedit_bytes;
+    size_t total, text_bytes, linkedit_bytes, exec_mapping;
     uint8_t *pool, *text;
 } M;
 
@@ -68,6 +68,8 @@ static uint32_t le32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v;
 static uint64_t le64(const uint8_t *p) { uint64_t v; memcpy(&v, p, 8); return v; }
 
 void tl_macho_any_loader(void) { M.any = true; }
+void tl_macho_exec_mapping(size_t bytes) { M.exec_mapping = bytes; }
+void *tl_macho_pool(size_t *bytes) { if (bytes) *bytes = POOL_BYTES; return M.pool; }
 
 bool tl_macho_prepare(const char *path, char *err, size_t errlen)
 {
@@ -260,6 +262,15 @@ bool tl_macho_mmap(void *addr, size_t len, int prot, int flags, void **result)
         if (M.any && (flags & G_MAP_FIXED) && (uint64_t)(uintptr_t)addr == M.vm_base)
             tl_log_line("macho: the loader wants the image at exactly %p, which is not to be had here", addr);
         return false;
+    }
+    if (M.exec_mapping && len == M.exec_mapping && (flags & G_MAP_ANON) && !(flags & G_MAP_FIXED)) {
+        uint8_t *rx, *rw;
+        if (!tl_xmem_alloc(len, &rx, &rw)) { tl_log_line("macho: no room in the JIT region for %#zx bytes the loader will run", len); return false; }
+        memset(rw, 0, len);
+        M.exec_mapping = 0;
+        tl_log_line("macho: %#zx bytes the loader will run are at %p", len, (void *)rx);
+        *result = rx;
+        return true;
     }
     /* A segment, about to be read in. Pages stay where they are; what it expects of them is that they are zero. */
     uint8_t *a = addr;

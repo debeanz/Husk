@@ -11,7 +11,10 @@
  *   touch                   nativeTouch(action, finger, x, y, pressure): 0 down, 1 move, 2 up, 3 cancel
  *   Pads                    nativePadName(slot, name, family), nativePadState(slot, connected, buttons, 8 axes)
  *
- * The iOS image is mapped by the library's own loader, into the layout husk-tl-macho.c describes.
+ * The library's loader (macho_load) copies the iOS image out of the APK into anonymous memory, applies its fixups and its patches to the game's code, and
+ * mprotects the result. Here that memory is the layout husk-tl-macho.c describes. Two more pieces of it are run and are not in the image: the stubs it makes
+ * for names it does not have (0x18000 bytes, mapped on their own), and the patch code it builds, which it keeps in room after the image, in what here is the
+ * writable view. That room's address is a field of its g_image, so the code goes to the pool below the image instead, within reach of the branches to it.
  */
 #define _DARWIN_C_SOURCE
 #include "husk-tl-hades.h"
@@ -34,6 +37,7 @@
 #include "husk-tl-ld.h"
 #include "husk-tl-macho.h"
 #include "husk-tl-vulkan.h"
+#include "husk-tl-xmem.h"
 
 #define MA "com/hades/port/MainActivity"
 #define PADS "com/hades/port/Pads"
@@ -43,6 +47,9 @@
 #define STICK_FLAT 0.08f                /* what InputDevice.MotionRange.getFlat says for a stick here (husk-tl-gamepad.c) */
 #define DPAD_BITS 0x3C00
 #define AXES 8
+#define TRAP_STUBS_BYTES 0x18000        /* names_seal: what it mprotects */
+#define IMAGE_PATCH_CODE 9              /* g_image, in 8-byte fields: where the patch code goes, and its size */
+#define IMAGE_PATCH_BYTES 10
 
 int tl_frame_hz(void);
 const char *tl_hle_ext_files(void);
@@ -264,29 +271,33 @@ void tl_hades_set_paused(bool paused)
 
 /* ------------------------------------------------------------- starting */
 
-/* The port writes its log to a file of its own, which on a phone nothing reads: each line goes to Husk's log too, up to a limit. */
-static void *log_tail(void *arg)
+/*
+ * names_seal is the last thing macho_load does before patches_apply, always. It flushes the trap stubs and makes them executable, which here they already are
+ * (each store to them was carried out through the writable view, and flushed), so this takes its place and moves the patch code to where it can run.
+ */
+static uint64_t *g_image_fields;
+static void before_patches(void)
 {
-    (void)arg;
-    pthread_setname_np("husk-hades-log");
-    long at = 0, total = 0;
-    char line[1024];
-    while (total < (4L << 20)) {
-        FILE *f = fopen(H.log, "r");
-        if (f) {
-            fseek(f, at, SEEK_SET);
-            while (fgets(line, sizeof(line), f)) {
-                size_t n = strlen(line);
-                total += (long)n;
-                while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = 0;
-                if (n) tl_log_line("hades-log: %s", line);
-                at = ftell(f);
-            }
-            fclose(f);
-        }
-        sleep(1);
-    }
-    return NULL;
+    size_t room;
+    void *pool = tl_macho_pool(&room);
+    if (g_image_fields[IMAGE_PATCH_BYTES] > room) tl_log_line("hades: %llu bytes of patch code and %zu of room", (unsigned long long)g_image_fields[IMAGE_PATCH_BYTES], room);
+    tl_log_line("hades: the game is loaded; its patch code goes at %p (it was to be at %p)", pool, (void *)(uintptr_t)g_image_fields[IMAGE_PATCH_CODE]);
+    g_image_fields[IMAGE_PATCH_CODE] = (uint64_t)(uintptr_t)pool;
+}
+
+static bool hook_before_patches(void)
+{
+    tl_lib *lib = tl_ld_find_lib("libhades.so");
+    uint32_t *seal = lib ? tl_ld_sym(lib, "names_seal") : NULL;
+    g_image_fields = lib ? tl_ld_sym(lib, "g_image") : NULL;
+    if (!seal || !g_image_fields) return false;
+    uint32_t *rw = (uint32_t *)((uint8_t *)seal + tl_xmem_delta());
+    rw[0] = 0x58000050u;                /* ldr x16, #8 */
+    rw[1] = 0xD61F0200u;                /* br x16 */
+    void (*target)(void) = before_patches;
+    memcpy(rw + 2, &target, sizeof(target));
+    tl_xmem_flush(seal, 16);
+    return true;
 }
 
 static void *ui_main(void *arg)
@@ -365,6 +376,7 @@ bool tl_hades_start(const tl_ga_config *cfg)
     setenv("TL_MM_TRACE", "1", 1);
     char err[300] = "";
     tl_macho_any_loader();
+    tl_macho_exec_mapping(TRAP_STUBS_BYTES);
     if (!tl_macho_prepare(H.binary, err, sizeof(err))) { fail(err); return false; }
     tl_codewrite_enable();
     tl_keep_stdio = true;
@@ -387,6 +399,7 @@ bool tl_hades_start(const tl_ga_config *cfg)
     jvalue a; a.j = 0; a.l = tl_jni_new_string("hades");
     tl_jni_call(tl_jni_class_object("java/lang/System"), "loadLibrary", "(Ljava/lang/String;)V", &a);
     if (tl_jni_pending()) { tl_jni_clear(); fail("libhades.so did not load. The log says why."); return false; }
+    if (!hook_before_patches()) { fail("This APK's libhades.so is not the one Husk knows how to start."); return false; }
     tl_log_line("hades: libhades.so loaded");
 
     static const tl_pad_sink sink = { pad_key, pad_motion };
@@ -397,8 +410,6 @@ bool tl_hades_start(const tl_ga_config *cfg)
 
 bool tl_hades_run(void)
 {
-    pthread_t tail;
-    if (pthread_create(&tail, NULL, log_tail, NULL) == 0) pthread_detach(tail);
     pthread_attr_t a;
     pthread_attr_init(&a);
     pthread_attr_setstacksize(&a, 8u << 20);

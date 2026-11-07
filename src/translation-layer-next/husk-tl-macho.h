@@ -15,6 +15,12 @@ bool tl_macho_prepare(const char *path, char *err, size_t errlen);
 /* Before tl_macho_prepare, for a guest loader that is not libmachismo.so: see tl_macho_mmap. */
 void tl_macho_any_loader(void);
 
+/* The first anonymous mapping of exactly this size once the image is reserved is memory the guest will run. It comes from the JIT region, and its stores fault and are carried out. */
+void tl_macho_exec_mapping(size_t bytes);
+
+/* The executable room just below the image, within a branch's reach of all of its code. */
+void *tl_macho_pool(size_t *bytes);
+
 /* The linked address of a symbol the executable defines, from its symbol table (a Mach-O name, with its leading underscore). 0 if it has none. */
 unsigned long long tl_macho_symbol_address(const char *path, const char *name);
 
