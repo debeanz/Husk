@@ -121,6 +121,7 @@ bool tl_unity_start(const tl_unity_config *cfg)
     tl_hle_configure(cfg->package_name, cfg->apk_path, cfg->data_dir, cfg->width, cfg->height);
     tl_jni_hle_install();
     kb_install();
+    tl_closing_shift_install(cfg->apk_path);
 
     /* new UnityPlayer(activity): the Java side's own constructor calls loadNative(dir),
      * which is System.load(dir + "/libmain.so") followed by NativeLoader.load(dir). */
@@ -726,10 +727,14 @@ static void pad_key(jobj *ev, int device, int action, int keycode, int64_t down_
 static void pad_motion(jobj *ev, int device, int source, int64_t down_ms, int64_t event_ms)
 { (void)device; (void)source; (void)down_ms; (void)event_ms; inject(ev); }
 
+/* A port whose activity keeps controller events from the engine has them go where it sends them. */
+static const tl_pad_sink *g_pad_bridge;
+void tl_unity_set_pad_bridge(const tl_pad_sink *bridge) { g_pad_bridge = bridge; tl_unity_register_pad_sink(); }
+
 void tl_unity_register_pad_sink(void)
 {
     static const tl_pad_sink sink = { pad_key, pad_motion };
-    tl_pad_set_sink(&sink);
+    tl_pad_set_sink(g_pad_bridge ? g_pad_bridge : &sink);
 }
 
 void tl_unity_perf_snapshot(tl_unity_perf *out)

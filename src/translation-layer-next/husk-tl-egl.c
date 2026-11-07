@@ -563,7 +563,8 @@ static void w_glCompileShader(unsigned sh)
     getiv(sh, 0x8B81 /* GL_COMPILE_STATUS */, &ok);
     if (ok) return;
     int n = atomic_fetch_add(&reported, 1);
-    if (n >= 8) return;
+    /* The detail is for the first few. How many there are in all says whether this is one shader or the whole game. */
+    if (n >= 8) { if ((n & (n - 1)) == 0) tl_log_line("gl: %d shaders have failed to compile so far", n); return; }
     int len = 0; getiv(sh, 0x8B84 /* GL_INFO_LOG_LENGTH */, &len);
     char *log = calloc(1, (size_t)len + 2); int got = 0;
     if (len > 0) getlog(sh, len, &got, log);
@@ -572,7 +573,7 @@ static void w_glCompileShader(unsigned sh)
     if (slen > 0) getsrc(sh, slen, &got, src);
     for (char *q = log; *q; q++) if (*q == '\n') *q = '|';
     tl_log_line("gl: shader %u failed to compile (%d bytes of source): %.380s", sh, slen, log);
-    if (n < 2) log_source_lines(sh, src, log);
+    log_source_lines(sh, src, log);
     const char *dir = getenv("TL_GL_SHADER_DUMP");
     if (dir) {
         char path[600]; snprintf(path, sizeof(path), "%s/shader-%d.txt", dir, n);

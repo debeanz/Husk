@@ -47,6 +47,9 @@ unsigned long tl_unity_frames(void);
  */
 /* Send a connected controller's buttons and sticks to this engine (husk-tl-gamepad.h). */
 void tl_unity_register_pad_sink(void);
+struct tl_pad_sink;
+void tl_unity_set_pad_bridge(const struct tl_pad_sink *bridge);
+void tl_closing_shift_install(const char *apk);         /* husk-tl-closing-shift.c: nothing unless the APK is that game */
 void tl_unity_touch(int phase, int id, float x, float y);
 
 /* How the last stretch went: frames per second, and the mean and worst time inside one nativeRender call. Resets what it measured. */

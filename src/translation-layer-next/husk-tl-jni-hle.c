@@ -1599,6 +1599,7 @@ void tl_hle_configure(const char *pkg, const char *apk, const char *data, int w,
     read_manifest_meta(apk);
     mkdirs(H.files); mkdirs(H.cache); mkdirs(H.ext_files); mkdirs(H.ext_cache);
 }
+const char *tl_hle_ext_files(void) { return H.ext_files; }
 
 jobj *tl_hle_activity(void) { return H.activity; }
 int tl_hle_version_code(void) { return H.version_code; }

@@ -8,9 +8,15 @@
  * the link as glUniform1i / glUniformBlockBinding, a varying's `layout(location = N)` becomes a name both stages share
  * (es31_varying), and a buffer texture becomes an array texture filled from the buffer (es31_tb). What 3.1 really adds (compute,
  * images, storage buffers written by shaders) is not there.
+ *
+ * Whatever a game was told, a 310 es shader cannot compile here as it is, so one is always written down. Being told 3.1 is a separate
+ * thing, and only for a game that needs it: a Unity built to require 3.1 (The Closing Shift) writes every shader of its own in 310 es, but
+ * on a driver that says 3.0 it uses its 3.0 paths, where a driver that said 3.1 would have it run compute shaders that do nothing here.
  */
 static bool g_es31_shim;
 void tl_egl_es31_shim(bool on) { g_es31_shim = on; }
+/* A shader has been written down for a game not told 3.1: the bindings it lost are put back after the link all the same. */
+static atomic_bool g_es31_rewrote;
 
 /* Buffer textures as array textures (es31_tb, below; the shader side in es31_downgrade). */
 #define TB_TARGET 0x8C2A                /* GL_TEXTURE_BUFFER, as a texture target and as a buffer target */
@@ -102,6 +108,13 @@ static char *es31_downgrade(const char *src, size_t n, es31_bind *rec, int *nrec
             size_t e = i; while (e < n && src[e] != '\n') e++;
             bool tb_ext = buffers && e - i > 10 && !strncmp(src + i, "#extension", 10) && memmem(src + i, e - i, "texture_buffer", 14);
             bool version = !strncmp(src + i, "#version", 8);
+            /* Unity's shaders declare through macros, and this one picks 3.1's `layout(location = N) uniform` or the plain declaration. */
+            static const char unity_loc[] = "#define UNITY_SUPPORTS_UNIFORM_LOCATION 1";
+            if ((size_t)(e - i) >= sizeof(unity_loc) - 1 && !strncmp(src + i, unity_loc, sizeof(unity_loc) - 1)) {
+                memcpy(out + o, unity_loc, sizeof(unity_loc) - 2); o += sizeof(unity_loc) - 2;
+                out[o++] = '0';
+                i = e; continue;
+            }
             if (!tb_ext) { memcpy(out + o, src + i, e - i); o += e - i; }
             i = e;
             if (version && buffers) { out[o++] = '\n'; memcpy(out + o, tb_macro, sizeof(tb_macro) - 1); o += sizeof(tb_macro) - 1; }
@@ -205,6 +218,8 @@ static char *es31_downgrade(const char *src, size_t n, es31_bind *rec, int *nrec
              * location is 3.0 too, and stays */
             if (!b && strstr(q, "location") && d < n && src[d] == ';'
                 && es31_has_word(decl, vertex ? "out" : "in") && es31_varying(out, &o, decl, dl, q)) { i = d + 1; continue; }
+            /* layout(location) on a uniform is 3.1's: without it the uniform is found by name, which the engines that do this also do */
+            if (!b && strstr(q, "location") && es31_has_word(decl, "uniform")) { i = j; continue; }
             memcpy(out + o, src + i, j - i); o += j - i; i = j; continue;
         }
         out[o++] = src[i++];
@@ -216,12 +231,16 @@ static char *es31_downgrade(const char *src, size_t n, es31_bind *rec, int *nrec
 static void (*r_glShaderSource)(unsigned, int, const char *const *, const int *);
 static void w_glShaderSource(unsigned sh, int count, const char *const *str, const int *len)
 {
-    if (!g_es31_shim || count <= 0 || !str) { r_glShaderSource(sh, count, str, len); return; }
+    if (count <= 0 || !str) { r_glShaderSource(sh, count, str, len); return; }
     size_t total = 0;
     for (int i = 0; i < count; i++) total += str[i] ? (len && len[i] >= 0 ? (size_t)len[i] : strlen(str[i])) : 0;
     char *cat = malloc(total + 1); size_t k = 0;
     for (int i = 0; i < count; i++) if (str[i]) { size_t l = len && len[i] >= 0 ? (size_t)len[i] : strlen(str[i]); memcpy(cat + k, str[i], l); k += l; }
     cat[k] = 0;
+    if (!g_es31_shim) {
+        if (!strstr(cat, "#version 310 es")) { free(cat); r_glShaderSource(sh, count, str, len); return; }
+        if (!atomic_exchange(&g_es31_rewrote, true)) tl_log_line("gl: this game's shaders ask for ES 3.1; they are written down to the 3.0 this driver has");
+    }
     es31_bind rec[ES31_BINDS]; int nrec = 0;
     char *down = es31_downgrade(cat, k, rec, &nrec);
     pthread_mutex_lock(&g_es31_mu);
@@ -237,7 +256,7 @@ static void (*r_glAttachShader)(unsigned, unsigned);
 static void w_glAttachShader(unsigned prog, unsigned sh)
 {
     r_glAttachShader(prog, sh);
-    if (!g_es31_shim) return;
+    if (!g_es31_shim && !atomic_load(&g_es31_rewrote)) return;
     pthread_mutex_lock(&g_es31_mu);
     g_es31_att[g_es31_natt % ES31_ATTACHED].prog = prog; g_es31_att[g_es31_natt % ES31_ATTACHED].shader = sh; g_es31_natt++;
     pthread_mutex_unlock(&g_es31_mu);
@@ -247,7 +266,7 @@ static void (*r_glLinkProgram)(unsigned);
 static void w_glLinkProgram(unsigned prog)
 {
     r_glLinkProgram(prog);
-    if (!g_es31_shim || !a_eglGetProcAddress) return;
+    if ((!g_es31_shim && !atomic_load(&g_es31_rewrote)) || !a_eglGetProcAddress) return;
     static int (*getloc)(unsigned, const char *); static unsigned (*getblk)(unsigned, const char *);
     static void (*blkbind)(unsigned, unsigned, unsigned), (*uni1i)(int, int), (*useprog)(unsigned), (*getprogiv)(unsigned, unsigned, int *);
     if (!getloc) {
@@ -257,7 +276,17 @@ static void w_glLinkProgram(unsigned prog)
     }
     if (!getloc || !getblk || !blkbind || !uni1i || !useprog || !getprogiv) return;
     int ok = 0; getprogiv(prog, 0x8B82 /* GL_LINK_STATUS */, &ok);
-    if (!ok) return;
+    if (!ok) {
+        static atomic_int said;
+        void (*getlog)(unsigned, int, int *, char *) = a_eglGetProcAddress("glGetProgramInfoLog");
+        char log[400] = ""; int got = 0;
+        if (atomic_fetch_add(&said, 1) < 8 && getlog) {
+            getlog(prog, sizeof(log), &got, log);
+            for (char *p = log; *p; p++) if (*p == '\n') *p = '|';
+            tl_log_line("gl: program %u failed to link: %s", prog, log);
+        }
+        return;
+    }
     int cur = 0; a_glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &cur);
     bool used = false;
     pthread_mutex_lock(&g_es31_mu);

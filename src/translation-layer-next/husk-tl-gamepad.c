@@ -12,7 +12,7 @@
 #include "husk-tl-bionic.h"
 
 #define MAX_AXES 48
-#define DEVICE_BASE 41                    /* Android device ids of the controllers: 41, 42, ... */
+#define DEVICE_BASE TL_PAD_DEVICE_BASE
 #define SOURCE_GAMEPAD_STICKS 0x01000411  /* SOURCE_GAMEPAD | SOURCE_JOYSTICK */
 #define SOURCE_ALL 0x01000611             /* ... and SOURCE_DPAD: everything the device offers */
 #define SOURCE_TOUCH 0x1002               /* SOURCE_TOUCHSCREEN */

@@ -21,6 +21,7 @@ extern "C" {
 #endif
 
 #define TL_PADS 4
+#define TL_PAD_DEVICE_BASE 41           /* Android device ids of the controllers: 41, 42, ... */
 
 /* The bits of tl_pad_state.buttons. */
 enum { TL_PAD_A, TL_PAD_B, TL_PAD_X, TL_PAD_Y, TL_PAD_L1, TL_PAD_R1, TL_PAD_THUMBL, TL_PAD_THUMBR, TL_PAD_START, TL_PAD_SELECT, TL_PAD_MODE,
