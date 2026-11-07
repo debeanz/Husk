@@ -534,6 +534,10 @@ static const unsigned char *w_glGetString(unsigned name)
         if (g_es31_shim) { k += (size_t)snprintf(filtered + k, 62, "%sGL_EXT_texture_buffer", k ? " " : ""); }
         filtered[k] = 0;
         source = s;
+        /* Once: what a game is offered decides its paths (float filtering, buffer storage, framebuffer fetch...). */
+        static atomic_int said;
+        if (!atomic_exchange(&said, 1))
+            for (size_t at = 0, part = 0; at < k; at += 900, part++) tl_log_line("gl: extensions %zu: %.900s", part + 1, filtered + at);
     }
     pthread_mutex_unlock(&mu);
     return (const unsigned char *)filtered;

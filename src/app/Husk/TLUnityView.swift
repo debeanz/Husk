@@ -726,11 +726,16 @@ struct TLCocosAttemptView: View {
 
     /// Whether an on-screen controller may be offered: not when the game's settings say never, not while a real one is connected, and
     /// without "Always" only for what cannot be played by touch: Unreal, whose menus answer nothing else, and Mina the Hollower, the game's Mac
-    /// build, whose port draws its touch controls in Java, which does not run here.
+    /// build, whose port draws its touch controls in Java, which does not run here. An Unreal game that draws touch controls of its own is
+    /// left to them, as Husk's would only cover them.
     private var padOffered: Bool {
         settings.pad != .never && pads.names.isEmpty
-            && (settings.pad == .always || engine == .ue4 || app.packageName == "com.teampacheworks.minathehollower")
+            && (settings.pad == .always || (engine == .ue4 && !Self.ownTouchControls.contains(app.packageName ?? ""))
+                || app.packageName == "com.teampacheworks.minathehollower")
     }
+
+    /// Unreal games whose own touch controls work here (drawn by the engine, not by Java): Sifu's mobile port.
+    private static let ownTouchControls: Set<String> = ["com.keplerinteractive.sifuthegame"]
 
     /// Another game is already loaded in this session, and an engine cannot be loaded twice.
     private var blockedBy: String? {

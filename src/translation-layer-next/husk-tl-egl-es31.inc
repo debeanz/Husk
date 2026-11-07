@@ -22,7 +22,14 @@ static atomic_bool g_es31_rewrote;
 #define TB_TARGET 0x8C2A                /* GL_TEXTURE_BUFFER, as a texture target and as a buffer target */
 #define TB_ARRAY 0x8C1A                 /* GL_TEXTURE_2D_ARRAY */
 #define TB_W 4096                       /* texels to a row */
-#define TB_MAX 512
+#define TB_MAX 2048
+
+/* Unreal's GPU skinning -- a vertex shader that reads a buffer texture and takes integer bone indices -- recognised, for a look at its first
+ * draws (es31_skin_look). */
+#define ES31_SKIN 64
+static unsigned g_skin_sh[ES31_SKIN], g_skin_prog[ES31_SKIN];
+static int g_nskin_sh;
+static atomic_int g_nskin_prog;
 
 typedef struct { char name[72]; int binding; bool block; } es31_bind;
 #define ES31_SHADERS 1024
@@ -246,6 +253,8 @@ static void w_glShaderSource(unsigned sh, int count, const char *const *str, con
     pthread_mutex_lock(&g_es31_mu);
     int slot = (int)(sh % ES31_SHADERS);
     g_es31_sh[slot].shader = sh; g_es31_sh[slot].n = nrec; memcpy(g_es31_sh[slot].b, rec, sizeof(es31_bind) * (size_t)nrec);
+    if (g_es31_shim && g_nskin_sh < ES31_SKIN && strstr(cat, "gl_Position") && strstr(cat, "samplerBuffer") && strstr(cat, "in uvec4"))
+        g_skin_sh[g_nskin_sh++] = sh;
     pthread_mutex_unlock(&g_es31_mu);
     const char *one = down; int one_len = (int)strlen(down);
     r_glShaderSource(sh, 1, &one, &one_len);
@@ -294,6 +303,13 @@ static void w_glLinkProgram(unsigned prog)
     for (int a = 0; a < total; a++) {
         if (g_es31_att[a].prog != prog) continue;
         unsigned sh = g_es31_att[a].shader;
+        for (int k = 0; k < g_nskin_sh; k++) {
+            if (g_skin_sh[k] != sh) continue;
+            int np = atomic_load(&g_nskin_prog);
+            bool known = false;
+            for (int p = 0; p < np && !known; p++) known = g_skin_prog[p] == prog;
+            if (!known && np < ES31_SKIN) { g_skin_prog[np] = prog; atomic_store(&g_nskin_prog, np + 1); }
+        }
         int slot = (int)(sh % ES31_SHADERS);
         if (g_es31_sh[slot].shader != sh) continue;
         for (int b = 0; b < g_es31_sh[slot].n; b++) {
@@ -460,6 +476,7 @@ static void tb_attach(unsigned target, unsigned ifmt, unsigned buf, long off, lo
     es31_tb *e = NULL;
     for (int i = 0; i < g_ntb && !e; i++) if (g_tb[i].tex == (unsigned)tex) e = &g_tb[i];
     if (!e && g_ntb < TB_MAX) { e = &g_tb[g_ntb++]; memset(e, 0, sizeof(*e)); e->tex = (unsigned)tex; }
+    if (!e) { static atomic_int full; if (!atomic_exchange(&full, 1)) tl_log_line("es31: more than %d buffer textures at once: the ones after read nothing", TB_MAX); }
     if (e) {
         if (e->ifmt != ifmt) e->uploaded = 0;
         e->buf = buf; e->ifmt = ifmt; e->off = off; e->range = range;
@@ -728,7 +745,81 @@ static void vab_flush(void)
 }
 
 /* Draws: what the buffer textures show is brought up to date first. */
-static void es31_before_draw(void) { tb_flush(); vab_flush(); }
+/*
+ * A few draws of skinned meshes described, for a game whose characters do not show (Sifu): the bone texture Husk made from the game's
+ * buffer, the first bone as the game's buffer holds it, the first vertex's bone indices and weights, how each vertex input is fed, and any GL
+ * error waiting. Skinned draws #1, #2, #50 and #2000, each read back once (a short wait for the GPU), then nothing more.
+ */
+static atomic_int g_skin_draws;
+static bool skin_read(unsigned buf, long off, void *out, long n)
+{
+    static void *(*map)(unsigned, long, long, unsigned); static unsigned char (*unmap)(unsigned); static void (*bind)(unsigned, unsigned);
+    if (!map) { map = a_eglGetProcAddress("glMapBufferRange"); unmap = a_eglGetProcAddress("glUnmapBuffer"); bind = a_eglGetProcAddress("glBindBuffer"); }
+    if (!map || !unmap || !bind || !buf || off < 0) return false;
+    int old = 0; a_glGetIntegerv(0x8F36 /* GL_COPY_READ_BUFFER_BINDING */, &old);
+    bind(0x8F36, buf);
+    void *p = map(0x8F36, off, n, 0x1 /* GL_MAP_READ_BIT */);
+    if (p) { memcpy(out, p, (size_t)n); unmap(0x8F36); }
+    bind(0x8F36, (unsigned)old);
+    return p != NULL;
+}
+static void es31_skin_look(void)
+{
+    int nprog = atomic_load_explicit(&g_nskin_prog, memory_order_acquire);
+    if (!nprog || atomic_load_explicit(&g_skin_draws, memory_order_relaxed) > 2000) return;
+    static atomic_int checked;                  /* a game with few skinned draws is not asked about every draw for ever */
+    if (atomic_fetch_add_explicit(&checked, 1, memory_order_relaxed) > 400000) return;
+    int prog = 0; a_glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &prog);
+    bool skin = false;
+    for (int i = 0; i < nprog && !skin; i++) skin = g_skin_prog[i] == (unsigned)prog;
+    if (!skin) return;
+    int n = atomic_fetch_add(&g_skin_draws, 1) + 1;
+    if (n != 1 && n != 2 && n != 50 && n != 2000) return;
+    static int (*loc)(unsigned, const char *); static void (*getu)(unsigned, int, int *), (*active)(unsigned), (*attrib)(unsigned, unsigned, int *);
+    static unsigned (*err)(void);
+    if (!err) {
+        loc = a_eglGetProcAddress("glGetUniformLocation"); getu = a_eglGetProcAddress("glGetUniformiv"); active = a_eglGetProcAddress("glActiveTexture");
+        attrib = a_eglGetProcAddress("glGetVertexAttribiv"); err = a_eglGetProcAddress("glGetError");
+    }
+    if (!loc || !getu || !active || !attrib || !err) return;
+    unsigned waiting = err();
+    /* The bone texture: the one on vs0's unit, Unreal's name for the first buffer the vertex shader reads. */
+    int at = loc((unsigned)prog, "vs0"), unit = -1, was = 0, tex = 0, sampler = 0;
+    if (at >= 0) getu((unsigned)prog, at, &unit);
+    a_glGetIntegerv(0x84E0 /* GL_ACTIVE_TEXTURE */, &was);
+    if (unit >= 0) { active(0x84C0 + (unsigned)unit); a_glGetIntegerv(0x8C1D /* GL_TEXTURE_BINDING_2D_ARRAY */, &tex); a_glGetIntegerv(0x8919 /* GL_SAMPLER_BINDING */, &sampler); active((unsigned)was); }
+    es31_tb e; bool found = false; int ntb;
+    pthread_mutex_lock(&g_tb_mu);
+    for (int i = 0; i < g_ntb && !found; i++) if (g_tb[i].tex == (unsigned)tex) { e = g_tb[i]; found = true; }
+    ntb = g_ntb;
+    pthread_mutex_unlock(&g_tb_mu);
+    if (!found) memset(&e, 0, sizeof(e));
+    tl_log_line("es31: skinned draw #%d (program %d): GL error before it %#x; bones on unit %d: array texture %d, sampler %d, %s (buffer %u, format %#x, %ld texels, %s), %d buffer textures in all",
+                n, prog, waiting, unit, tex, sampler, found ? "a buffer texture" : "NOT one Husk made", e.buf, e.ifmt, e.uploaded, e.dirty ? "out of date" : "up to date", ntb);
+    float bone[12];
+    if (found && skin_read(e.buf, e.off, bone, sizeof(bone)))
+        tl_log_line("es31:   first bone in the game's buffer: [%.3g %.3g %.3g %.3g] [%.3g %.3g %.3g %.3g] [%.3g %.3g %.3g %.3g]", bone[0], bone[1], bone[2], bone[3],
+                    bone[4], bone[5], bone[6], bone[7], bone[8], bone[9], bone[10], bone[11]);
+    vab_state *s = vab_now();
+    static const unsigned look[] = { 0, 3, 14, 4, 15, 11 };
+    char line[700]; size_t k = 0;
+    for (size_t i = 0; i < sizeof(look) / sizeof(look[0]) && s; i++) {
+        unsigned a = look[i], b = s->attr[a].binding;
+        int on = 0; attrib(a, 0x8622 /* GL_VERTEX_ATTRIB_ARRAY_ENABLED */, &on);
+        k += (size_t)snprintf(line + k, sizeof(line) - k, "%s%u:%s buf %u@%ld stride %d %dx%#x%s%s", i ? "; " : "", a, on ? "" : " OFF", s->bind[b].buffer,
+                              s->bind[b].offset + (long)s->attr[a].offset, s->bind[b].stride, s->attr[a].size, s->attr[a].type,
+                              s->attr[a].integer ? " int" : s->attr[a].normalized ? " norm" : "", s->bind[b].divisor ? " per-instance" : "");
+        if (k >= sizeof(line)) break;
+    }
+    if (s) tl_log_line("es31:   vertex inputs %s", line);
+    unsigned char idx[4] = { 0 }, wt[4] = { 0 };
+    if (s && skin_read(s->bind[s->attr[3].binding].buffer, s->bind[s->attr[3].binding].offset + (long)s->attr[3].offset, idx, 4)
+        && skin_read(s->bind[s->attr[4].binding].buffer, s->bind[s->attr[4].binding].offset + (long)s->attr[4].offset, wt, 4))
+        tl_log_line("es31:   first vertex: bones %u %u %u %u, weights %u %u %u %u", idx[0], idx[1], idx[2], idx[3], wt[0], wt[1], wt[2], wt[3]);
+}
+
+/* Before each draw: the buffer textures and vertex inputs brought up to date, then the look at skinned draws. */
+static void es31_before_draw(void) { tb_flush(); vab_flush(); es31_skin_look(); }
 static void (*r_glDrawArrays)(unsigned, int, int);
 static void w_glDrawArrays(unsigned m, int f, int c) { if (g_es31_shim) es31_before_draw(); probe_draw("glDrawArrays", false, m, c); r_glDrawArrays(m, f, c); probe_draw("glDrawArrays", true, m, c); }
 static void (*r_glDrawElements)(unsigned, int, unsigned, const void *);
