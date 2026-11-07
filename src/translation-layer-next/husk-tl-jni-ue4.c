@@ -83,6 +83,8 @@ const char *tl_ue4_meta(const char *key)
     /* Likewise AudioManager's answers (PROPERTY_OUTPUT_FRAMES_PER_BUFFER, PROPERTY_OUTPUT_SAMPLE_RATE) and the display's refresh rate. A zero buffer size is not an
      * answer the engine can survive: it rounds its callback buffer up to a multiple of it, and a multiple of zero is never reached. */
     if (!strcmp(key, "audiomanager.framesPerBuffer")) return "256";
+    /* PackageManager's FEATURE_VULKAN_HARDWARE_VERSION: Vulkan 1.3. Below 1.1, an engine that knows it is on Android 7 or later does not try Vulkan at all. */
+    if (!strcmp(key, "android.hardware.vulkan.version")) return "4206592";
     if (!strcmp(key, "audiomanager.optimalSampleRate")) return "48000";
     if (!strcmp(key, "ue4.display.getRefreshRate")) return tl_frame_hz() > 60 ? "120" : "60";
     /* A setting forced from the environment ("key=value;key=value", keys without the com.epicgames.ue4.GameActivity. prefix), for trying things. */
@@ -525,6 +527,21 @@ static void GA_cacheDir(tl_jcall *c)
     c->ret = vl(tl_jni_new_string(path));
 }
 
+/*
+ * com.epicgames.unreal.MessageBox01: the dialog through which a shipping build, with its log compiled out, says why it cannot go on. Nobody is there to press
+ * its buttons: the text goes to the log, and the answer is the first button.
+ */
+#define MSGBOX "com/epicgames/ue4/MessageBox01"
+static char g_box_caption[160], g_box_text[1200];
+static void MB_nothing(tl_jcall *c) { (void)c; }
+static void MB_caption(tl_jcall *c) { snprintf(g_box_caption, sizeof(g_box_caption), "%s", S(c->args[0].l)); }
+static void MB_text(tl_jcall *c) { snprintf(g_box_text, sizeof(g_box_text), "%s", S(c->args[0].l)); }
+static void MB_show(tl_jcall *c)
+{
+    tl_log_line("ue4: the engine's message: %s: %s", g_box_caption, g_box_text);
+    c->ret = vi(0);
+}
+
 #define M_(c, n, s, f) { c, n, s, f }
 static const tl_jhle k_hle5[] = {
     M_(CLS, "AndroidThunkJava_GetCacheDir", "()Ljava/lang/String;", GA_cacheDir),
@@ -563,6 +580,12 @@ static const tl_jhle k_hle[] = {
     M_(CLS, "AndroidThunkJava_GetMetaDataFloat", "(Ljava/lang/String;)F", GA_metaFloat),
     M_(CLS, "Get", "()Lcom/epicgames/ue4/GameActivity;", GA_get),
     M_(CLS, "AndroidThunkJava_ForceQuit", "()V", GA_forceQuit),
+    M_(MSGBOX, "<init>", "()V", MB_nothing),
+    M_(MSGBOX, "setCaption", "(Ljava/lang/String;)V", MB_caption),
+    M_(MSGBOX, "setText", "(Ljava/lang/String;)V", MB_text),
+    M_(MSGBOX, "addButton", "(Ljava/lang/String;)V", MB_nothing),
+    M_(MSGBOX, "clear", "()V", MB_nothing),
+    M_(MSGBOX, "show", "()I", MB_show),
     M_(CLS, "AndroidThunkJava_InitHMDs", "()V", GA_initHMDs),
     M_("android/app/ActivityThread", "currentActivityThread", "()Landroid/app/ActivityThread;", AT_current),
     M_("android/app/ActivityThread", "currentApplication", "()Landroid/app/Application;", EOS_context),
@@ -639,8 +662,11 @@ void tl_ue4_hle_install(const char *pkg, const char *apk, const char *data, cons
     tl_jni_declare(java_name("com/epicgames/ue4/GameApplication"), "android/app/Application");
     tl_jni_declare("java/lang/Boolean", "java/lang/Object");
     tl_jni_declare(java_name("com/epicgames/ue4/GameActivity$InputDeviceInfo"), "java/lang/Object");
+    tl_jni_declare(java_name(MSGBOX), "java/lang/Object");
     tl_jni_register_hle(for_this_engine(k_hle));
     if (g_ue5) tl_jni_register_hle(for_this_engine(k_hle5));
+    /* What GameActivity's static initialiser copies from Build.VERSION.SDK_INT. At 0 Unreal Engine 5 takes the class of its message box to be the empty name. */
+    if (g_ue5) tl_jni_set_static_field(java_name(CLS), "ANDROID_BUILD_VERSION", "I", vi(34));
     /* The enum constants EOS reads off EOSOverlay.BrowserStatus: with no class initialiser to run they would be null, which it takes as a broken SDK. */
     static const char *const status[] = { "BEGIN_LOAD", "CLOSED", "CRASHED", "END_LOAD", "LOAD_ERROR" };
     for (size_t i = 0; i < sizeof(status) / sizeof(status[0]); i++) {

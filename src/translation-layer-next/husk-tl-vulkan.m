@@ -346,6 +346,16 @@ static int w_vkQueuePresentKHR(void *queue, const void *info)
     return r;
 }
 
+/*
+ * Android's hardware buffers. Unreal Engine 5 counts this among the functions it cannot start without, and without it stops looking for the optional ones
+ * too, which it then calls. It uses it only to show video from a hardware buffer, under an extension MoltenVK does not offer, so it is never really called.
+ */
+static int w_vkGetAndroidHardwareBufferPropertiesANDROID(void *device, const void *buffer, void *properties)
+{
+    (void)device; (void)buffer; (void)properties;
+    return -1000072003;     /* VK_ERROR_INVALID_EXTERNAL_HANDLE */
+}
+
 static void *w_vkGetInstanceProcAddr(void *instance, const char *name);
 static void *w_vkGetDeviceProcAddr(void *device, const char *name);
 
@@ -355,6 +365,7 @@ static const struct { const char *name; void *fn; } k_over[] = {
     { "vkCreateInstance", w_vkCreateInstance },
     { "vkEnumerateInstanceExtensionProperties", w_vkEnumerateInstanceExtensionProperties },
     { "vkCreateAndroidSurfaceKHR", w_vkCreateAndroidSurfaceKHR },
+    { "vkGetAndroidHardwareBufferPropertiesANDROID", w_vkGetAndroidHardwareBufferPropertiesANDROID },
     { "vkQueuePresentKHR", w_vkQueuePresentKHR },
     { "vkCreateSwapchainKHR", w_vkCreateSwapchainKHR },
     { "vkAcquireNextImageKHR", w_vkAcquireNextImageKHR },
