@@ -33,7 +33,17 @@ static struct {
 
 static int64_t now_ms(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000; }
 
-void tl_pad_set_sink(const tl_pad_sink *sink) { pthread_mutex_lock(&P.lock); if (sink) P.sink = *sink; else memset(&P.sink, 0, sizeof(P.sink)); pthread_mutex_unlock(&P.lock); }
+/* The D-pad's form is the engine's to choose, and it chooses as it sets its sink. A controller connected before the game started has been updating this layer since then, and must not keep what it read with no engine there. */
+void tl_pad_set_sink(const tl_pad_sink *sink)
+{
+    pthread_mutex_lock(&P.lock);
+    if (sink) P.sink = *sink; else memset(&P.sink, 0, sizeof(P.sink));
+    P.dpad_mode = -1;
+    pthread_mutex_unlock(&P.lock);
+}
+
+static void (*g_change_hook)(void);
+void tl_pad_set_change_hook(void (*hook)(void)) { g_change_hook = hook; }
 
 bool tl_pad_connected(int slot) { return slot >= 0 && slot < TL_PADS && P.connected[slot]; }
 
@@ -48,6 +58,7 @@ void tl_pad_connect(int slot, const char *name)
     memset(P.trigger_key[slot], 0, sizeof(P.trigger_key[slot]));
     pthread_mutex_unlock(&P.lock);
     tl_log_line("pad: controller %d connected (%s)", slot, P.name[slot]);
+    if (g_change_hook) g_change_hook();
 }
 
 void tl_pad_disconnect(int slot)
@@ -57,6 +68,7 @@ void tl_pad_disconnect(int slot)
     P.connected[slot] = false;
     pthread_mutex_unlock(&P.lock);
     tl_log_line("pad: controller %d disconnected", slot);
+    if (g_change_hook) g_change_hook();
 }
 
 /* Android key code of each button bit; the D-pad has none here (it is the hat) unless TL_PAD_DPAD says so. */

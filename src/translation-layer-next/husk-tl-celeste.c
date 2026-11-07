@@ -25,6 +25,7 @@
 
 #include "husk-tl-asmstore.h"
 #include "husk-tl-bionic.h"
+#include "husk-tl-gamepad.h"
 #include "husk-tl-internal.h"
 #include "husk-tl-jni.h"
 #include "husk-tl-ld.h"
@@ -161,6 +162,8 @@ typedef struct {
     void (*gc_wbarrier_set_arrayref)(void *, void *, void *);
     void *(*object_to_string)(void *, void **);
     char *(*string_to_utf8)(void *);
+    uint32_t (*field_get_offset)(void *);                           /* these two only for the touch controls: without them, they stay as they are */
+    void *(*vtable_get_static_field_data)(void *);
 } mono_api;
 static mono_api M;
 static void *g_domain;
@@ -193,6 +196,8 @@ static bool mono_bind(void)
     BIND(object_to_string, "mono_object_to_string");
     BIND(string_to_utf8, "mono_string_to_utf8");
 #undef BIND
+    *(void **)&M.field_get_offset = tl_ld_sym(lib, "mono_field_get_offset");
+    *(void **)&M.vtable_get_static_field_data = tl_ld_sym(lib, "mono_vtable_get_static_field_data");
     return ok;
 }
 
@@ -277,6 +282,35 @@ static bool patch_game(void)
     return true;
 }
 
+/*
+ * The port's touch buttons. It means to hide them while a controller is connected, but TouchControls.GetState notes that on every call -- pad 0's answer, and false for
+ * the others -- and the game asks about all four pads each frame, so what its drawing sees is always false. Its Enabled flag does work: off, there are no buttons and the
+ * game reads the controller. Controllers come and go on a thread Mono does not know, which may not call into it. The flag is a byte of static data, which does not move, so it is written where it lies.
+ */
+static volatile uint8_t *g_touch_enabled;
+
+static void touch_follow_pads(void)
+{
+    if (!g_touch_enabled) return;
+    bool any = false;
+    for (int slot = 0; slot < TL_PADS; slot++) any = any || tl_pad_connected(slot);
+    *g_touch_enabled = !any;
+    tl_log_line("celeste: touch controls %s", any ? "hidden, as a controller is connected" : "shown, as no controller is connected");
+}
+
+static void touch_controls_follow_pads(void)
+{
+    if (!M.field_get_offset || !M.vtable_get_static_field_data) { tl_log_line("celeste: this Mono cannot say where a static field is, so the touch controls stay as they are"); return; }
+    void *cls = open_class(C.patched, "CelesteAndroid", "TouchControls");
+    void *field = cls ? M.class_get_field_from_name(cls, "Enabled") : NULL;
+    void *vt = field ? M.class_vtable(g_domain, cls) : NULL;
+    if (!vt) { tl_log_line("celeste: no TouchControls.Enabled in this patch, so the touch controls stay as they are"); return; }
+    M.runtime_class_init(vt);                                       /* its static constructor sets the flag, so it goes first */
+    g_touch_enabled = (volatile uint8_t *)M.vtable_get_static_field_data(vt) + M.field_get_offset(field);
+    tl_pad_set_change_hook(touch_follow_pads);
+    touch_follow_pads();
+}
+
 /* CelesteLauncher.Run. */
 static int run_game(void)
 {
@@ -290,6 +324,7 @@ static int run_game(void)
         M.runtime_class_init(vt);
         M.field_static_set_value(vt, field, M.string_new(g_domain, C.game));
     } else tl_log_line("celeste: Monocle.Engine has no AssemblyDirectory to set");
+    touch_controls_follow_pads();
     void *main_method = M.class_get_method_from_name(game, "Main", 1);
     if (!main_method) { tl_log_line("celeste: Celeste.Celeste has no Main"); return -1; }
     void *argv = M.array_new(g_domain, M.get_string_class(), 0);

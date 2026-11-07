@@ -256,14 +256,16 @@ static atomic_int g_pads_announced;
 static void A_pollInputDevices(tl_jcall *c)
 {
     (void)c;
-    void (*add)(void *, void *, int, void *, void *, int, int, int, int, int, int, uint8_t) =
+    /* What goes past the eighth register is declared long. SDL is built for AAPCS64, where every argument on the stack has an 8-byte slot, and this file for Apple's ABI, which
+     * packs ints at 4 bytes: declared int, the axis mask landed where SDL reads the hat count. SDL then read an axis mask of 0, and made a mapping with no sticks or triggers. */
+    void (*add)(void *, void *, int, void *, void *, int, int, int, long, long, long, long) =
         S.sdl2 ? NULL : native_of(SDLCTRL, "nativeAddJoystick", "(ILjava/lang/String;Ljava/lang/String;IIIIIIZ)V");
     /* SDL 2's has an is_accelerometer flag after the ids and a ball count at the end, and returns a value. The axis mask came in along the way: its Java side says which this is. */
     static const char sig2[] = "(ILjava/lang/String;Ljava/lang/String;IIZIIIII)I", sig2_old[] = "(ILjava/lang/String;Ljava/lang/String;IIZIIII)I";
     bool st;
-    int (*add2)(void *, void *, int, void *, void *, int, int, uint8_t, int, int, int, int, int) =
+    int (*add2)(void *, void *, int, void *, void *, int, int, uint8_t, long, long, long, long, long) =
         S.sdl2 && tl_dexidx_declares_method(SDLCTRL, "nativeAddJoystick", sig2, &st) ? native_of(SDLCTRL, "nativeAddJoystick", sig2) : NULL;
-    int (*add2_old)(void *, void *, int, void *, void *, int, int, uint8_t, int, int, int, int) =
+    int (*add2_old)(void *, void *, int, void *, void *, int, int, uint8_t, long, long, long, long) =
         S.sdl2 && !add2 && tl_dexidx_declares_method(SDLCTRL, "nativeAddJoystick", sig2_old, &st) ? native_of(SDLCTRL, "nativeAddJoystick", sig2_old) : NULL;
     void (*remove)(void *, void *, int) = native_of(SDLCTRL, "nativeRemoveJoystick", "(I)V");
     for (int slot = 0; slot < TL_PADS; slot++) {

@@ -43,6 +43,7 @@ void tl_pad_connect(int slot, const char *name);
 void tl_pad_disconnect(int slot);
 void tl_pad_update(int slot, const tl_pad_state *state);        /* any thread; unchanged state sends nothing */
 bool tl_pad_connected(int slot);
+void tl_pad_set_change_hook(void (*hook)(void));                /* called, on whichever thread, when a controller comes or goes */
 
 /* the objects in husk-tl-jni-input.c */
 jobj *tl_input_key_event(int action, int keycode, int device, int source, int repeat, int64_t down_ms, int64_t event_ms);
