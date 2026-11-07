@@ -34,6 +34,7 @@ void *tl_nwindow_get(void);
 void tl_ue4_hle_install(const char *pkg, const char *apk, const char *data, const char *ext_files);
 void tl_ue4_watch(void);
 void tl_ue4_set_activity(jobj *activity);
+void tl_ue4_set_screen(int width, int height);
 const char *tl_ue4_meta(const char *key);
 void tl_ue_set_five(bool on);
 const char *tl_ue_lib_name(void);
@@ -522,6 +523,7 @@ bool tl_na_start(const tl_ga_config *cfg)
         return start_generic();
     }
     tl_ue4_hle_install(cfg->package_name, cfg->apk_path, cfg->data_dir, N.ext_dir);
+    tl_ue4_set_screen(cfg->width, cfg->height);
     drop_empty_saves(N.data, 0);
 
     N.activity = tl_jni_new_object(tl_jni_class(CLS));

@@ -614,7 +614,7 @@ const tl_bionic_entry tl_tab_str[] = {
     TL_DIRECT(acos), TL_DIRECT(acosf), TL_DIRECT(asin), TL_DIRECT(asinf), TL_DIRECT(atan), TL_DIRECT(atan2), TL_DIRECT(atan2f),
     TL_DIRECT(atanf), TL_DIRECT(cbrtf), TL_DIRECT(cos), TL_DIRECT(cosf), TL_DIRECT(exp), TL_DIRECT(exp2f), TL_DIRECT(expf),
     TL_DIRECT(fmod), TL_DIRECT(fmodf), TL_DIRECT(hypot), TL_DIRECT(ldexp), TL_DIRECT(ldexpf), TL_DIRECT(log), TL_DIRECT(log10),
-    TL_DIRECT(log10f), TL_DIRECT(log2), TL_DIRECT(log2f), TL_DIRECT(logb), TL_DIRECT(logf), TL_DIRECT(modf), TL_DIRECT(modff),
+    TL_DIRECT(log10f), TL_DIRECT(log2), TL_DIRECT(log2f), TL_DIRECT(logb), TL_DIRECT(logbf), TL_DIRECT(logf), TL_DIRECT(modf), TL_DIRECT(modff),
     TL_DIRECT(pow), TL_DIRECT(powf), TL_DIRECT(scalbn), TL_DIRECT(sin), TL_DIRECT(sinf), TL_DIRECT(sqrtf), TL_DIRECT(tan),
     TL_DIRECT(tanf), TL_WRAP("sincosf", b_sincosf), TL_WRAP("sincos", b_sincos),
     TL_DIRECT(sqrt), TL_DIRECT(fmin), TL_DIRECT(fmax), TL_DIRECT(frexp), TL_DIRECT(asinh), TL_DIRECT(tanh),

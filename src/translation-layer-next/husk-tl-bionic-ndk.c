@@ -165,7 +165,7 @@ static int b_AConfiguration_getSdkVersion(tl_aconfig *c) { (void)c; return 34; }
 
 /* ---------------------------------------------------------------- assets */
 
-typedef struct { const uint8_t *data; size_t len; size_t pos; uint8_t *owned; } tl_asset;
+typedef struct { const uint8_t *data; size_t len; size_t pos; uint8_t *owned; const tl_zip *zip; const tl_zip_entry *entry; } tl_asset;
 
 static void *b_AAssetManager_fromJava(void *env, void *obj) { (void)env; (void)obj; static int mgr; return &mgr; }
 
@@ -216,7 +216,7 @@ static void *b_AAssetManager_open(void *mgr, const char *name, int mode)
             return NULL;
         }
         tl_asset *a = calloc(1, sizeof(*a));
-        a->data = data; a->len = n;
+        a->data = data; a->len = n; a->zip = z; a->entry = e;
         if (owned) a->owned = (uint8_t *)data;
         return a;
     }
@@ -516,6 +516,17 @@ static long b_AAsset_seek(tl_asset *a, long off, int whence)
     return np;
 }
 static int b_AAsset_isAllocated(tl_asset *a) { return a->owned != NULL; }
+/* A descriptor to read an asset by: the APK's, and where in it the asset lies. A compressed asset has no such place, and the answer is -1, as on Android. */
+static int b_AAsset_openFileDescriptor(tl_asset *a, int64_t *start, int64_t *length)
+{
+    if (!a || !a->zip || a->entry->method != 0 || a->zip->fd < 0) return -1;
+    const uint8_t *raw = tl_zip_raw(a->zip, a->entry);
+    int fd = raw ? dup(a->zip->fd) : -1;
+    if (fd < 0) return -1;
+    *start = (int64_t)(raw - a->zip->map);
+    *length = (int64_t)a->entry->usize;
+    return fd;
+}
 
 /* ---------------------------------------------------------------- windows */
 
@@ -1119,6 +1130,7 @@ const tl_bionic_entry tl_tab_ndk[] = {
     TL_WRAP("AAsset_getLength64", b_AAsset_getLength), TL_WRAP("AAsset_getRemainingLength", b_AAsset_getRemainingLength),
     TL_WRAP("AAsset_getRemainingLength64", b_AAsset_getRemainingLength), TL_WRAP("AAsset_getBuffer", b_AAsset_getBuffer),
     TL_WRAP("AAsset_seek", b_AAsset_seek), TL_WRAP("AAsset_seek64", b_AAsset_seek), TL_WRAP("AAsset_isAllocated", b_AAsset_isAllocated),
+    TL_WRAP("AAsset_openFileDescriptor", b_AAsset_openFileDescriptor), TL_WRAP("AAsset_openFileDescriptor64", b_AAsset_openFileDescriptor),
     /* windows */
     TL_WRAP("ANativeWindow_fromSurface", b_ANativeWindow_fromSurface), TL_WRAP("ANativeWindow_acquire", b_ANativeWindow_acquire),
     TL_WRAP("ANativeWindow_release", b_ANativeWindow_release), TL_WRAP("ANativeWindow_getWidth", b_ANativeWindow_getWidth),

@@ -1564,7 +1564,25 @@ static int stub_enosys_i(const char *what)
 static int b_epoll_create1(int flags) { (void)flags; return stub_enosys_i("epoll_create1"); }
 static int b_epoll_ctl(int a, int b, int c, void *d) { (void)a; (void)b; (void)c; (void)d; return stub_enosys_i("epoll_ctl"); }
 static int b_epoll_wait(int a, void *b, int c, int d) { (void)a; (void)b; (void)c; (void)d; return stub_enosys_i("epoll_wait"); }
-static int b_eventfd(unsigned a, int b) { (void)a; (void)b; return stub_enosys_i("eventfd"); }
+/*
+ * eventfd, which libcurl wakes its poll with. iOS has none. A FIFO opened for both reading and writing is one descriptor, readable once written to, which is
+ * all a wake-up asks. Unlike an eventfd, each write is read back on its own rather than added to a count. Its name is gone at once, so nothing stays behind.
+ */
+static int b_eventfd(unsigned initial, int flags)
+{
+    enum { GUEST_EFD_NONBLOCK = 0x800, GUEST_EFD_CLOEXEC = 0x80000 };
+    static int serial;
+    const char *tmp = getenv("TMPDIR");
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/eventfd-%d-%d", tmp && tmp[0] ? tmp : "/tmp", (int)getpid(), __sync_add_and_fetch(&serial, 1));
+    TL_ERRNO_BEGIN();
+    int fd = mkfifo(path, 0600) == 0 ? open(path, O_RDWR | O_NONBLOCK | ((flags & GUEST_EFD_CLOEXEC) ? O_CLOEXEC : 0)) : -1;
+    unlink(path);
+    if (fd >= 0 && !(flags & GUEST_EFD_NONBLOCK)) fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) & ~O_NONBLOCK);
+    if (fd >= 0 && initial) { uint64_t v = initial; if (write(fd, &v, sizeof(v)) < 0) { close(fd); fd = -1; } }
+    TL_ERRNO_END();
+    return fd >= 0 ? fd : stub_enosys_i("eventfd");
+}
 static int b_inotify_init(void) { return stub_enosys_i("inotify_init"); }
 static int b_inotify_add_watch(int a, const char *b, unsigned c) { (void)a; (void)b; (void)c; return stub_enosys_i("inotify_add_watch"); }
 

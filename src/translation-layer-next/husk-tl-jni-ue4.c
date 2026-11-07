@@ -26,7 +26,7 @@ static const char *S(const jobj *o) { const char *s = tl_jni_string(o); return s
 
 #define CLS "com/epicgames/ue4/GameActivity"
 
-static struct { char pkg[160], data[512], ext[700], apk[1024]; jobj *activity; } U;
+static struct { char pkg[160], data[512], ext[700], apk[1024]; jobj *activity; int width, height; } U;
 
 /* Unreal Engine 5: the library is libUnreal.so, and the engine's Java is under com/epicgames/unreal. */
 static bool g_ue5;
@@ -68,8 +68,18 @@ const char *tl_hle_manifest_meta(const char *key);
 int tl_frame_hz(void);         /* the frame rate games are held to, 60 or 120 (husk-tl-egl.c) */
 const char *tl_ue4_meta(const char *key)
 {
-    /* Not in the manifest: GameActivity computes it from the display's metrics. x dpi, y dpi. */
+    /* Unreal Engine 5 asks as "unreal." what an older one asks as "ue4.". */
+    char older[120];
+    if (!strncmp(key, "unreal.", 7)) { snprintf(older, sizeof(older), "ue4.%s", key + 7); key = older; }
+    /* Not in the manifest: GameActivity computes it from the display's metrics. x dpi, y dpi. The engine reads both numbers without looking: an empty answer is a crash. */
     if (!strcmp(key, "ue4.displaymetrics.dpi")) return "440.0,440.0";
+    /* The fields of DisplayMetrics and Display, as "name;value;name;value", from which Unreal Engine 5 can size its surface by the screen's density. */
+    if (!strcmp(key, "ue4.displaymetrics.metrics")) return "densityDpi;440;xdpi;440.0;ydpi;440.0";
+    if (!strcmp(key, "ue4.display")) {
+        static char display[64];
+        snprintf(display, sizeof(display), "realWidth;%d;realHeight;%d", U.width, U.height);
+        return display;
+    }
     /* Likewise AudioManager's answers (PROPERTY_OUTPUT_FRAMES_PER_BUFFER, PROPERTY_OUTPUT_SAMPLE_RATE) and the display's refresh rate. A zero buffer size is not an
      * answer the engine can survive: it rounds its callback buffer up to a multiple of it, and a multiple of zero is never reached. */
     if (!strcmp(key, "audiomanager.framesPerBuffer")) return "256";
@@ -640,3 +650,4 @@ void tl_ue4_hle_install(const char *pkg, const char *apk, const char *data, cons
 }
 
 void tl_ue4_set_activity(jobj *activity) { U.activity = activity; }
+void tl_ue4_set_screen(int width, int height) { U.width = width; U.height = height; }
