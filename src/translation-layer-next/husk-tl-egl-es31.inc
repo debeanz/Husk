@@ -562,6 +562,45 @@ static void (*r_glDrawElementsInstanced)(unsigned, int, unsigned, const void *, 
 static void w_glDrawElementsInstanced(unsigned m, int c, unsigned t, const void *i, int n) { if (g_es31_shim) tb_flush(); r_glDrawElementsInstanced(m, c, t, i, n); }
 static void (*r_glDrawRangeElements)(unsigned, unsigned, unsigned, int, unsigned, const void *);
 static void w_glDrawRangeElements(unsigned m, unsigned s, unsigned e, int c, unsigned t, const void *i) { if (g_es31_shim) tb_flush(); probe_draw("glDrawRangeElements", false, m, c); r_glDrawRangeElements(m, s, e, c, t, i); probe_draw("glDrawRangeElements", true, m, c); }
+/*
+ * A vertex stream with no buffer. Unreal Engine 4 binds buffer 0 for a stream it has nothing in and leaves the attribute on, which Android's drivers let pass.
+ * ANGLE takes it as the game's own memory, at address 0, and copies from there at the draw. The stream gets a buffer of zeros instead. Its stride fits any
+ * attribute, and is one ANGLE has no need to convert (it divides by the stride, so not 0) and Metal accepts.
+ */
+#define ZERO_VERTICES_BYTES (4u << 20)
+#define ZERO_VERTICES_STRIDE 16
+static unsigned zero_vertices(void)
+{
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static unsigned name;
+    pthread_mutex_lock(&mu);
+    if (!name && a_eglGetProcAddress) {
+        void (*gen)(int, unsigned *) = a_eglGetProcAddress("glGenBuffers");
+        void (*bind)(unsigned, unsigned) = a_eglGetProcAddress("glBindBuffer");
+        void (*data)(unsigned, long, const void *, unsigned) = a_eglGetProcAddress("glBufferData");
+        void (*geti)(unsigned, int *) = a_eglGetProcAddress("glGetIntegerv");
+        void *zeros = calloc(1, ZERO_VERTICES_BYTES);
+        if (gen && bind && data && geti && zeros) {
+            int old = 0;
+            geti(0x8F36 /* GL_COPY_READ_BUFFER_BINDING */, &old);
+            gen(1, &name);
+            bind(0x8F36, name);
+            data(0x8F36, ZERO_VERTICES_BYTES, zeros, 0x88E4 /* GL_STATIC_DRAW */);
+            bind(0x8F36, (unsigned)old);
+            tl_log_line("es31: a vertex stream with no buffer reads zeros");
+        }
+        free(zeros);
+    }
+    unsigned r = name;
+    pthread_mutex_unlock(&mu);
+    return r;
+}
+static void (*r_glBindVertexBuffer)(unsigned, unsigned, long, int);
+static void w_glBindVertexBuffer(unsigned binding, unsigned buffer, long offset, int stride)
+{
+    if (!buffer && g_es31_shim) { buffer = zero_vertices(); offset = 0; stride = ZERO_VERTICES_STRIDE; }
+    r_glBindVertexBuffer(binding, buffer, offset, stride);
+}
 static void (*r_glBindBufferRange)(unsigned, unsigned, unsigned, long, long);
 static void w_glBindBufferRange(unsigned t, unsigned i, unsigned b, long o, long n)
 {

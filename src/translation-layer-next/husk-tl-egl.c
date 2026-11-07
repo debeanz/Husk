@@ -448,6 +448,8 @@ static void (*r_glDepthMask)(unsigned);
 static void w_glDepthMask(unsigned f) { r_glDepthMask(f & 0xff); }
 static void (*r_glVertexAttribPointer)(unsigned, int, unsigned, unsigned, int, const void *);
 static void w_glVertexAttribPointer(unsigned i, int s, unsigned t, unsigned n, int st, const void *p) { r_glVertexAttribPointer(i, s, t, n & 0xff, st, p); }
+static void (*r_glVertexAttribFormat)(unsigned, int, unsigned, unsigned, unsigned);
+static void w_glVertexAttribFormat(unsigned i, int s, unsigned t, unsigned n, unsigned o) { r_glVertexAttribFormat(i, s, t, n & 0xff, o); }
 static void (*r_glUniformMatrix2fv)(int, int, unsigned, const float *);
 static void w_glUniformMatrix2fv(int l, int c, unsigned t, const float *v) { r_glUniformMatrix2fv(l, c, t & 0xff, v); }
 static void (*r_glUniformMatrix3fv)(int, int, unsigned, const float *);
@@ -612,6 +614,7 @@ static const struct { const char *name; void *wrap; void **real; } k_adapt[] = {
     /* buffer textures under the 3.1 shim (es31_tb) */
     ADAPT(glUnmapBuffer), ADAPT(glMapBufferRange), ADAPT(glCopyBufferSubData), ADAPT(glBindTexture), ADAPT(glDeleteTextures),
     ADAPT(glDrawArrays), ADAPT(glDrawElements), ADAPT(glDrawArraysInstanced), ADAPT(glDrawElementsInstanced), ADAPT(glDrawRangeElements),
+    ADAPT(glVertexAttribFormat), ADAPT(glBindVertexBuffer),
 };
 
 static const struct { const char *name; void *fn; } k_egl[] = {
