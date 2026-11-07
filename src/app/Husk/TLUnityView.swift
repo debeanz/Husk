@@ -15,6 +15,7 @@ enum TLNativeEngine {
     case ue4       // Minecraft Dungeons and other Unreal Engine 4 games: landscape, touch and controllers, Vulkan on MoltenVK
     case godot     // A Godot 3 or 4 game: the manifest says which way up, OpenGL ES through ANGLE, multi-touch
     case nativeactivity // A game that is a NativeActivity library of its own (Open Golf): the manifest says which way up, OpenGL ES through ANGLE
+    case hades     // Hades in its Android port, which runs the game's iOS build: landscape, touch and controllers, Vulkan on MoltenVK
 }
 
 /// A Unity game's screen: one CAMetalLayer that the game's own GL (ANGLE over Metal) presents into.
@@ -183,7 +184,7 @@ final class TLUnityUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         metal.position = CGPoint(x: bounds.midX, y: bounds.midY)
         let s = scales(for: size)
         metal.setAffineTransform(CGAffineTransform(scaleX: s.x * size.width / pixels.width, y: s.y * size.height / pixels.height))
-        if engine != .ue4 { metal.drawableSize = pixels }
+        if engine != .ue4 && engine != .hades { metal.drawableSize = pixels }
     }
 
     /// The size the game draws its frames at, when it asked for one other than the size it was told: Unreal draws at a
@@ -268,7 +269,7 @@ final class TLUnityUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
             try? session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
             try? session.setActive(true)
         }
-        HuskLog.log("tl", "native: launching \(apk) at \(width)x\(height) (\(engine == .cocos ? "cocos2d-x" : engine == .minecraft ? "gameactivity" : engine == .sdl ? "sdl" : engine == .ue4 ? "ue4" : engine == .gta ? "gta" : engine == .godot ? "godot" : engine == .nativeactivity ? "nativeactivity" : "unity"))")
+        HuskLog.log("tl", "native: launching \(apk) at \(width)x\(height) (\(engine == .cocos ? "cocos2d-x" : engine == .minecraft ? "gameactivity" : engine == .sdl ? "sdl" : engine == .ue4 ? "ue4" : engine == .gta ? "gta" : engine == .godot ? "godot" : engine == .nativeactivity ? "nativeactivity" : engine == .hades ? "hades" : "unity"))")
         // Splits and the asset pack are part of the app, whatever its engine; the game's libraries and data may be in any of
         // them (a Google Play install keeps a Unity game's libraries in one split and its data in an asset pack).
         for extra in extraApks.prefix(3) { husk_native_add_package(extra) }
@@ -284,6 +285,10 @@ final class TLUnityUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         case .gta: started = husk_gta_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
         case .godot: started = husk_godot_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
         case .nativeactivity: started = husk_ue4_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)       // the NativeActivity driver; with no Unreal in the APK it runs the plain game
+        case .hades:
+            // Vulkan too, and the same driver, which hands it over to the port's own.
+            if let fw = Bundle.main.privateFrameworksPath { husk_ue4_set_vulkan(fw + "/MoltenVK.framework/MoltenVK") }
+            started = husk_ue4_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
         case .ue4:
             // Unreal draws with Vulkan, which on this device is MoltenVK, a framework of the app's own.
             if let fw = Bundle.main.privateFrameworksPath { husk_ue4_set_vulkan(fw + "/MoltenVK.framework/MoltenVK") }
@@ -696,6 +701,7 @@ struct TLCocosAttemptView: View {
         case .gta: return .gta
         case .godot: return .godot
         case .nativeactivity: return .nativeactivity
+        case .hades: return .hades
         case .cocos: return .cocos
         default: return .unity
         }
@@ -703,7 +709,7 @@ struct TLCocosAttemptView: View {
 
     private var dataDir: String {
         TranslationLayer.root.appendingPathComponent(app.id, isDirectory: true)
-            .appendingPathComponent(engine == .unity ? "unity-data" : engine == .minecraft ? "minecraft-data" : engine == .sdl ? "sdl-data" : engine == .ue4 ? "ue4-data" : engine == .gta ? "gta-data" : engine == .godot ? "godot-data" : engine == .nativeactivity ? "na-data" : "cocos-data", isDirectory: true).path
+            .appendingPathComponent(engine == .unity ? "unity-data" : engine == .minecraft ? "minecraft-data" : engine == .sdl ? "sdl-data" : engine == .ue4 ? "ue4-data" : engine == .gta ? "gta-data" : engine == .godot ? "godot-data" : engine == .nativeactivity ? "na-data" : engine == .hades ? "hades-data" : "cocos-data", isDirectory: true).path
     }
 
     /// Which way up: what the game's settings say, and otherwise what its manifest asks. Some SDL games are portrait; every other

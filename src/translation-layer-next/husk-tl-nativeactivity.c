@@ -16,6 +16,7 @@
 #include "husk-tl-dexindex.h"
 #include "husk-tl-egl.h"
 #include "husk-tl-gamepad.h"
+#include "husk-tl-hades.h"
 #include "husk-tl-vulkan.h"
 #include "husk-tl-jni.h"
 #include "husk-tl-internal.h"
@@ -462,6 +463,9 @@ static void drop_empty_saves(const char *dir, int depth)
     closedir(d);
 }
 
+/* Hades has an activity of its own, and is driven by husk-tl-hades.c. */
+static bool g_hades;
+
 bool tl_na_start(const tl_ga_config *cfg)
 {
     N.cfg = *cfg;
@@ -484,6 +488,10 @@ bool tl_na_start(const tl_ga_config *cfg)
     int n = tl_dexidx_open(cfg->apk_path);
     tl_log_line("ue4: %d classes in the APK's DEX", n);
     if (!tl_ld_add_apk(cfg->apk_path)) return false;
+    if (tl_ld_has_lib("libhades.so")) {
+        g_hades = true;
+        return tl_hades_start(&N.cfg);
+    }
     N.generic = !tl_ld_has_lib("libUE4.so");
     if (!N.generic) {
         tl_egl_es31_shim(true);
@@ -613,6 +621,7 @@ static void *ui_main(void *arg)
 
 bool tl_na_run(void)
 {
+    if (g_hades) return tl_hades_run();
     if (!N.started) return false;
     /* The OBB is inside the APK: say where, so the engine finds it where it expects. */
     if (!N.generic) {
@@ -633,11 +642,12 @@ unsigned long tl_vk_frames_presented(void);
 unsigned long tl_na_frames(void) { return tl_egl_frames_presented() + tl_vk_frames_presented(); }
 
 void tl_inq_touch(int phase, int id, float x, float y);
-void tl_na_touch(int phase, int id, float x, float y) { tl_inq_touch(phase, id, x, y); }
+void tl_na_touch(int phase, int id, float x, float y) { if (g_hades) tl_hades_touch(phase, id, x, y); else tl_inq_touch(phase, id, x, y); }
 /* The app left the screen or came back: the engine is told as an activity is -- onPause and the window losing focus, onResume and gaining it -- so it stops drawing and
  * silences its audio instead of feeding a GPU iOS will no longer let it have. Only real changes are passed on. */
 void tl_na_set_paused(bool paused)
 {
+    if (g_hades) { tl_hades_set_paused(paused); return; }
     static atomic_bool is_paused;
     if (!N.started || !N.callbacks.onResume) return;
     if (atomic_exchange(&is_paused, paused) == paused) return;

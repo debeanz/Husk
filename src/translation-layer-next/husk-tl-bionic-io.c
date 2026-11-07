@@ -900,7 +900,8 @@ static int g_mm_trace = -1;
 static void mm_trace(const char *what, void *a, size_t l, long x, long y)
 {
     if (g_mm_trace < 0) g_mm_trace = getenv("TL_MM_TRACE") ? 1 : 0;
-    if (g_mm_trace) tl_log_line("mm: %s addr=%p len=%#zx %#lx %#lx", what, a, l, x, y);
+    static int said;
+    if (g_mm_trace && said++ < 800) tl_log_line("mm: %s addr=%p len=%#zx %#lx %#lx", what, a, l, x, y);
 }
 
 /*
@@ -1092,7 +1093,20 @@ static void *b_mmap(void *addr, size_t len, int prot, int flags, int fd, long of
 {
     /* A Mach-O executable a guest's own loader is mapping (husk-tl-macho.c). */
     void *macho;
-    if (tl_macho_mmap(addr, len, prot, flags, &macho)) { mm_trace("mmap", macho, len, prot, flags); return macho; }
+    if (tl_macho_mmap(addr, len, prot, flags, &macho)) {
+        mm_trace("mmap", macho, len, prot, flags);
+        /* A segment mapped from the file: read it in, a part at a time, as code and data are reached through different views. What the file does not have stays zero. */
+        if (macho != MAP_FAILED && fd >= 0 && !(flags & 0x20)) {
+            uint8_t *q = macho; size_t left = len; long at = off;
+            while (left) {
+                size_t code = tl_macho_code_bytes(q, left), part = code ? code : left;
+                long got = b_pread64(fd, q, part, at);
+                if (got <= 0) break;
+                q += got; at += got; left -= (size_t)got;
+            }
+        }
+        return macho;
+    }
     /* A hooking library's trampolines (Geode): executable memory is a piece of the JIT region, written through the other view. */
     if ((prot & PROT_EXEC) && (flags & 0x20) && !(flags & 0x10) && tl_codewrite_enabled()) {
         uint8_t *rx, *rw;

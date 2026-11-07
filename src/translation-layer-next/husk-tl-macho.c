@@ -53,16 +53,21 @@
 #define G_MAP_FIXED 0x10
 #define G_MAP_ANON 0x20
 
+/* Kept back after the image for a loader that asks for a little more than the image's size. */
+#define ANY_LOADER_SLACK ((size_t)8 << 20)
+
 static struct {
-    bool armed, reserved, pool_noted;
+    bool armed, reserved, pool_noted, any;
     uint64_t vm_base;
-    size_t total, text_bytes;
+    size_t total, text_bytes, linkedit_bytes;
     uint8_t *pool, *text;
 } M;
 
 static uint32_t be32(const uint8_t *p) { return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3]; }
 static uint32_t le32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
 static uint64_t le64(const uint8_t *p) { uint64_t v; memcpy(&v, p, 8); return v; }
+
+void tl_macho_any_loader(void) { M.any = true; }
 
 bool tl_macho_prepare(const char *path, char *err, size_t errlen)
 {
@@ -107,6 +112,7 @@ bool tl_macho_prepare(const char *path, char *err, size_t errlen)
                     if (vm != end) { snprintf(err, errlen, "segment %s does not follow the one before it", name); goto out; }
                 }
                 end = vm + vmsize;
+                if (!strcmp(name, "__LINKEDIT")) M.linkedit_bytes = (size_t)vmsize;
             }
         }
         off += size;
@@ -118,7 +124,7 @@ bool tl_macho_prepare(const char *path, char *err, size_t errlen)
     uint8_t *high;
     M.text_bytes = (size_t)(text_end - base);
     M.total = (size_t)(end - base);
-    if (!tl_xmem_reserve_straddle(M.total - M.text_bytes, POOL_BYTES + M.text_bytes, &high, why, sizeof(why))) { snprintf(err, errlen, "%s", why); goto out; }
+    if (!tl_xmem_reserve_straddle(M.total - M.text_bytes + (M.any ? ANY_LOADER_SLACK : 0), POOL_BYTES + M.text_bytes, &high, why, sizeof(why))) { snprintf(err, errlen, "%s", why); goto out; }
     M.pool = high;
     M.text = high + POOL_BYTES;
     M.vm_base = base;
@@ -186,10 +192,17 @@ bool tl_macho_is_code(const void *p, size_t n)
     return M.reserved && b >= M.text && n <= M.text_bytes && b + n <= M.text + M.text_bytes;
 }
 
+size_t tl_macho_code_bytes(const void *p, size_t n)
+{
+    const uint8_t *b = p, *end = M.text + M.text_bytes;
+    if (!M.reserved || b < M.text || b >= end) return 0;
+    return n < (size_t)(end - b) ? n : (size_t)(end - b);
+}
+
 /* machismo noted the island pool as the room after the image, which here is in the writable view and would not execute. */
 static void note_pool(void)
 {
-    if (M.pool_noted) return;
+    if (M.pool_noted || M.any) return;
     M.pool_noted = true;
     tl_lib *lib = tl_ld_find_lib("libmachismo.so");
     uint64_t *results = lib ? tl_ld_sym(lib, "machismo_load_results") : NULL;
@@ -233,11 +246,25 @@ bool tl_macho_mmap(void *addr, size_t len, int prot, int flags, void **result)
             *result = M.text;
             return true;
         }
+        /*
+         * Another loader's reservation: anonymous memory about the size of the image, whatever it asks of the memory and wherever it would like it (the image is
+         * position-independent), with or without __LINKEDIT, which a loader may read from the file instead. What it does after this works the same: pread and writes
+         * reach the right view, mprotect here does nothing, and a loader that maps each segment comes to the case below.
+         */
+        if (M.any && (flags & G_MAP_ANON) && !(flags & G_MAP_FIXED) && len >= M.total - M.linkedit_bytes && len <= M.total + ANY_LOADER_SLACK) {
+            M.reserved = true;
+            tl_log_line("macho: the loader asked for %#zx bytes (prot %#x, at %p): it has the image's place, %p", len, prot, addr, (void *)M.text);
+            *result = M.text;
+            return true;
+        }
+        if (M.any && (flags & G_MAP_FIXED) && (uint64_t)(uintptr_t)addr == M.vm_base)
+            tl_log_line("macho: the loader wants the image at exactly %p, which is not to be had here", addr);
         return false;
     }
     /* A segment, about to be read in. Pages stay where they are; what it expects of them is that they are zero. */
     uint8_t *a = addr;
-    if ((flags & G_MAP_FIXED) && a >= M.text && len <= M.total && a + len <= M.text + M.total) {
+    size_t room = M.total + (M.any ? ANY_LOADER_SLACK : 0);
+    if ((flags & G_MAP_FIXED) && a >= M.text && len <= room && a + len <= M.text + room) {
         note_pool();
         uint8_t *text_end = M.text + M.text_bytes;
         if (a < text_end) {
