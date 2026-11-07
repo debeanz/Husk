@@ -131,6 +131,83 @@ void tl_pad_update(int slot, const tl_pad_state *s)
     }
 }
 
+/* ------------------------------------------------------------------ XInput */
+
+/*
+ * Windows' controller API. A PC game ported to Android may keep its own controller code, which calls this and finds no such library,
+ * which is a C# exception each time it asks (Ori and the Blind Forest asks from a thread of its own). Answered here from the same
+ * controllers, so that such a game sees them as it does on Windows.
+ */
+enum { XI_OK = 0, XI_NOT_CONNECTED = 1167 };
+
+typedef struct { uint16_t buttons; uint8_t lt, rt; int16_t lx, ly, rx, ry; } xi_gamepad;
+typedef struct { uint32_t packet; xi_gamepad pad; } xi_state;
+typedef struct { uint8_t type, subtype; uint16_t flags; xi_gamepad pad; uint16_t rumble_low, rumble_high; } xi_caps;
+
+static int16_t xi_stick(float v) { return (int16_t)((v < -1 ? -1 : v > 1 ? 1 : v) * 32767.0f); }
+static uint8_t xi_trigger(float v) { return (uint8_t)((v < 0 ? 0 : v > 1 ? 1 : v) * 255.0f + 0.5f); }
+
+static bool xi_read(uint32_t user, tl_pad_state *out)
+{
+    if (user >= TL_PADS) return false;
+    pthread_mutex_lock(&P.lock);
+    bool on = P.connected[user];
+    if (on) *out = P.last[user];
+    pthread_mutex_unlock(&P.lock);
+    return on;
+}
+
+static uint32_t XInputGetState(uint32_t user, xi_state *out)
+{
+    static const struct { uint8_t bit; uint16_t xi; } k_buttons[] = {
+        { TL_PAD_DPAD_UP, 0x0001 }, { TL_PAD_DPAD_DOWN, 0x0002 }, { TL_PAD_DPAD_LEFT, 0x0004 }, { TL_PAD_DPAD_RIGHT, 0x0008 },
+        { TL_PAD_START, 0x0010 }, { TL_PAD_SELECT, 0x0020 }, { TL_PAD_THUMBL, 0x0040 }, { TL_PAD_THUMBR, 0x0080 },
+        { TL_PAD_L1, 0x0100 }, { TL_PAD_R1, 0x0200 }, { TL_PAD_A, 0x1000 }, { TL_PAD_B, 0x2000 }, { TL_PAD_X, 0x4000 }, { TL_PAD_Y, 0x8000 },
+    };
+    static xi_gamepad seen[TL_PADS];    /* the packet number moves when the state does: callers skip a packet they have seen */
+    static uint32_t packets[TL_PADS];
+    tl_pad_state s;
+    if (!xi_read(user, &s)) return XI_NOT_CONNECTED;
+    xi_gamepad pad = { 0 };
+    for (size_t i = 0; i < sizeof(k_buttons) / sizeof(k_buttons[0]); i++) if (s.buttons & (1u << k_buttons[i].bit)) pad.buttons |= k_buttons[i].xi;
+    pad.lt = xi_trigger(s.lt); pad.rt = xi_trigger(s.rt);
+    /* Up is positive here, and negative as Android reports it. */
+    pad.lx = xi_stick(s.lx); pad.ly = xi_stick(-s.ly); pad.rx = xi_stick(s.rx); pad.ry = xi_stick(-s.ry);
+    if (memcmp(&seen[user], &pad, sizeof(pad))) { seen[user] = pad; packets[user]++; }
+    if (out) { out->packet = packets[user]; out->pad = pad; }
+    return XI_OK;
+}
+
+static uint32_t XInputGetCapabilities(uint32_t user, uint32_t flags, xi_caps *out)
+{
+    (void)flags;
+    tl_pad_state s;
+    if (!xi_read(user, &s)) return XI_NOT_CONNECTED;
+    if (out) {
+        memset(out, 0, sizeof(*out));
+        out->type = 1;                  /* XINPUT_DEVTYPE_GAMEPAD */
+        out->subtype = 1;               /* XINPUT_DEVSUBTYPE_GAMEPAD */
+        out->pad.buttons = 0xF3FF;      /* everything a controller has */
+        out->pad.lt = out->pad.rt = 255;
+        out->pad.lx = out->pad.ly = out->pad.rx = out->pad.ry = -1;
+        out->rumble_low = out->rumble_high = 0xFFFF;
+    }
+    return XI_OK;
+}
+
+/* Vibration is not passed on yet; to the game, it was. */
+static uint32_t XInputSetState(uint32_t user, const void *vibration)
+{
+    (void)vibration;
+    tl_pad_state s;
+    return xi_read(user, &s) ? XI_OK : XI_NOT_CONNECTED;
+}
+
+const tl_bionic_entry tl_tab_xinput[] = {
+    TL_DIRECT(XInputGetState), TL_DIRECT(XInputGetCapabilities), TL_DIRECT(XInputSetState),
+    { NULL, NULL }
+};
+
 /* ------------------------------------------------------------- InputDevice */
 
 static jvalue vl(void *p) { jvalue v; v.j = 0; v.l = p; return v; }

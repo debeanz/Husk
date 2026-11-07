@@ -93,6 +93,12 @@ struct GamePage: View {
     @State private var savesMessage: String?
     @State private var confirmRestore: URL?
     @State private var confirmQuit = false
+    /// The OBB this game needs and does not have, its name.
+    @State private var obbMissing: String?
+    @State private var obbFiles: [URL] = []
+    @State private var obbBusy = false
+    @State private var obbMessage: String?
+    @State private var confirmNoOBB = false
 
     /// Another game already loaded in this run of Husk: engines cannot be unloaded, so this one cannot start until Husk is
     /// closed and opened again.
@@ -142,6 +148,16 @@ struct GamePage: View {
                 }
 
                 if !app.isGeodeLauncher {
+                    PageCard(title: "Game Data", footer: obbFooter) {
+                        Button { pickOBB() } label: {
+                            PageRow(systemImage: "shippingbox.fill", tint: obbMissing == nil ? .purple : .orange,
+                                    title: obbBusy ? "Adding…" : "Add OBB File", detail: obbDetail, chevron: false)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(obbBusy || loadedNow)
+                        .opacity(obbBusy || loadedNow ? 0.45 : 1)
+                    }
+
                     PageCard(title: "Saves", footer: savesFooter) {
                         Button { backUp() } label: {
                             PageRow(systemImage: "square.and.arrow.up", tint: .green, title: "Back Up Saves",
@@ -210,6 +226,18 @@ struct GamePage: View {
         } message: {
             Text("What \(app.label) has saved now is replaced by the backup. Back up first if you want to keep it.")
         }
+        .confirmationDialog("\(app.label) needs its OBB file", isPresented: $confirmNoOBB, titleVisibility: .visible) {
+            // After the dialog has gone: the picker cannot come up over one on its way out.
+            Button("Add OBB File") {
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 400_000_000)
+                    pickOBB()
+                }
+            }
+            Button("Play Anyway") { launch() }
+        } message: {
+            Text("It keeps its data in \(obbMissing ?? "an .obb file"), which is not here yet, so it will not get past its first screen.")
+        }
         .confirmationDialog("Close Husk?", isPresented: $confirmQuit, titleVisibility: .visible) {
             Button("Close Husk") {
                 // The game that is loaded is closed with Husk, which is the normal way out for it, not a crash; and this
@@ -237,6 +265,7 @@ struct GamePage: View {
             Router.shared.autoPlay = nil
             play()
         }
+        .task { refreshOBB() }
     }
 
     // MARK: header
@@ -285,7 +314,26 @@ struct GamePage: View {
                  + "above, then open it again to play \(app.label)."
         }
         if !app.runs { return "This APK has no 64-bit code Husk can run, so it will probably not start." }
+        if let obbMissing { return "This game keeps its data in a separate file, \(obbMissing), which is not here yet. Add it under Game Data below." }
         return nil
+    }
+
+    /// What the OBB row says on its right.
+    private var obbDetail: String? {
+        if obbMissing != nil { return "Needed" }
+        if obbFiles.isEmpty { return nil }
+        return fileBytes(obbFiles.map(\.path))
+    }
+
+    private var obbFooter: String {
+        if let obbMessage { return obbMessage }
+        if loadedNow { return "\(app.label) has been started in this run of Husk. Close Husk and open it again to add an OBB file." }
+        if let obbMissing {
+            return "Husk cannot download this file, so it has to come from where you got the game. Whatever it is called now, Husk names it "
+                 + "\(obbMissing), which is what the game looks for."
+        }
+        if !obbFiles.isEmpty { return obbFiles.map(\.lastPathComponent).joined(separator: ", ") }
+        return "Some games keep their data in a separate .obb file. Most do not need one."
     }
 
     private var savesFooter: String {
@@ -334,8 +382,18 @@ struct GamePage: View {
 
     // MARK: actions
 
-    /// Play: with Geode on, whatever it is missing (a newer release, its resources) is fetched first.
+    /// Play, or say first that the game has no OBB when it needs one.
     private func play() {
+        if let name = GameOBB.missing(app) {
+            obbMissing = name
+            confirmNoOBB = true
+            return
+        }
+        launch()
+    }
+
+    /// With Geode on, whatever it is missing (a newer release, its resources) is fetched first.
+    private func launch() {
         guard TLAppSettings.load(app.id).geode, case .ready = GeodeSupport.shared.current(app) else {
             if TLAppSettings.load(app.id).geode {
                 Task { await GeodeSupport.shared.prepare(app); playing = true }
@@ -345,6 +403,40 @@ struct GamePage: View {
             return
         }
         playing = true
+    }
+
+    private func refreshOBB() {
+        let app = self.app
+        Task.detached(priority: .utility) {
+            let missing = GameOBB.missing(app)
+            let files = GameOBB.files(app.id)
+            await MainActor.run {
+                obbMissing = missing
+                obbFiles = files
+            }
+        }
+    }
+
+    private func pickOBB() {
+        HuskFilePicker.present { urls in addOBBs(urls) } onFail: { obbMessage = $0 }
+    }
+
+    /// A game can be gigabytes of OBB: off the main thread.
+    private func addOBBs(_ urls: [URL]) {
+        obbBusy = true; obbMessage = nil
+        let app = self.app
+        Task.detached {
+            let wanted = GameOBB.wanted(app)
+            let result = Result { try urls.map { try GameOBB.add($0, to: app, wanted: wanted) } }
+            await MainActor.run {
+                obbBusy = false
+                switch result {
+                case .success(let names): obbMessage = "Added \(names.joined(separator: ", "))."
+                case .failure(let e): obbMessage = e.localizedDescription
+                }
+                refreshOBB()
+            }
+        }
     }
 
     private func backUp() {

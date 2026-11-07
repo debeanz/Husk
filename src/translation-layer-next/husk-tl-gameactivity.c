@@ -24,6 +24,7 @@ void tl_hle_set_activity(jobj *a);
 jobj *tl_hle_assets(void);
 jobj *tl_hle_config(void);
 void tl_set_data_dir(const char *dir);
+void tl_obb_folder(const char *data_dir, char *out, size_t n);
 void tl_nwindow_configure(int w, int h, void *layer);
 void tl_mc_hle_install(const char *pkg, const char *apk, const char *data, int w, int h);
 void tl_mc_set_activity(jobj *activity);
@@ -157,7 +158,7 @@ static void *ui_main(void *arg)
     if (!init) return NULL;
     char files[600], obb[700], ext[700];
     snprintf(files, sizeof(files), "%s/files", G.data);
-    snprintf(obb, sizeof(obb), "%s/sdcard/Android/obb/%s", G.data, G.pkg);
+    tl_obb_folder(G.data, obb, sizeof(obb));
     snprintf(ext, sizeof(ext), "%s/sdcard/Android/data/%s/files", G.data, G.pkg);
     tl_log_line("minecraft: initializeNativeCode");
     G.handle = init(env, activity, tl_jni_new_string(files), tl_jni_new_string(obb), tl_jni_new_string(ext), tl_hle_assets(), NULL, tl_hle_config());

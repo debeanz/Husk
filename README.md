@@ -80,6 +80,11 @@ on inside), `.obb` files in the APK or an `.xapk`, and an `.obb` picked together
 with its APK. What is inside the APK is unpacked at the first start, which needs
 that much free space again.
 
+A game's OBB files are kept in one place, the `obb` folder in the game's own
+folder, and clearing its data leaves them alone. A Unity game built to keep its
+data in an OBB is recognised: its page says which file it needs, and **Add OBB
+File** there puts it in place under the name the game looks for.
+
 Several games can be picked at once: each becomes a game of its own, by its
 package name, and a base APK with its splits stays one.
 

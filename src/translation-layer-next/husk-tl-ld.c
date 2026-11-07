@@ -1875,18 +1875,29 @@ bool tl_ld_init(tl_lib *lib)
 }
 
 /* /proc/self/maps as an Android process would show its libraries: each image's code view and data view, named by its path in
- * the APK's library folder. What runs here never maps files itself, so this is the part a guest looks for. */
+ * the APK's library folder. What runs here never maps files itself, so this is the part a guest looks for.
+ *
+ * In address order, as the kernel's always is. Unity's stack walker (unwindstack, from Unity 2021 on) reads this again whenever it
+ * meets an address it does not know, and matches the new list against the old counting on that order. Out of order it keeps one entry
+ * and frees the next, which the first still points to, and then reads it: a crash the first time an error's stack is taken. */
 size_t tl_ld_describe_maps(char *buf, size_t n, const char *lib_dir)
 {
     size_t o = 0;
-    for (int i = 0; i < G.nlibs && o + 200 < n; i++) {
-        tl_lib *L = G.libs[i];
-        size_t span = L->npages * PAGE;
-        o += (size_t)snprintf(buf + o, n - o, "%012lx-%012lx r-xp 00000000 fd:00 %d %s/%s\n", (unsigned long)(uintptr_t)L->rx,
-                              (unsigned long)(uintptr_t)(L->rx + span), 1000 + i, lib_dir, L->name);
-        if (o + 200 < n)
-            o += (size_t)snprintf(buf + o, n - o, "%012lx-%012lx rw-p 00000000 fd:00 %d %s/%s\n", (unsigned long)(uintptr_t)L->rw,
-                                  (unsigned long)(uintptr_t)(L->rw + span), 1000 + i, lib_dir, L->name);
+    uintptr_t last = 0;
+    for (;;) {
+        int found = -1;
+        bool data = false;
+        uintptr_t at = UINTPTR_MAX;
+        for (int i = 0; i < G.nlibs; i++) {
+            uintptr_t code = (uintptr_t)G.libs[i]->rx, writable = (uintptr_t)G.libs[i]->rw;
+            if (code > last && code < at) { at = code; found = i; data = false; }
+            if (writable > last && writable < at) { at = writable; found = i; data = true; }
+        }
+        if (found < 0 || o + 200 >= n) break;
+        tl_lib *L = G.libs[found];
+        o += (size_t)snprintf(buf + o, n - o, "%012lx-%012lx %s 00000000 fd:00 %d %s/%s\n", (unsigned long)at,
+                              (unsigned long)(at + L->npages * PAGE), data ? "rw-p" : "r-xp", 1000 + found, lib_dir, L->name);
+        last = at;
     }
     if (o >= n) o = n - 1;
     buf[o] = 0;

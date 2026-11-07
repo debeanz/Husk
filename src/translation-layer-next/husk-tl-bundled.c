@@ -7,9 +7,10 @@
  *                        Their entries may be laid out as the app's folder (files/, shared_prefs/, data/data/<package>/, <package>/)
  *                        or shared storage (Android/obb/, Android/data/, sdcard/, storage/emulated/0/, obb/, a bare main.1.pkg.obb).
  *   OBBs in the APK      assets/...x.obb, Android/obb/..., obb/...: unpacked into the OBB folder.
- *   OBBs beside the APK  <the APK's folder>/obb/x.obb, out of an .xapk or added with the APK: hard-linked into the OBB folder.
  *
- * The OBB folder is Android's, <data>/sdcard/Android/obb/<package>, which is also what the game is told (getObbDir).
+ * The OBB folder is <the game's folder>/obb, the one place a game's OBBs are: where those out of an .xapk, added with the APK or added
+ * by hand go, what the game is told (getObbDir), and where Android's path for it leads (tl_path_resolve). It is not in the data
+ * folder, so that clearing the data or backing it up leaves the OBBs out.
  *
  * An asset of such a name is not always this. One that is not a ZIP, or a ZIP with nothing laid out as above, is the game's own
  * to read (through AAssetManager, as ever) and is left alone.
@@ -174,42 +175,58 @@ static void read_package(const tl_zip *apk)
 
 /* ---------------------------------------------------------------------- OBBs */
 
+/* A game's OBB folder, from its data folder: they sit side by side in the game's own folder. */
+void tl_obb_folder(const char *data_dir, char *out, size_t n)
+{
+    const char *slash = strrchr(data_dir, '/');
+    snprintf(out, n, "%.*s/obb", slash ? (int)(slash - data_dir) : 0, data_dir);
+}
+
+/*
+ * Android's OBB folder used to be kept under the data folder as well, holding a second name for each OBB beside the APK, which looked
+ * like a second copy. What is there moves to the one folder: a name the OBB folder already has was only that second name, and goes.
+ */
+static void retire_old_obb_folder(void)
+{
+    static bool done;
+    if (done || !g_pkg[0]) return;
+    done = true;
+    char old[1200], obb[1200];
+    if ((size_t)snprintf(old, sizeof(old), "%s/sdcard/Android/obb/%s", tl_data_dir(), g_pkg) >= sizeof(old)) return;
+    DIR *d = opendir(old);
+    if (!d) return;
+    tl_obb_folder(tl_data_dir(), obb, sizeof(obb));
+    make_dirs(obb, true);
+    struct dirent *ent;
+    while ((ent = readdir(d))) {
+        if (!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, "..")) continue;
+        char from[1600], to[1600];
+        snprintf(from, sizeof(from), "%s/%s", old, ent->d_name);
+        snprintf(to, sizeof(to), "%s/%s", obb, ent->d_name);
+        if (file_size(to) >= 0) unlink(from);
+        else if (rename(from, to) != 0) tl_log_line("bundled: cannot move %s to the OBB folder: %s", ent->d_name, strerror(errno));
+    }
+    closedir(d);
+    rmdir(old);
+    snprintf(old, sizeof(old), "%s/sdcard/Android/obb", tl_data_dir());
+    rmdir(old);
+}
+
 /* An OBB in the APK: unpacked into the OBB folder unless it is there already. False only if it could not be. */
 static bool place_obb(const tl_zip *apk, const tl_zip_entry *e, char *why, size_t whylen)
 {
     const char *base = base_name(e->name);
     if (!base[0] || !safe_name(base)) { tl_log_line("bundled: skipping %s, which points outside the app's folder", e->name); return true; }
     if (!g_pkg[0]) { tl_log_line("bundled: %s has no OBB folder to go in, as the APK names no package", e->name); return true; }
-    char to[1200], err[300] = "";
-    if ((size_t)snprintf(to, sizeof(to), "%s/sdcard/Android/obb/%s/%s", tl_data_dir(), g_pkg, base) >= sizeof(to)) { snprintf(why, whylen, "The path of %s is too long.", e->name); return false; }
+    char obb[1200], to[1600], err[300] = "";
+    tl_obb_folder(tl_data_dir(), obb, sizeof(obb));
+    if ((size_t)snprintf(to, sizeof(to), "%s/%s", obb, base) >= sizeof(to)) { snprintf(why, whylen, "The path of %s is too long.", e->name); return false; }
     if (file_size(to) == (long long)e->usize) return true;
     if (!has_room(e->usize, why, whylen)) return false;
     tl_log_line("bundled: unpacking %s (%.2f GB) into the OBB folder, which only happens once", e->name, e->usize / 1e9);
     make_dirs(to, false);
     if (!tl_zip_extract(apk, e, to, err, sizeof(err))) { snprintf(why, whylen, "Could not unpack the game's data: %s", err); return false; }
     return true;
-}
-
-/* OBBs beside the APK: linked, so that they take no second copy's worth of space, and are there again after the game's data is cleared. */
-static void link_loose_obbs(const char *apk_path)
-{
-    char dir[1200];
-    if (!apk_path || (size_t)snprintf(dir, sizeof(dir), "%.*sobb", (int)(base_name(apk_path) - apk_path), apk_path) >= sizeof(dir)) return;
-    DIR *d = opendir(dir);
-    if (!d) return;
-    struct dirent *ent;
-    while (g_pkg[0] && (ent = readdir(d))) {
-        if (!ends_with(ent->d_name, ".obb")) continue;
-        char from[1600], to[1600];
-        snprintf(from, sizeof(from), "%s/%s", dir, ent->d_name);
-        if ((size_t)snprintf(to, sizeof(to), "%s/sdcard/Android/obb/%s/%s", tl_data_dir(), g_pkg, ent->d_name) >= sizeof(to)) continue;
-        if (file_size(to) == file_size(from)) continue;
-        make_dirs(to, false);
-        unlink(to);
-        if (link(from, to) != 0 && symlink(from, to) != 0) tl_log_line("bundled: cannot put %s in the OBB folder: %s", ent->d_name, strerror(errno));
-        else tl_log_line("bundled: %s is in the OBB folder", ent->d_name);
-    }
-    closedir(d);
 }
 
 /* ------------------------------------------------------------- ZIPs of app data */
@@ -236,6 +253,9 @@ static bool is_zip(const tl_zip *apk, const tl_zip_entry *e)
     return ok;
 }
 
+/* The OBB folder, relative to the data folder beside it. */
+#define OBB_ROUTE "../obb/"
+
 /* Where an entry goes, relative to the data folder: what Android's paths for it are under Husk's. False if it does not fit `out`. */
 static bool route(const char *name, char *out, size_t n)
 {
@@ -248,15 +268,19 @@ static bool route(const char *name, char *out, size_t n)
     if (!app) { snprintf(pre, sizeof(pre), "data/user/0/%s/", g_pkg); app = g_pkg[0] && skip_prefix(&p, pre); }
     if (!app) { snprintf(pre, sizeof(pre), "%s/", g_pkg); app = g_pkg[0] && skip_prefix(&p, pre); }     /* or the OBB folder, zipped */
     /* A bare OBB, whichever of those it was in. */
-    if (!strchr(p, '/') && ends_with(p, ".obb")) return (size_t)snprintf(out, n, "sdcard/Android/obb/%s/%s", g_pkg, p) < n;
+    if (!strchr(p, '/') && ends_with(p, ".obb")) return (size_t)snprintf(out, n, OBB_ROUTE "%s", p) < n;
     if (app) return (size_t)snprintf(out, n, "%s", p) < n;
     /* Shared storage. */
-    if (skip_prefix(&p, "sdcard/") || skip_prefix(&p, "storage/emulated/0/") || !strncmp(p, "Android/", 8))
+    if (skip_prefix(&p, "sdcard/") || skip_prefix(&p, "storage/emulated/0/") || !strncmp(p, "Android/", 8)) {
+        /* This game's OBB folder is its own; another app's stays where that app would look. */
+        snprintf(pre, sizeof(pre), "Android/obb/%s/", g_pkg);
+        if (g_pkg[0] && skip_prefix(&p, pre)) return (size_t)snprintf(out, n, OBB_ROUTE "%s", p) < n;
         return (size_t)snprintf(out, n, "sdcard/%s", p) < n;
+    }
     if (skip_prefix(&p, "obb/")) {
         snprintf(pre, sizeof(pre), "%s/", g_pkg);
         if (g_pkg[0]) skip_prefix(&p, pre);
-        return (size_t)snprintf(out, n, "sdcard/Android/obb/%s/%s", g_pkg, p) < n;
+        return (size_t)snprintf(out, n, OBB_ROUTE "%s", p) < n;
     }
     return (size_t)snprintf(out, n, "%s", p) < n;
 }
@@ -264,7 +288,7 @@ static bool route(const char *name, char *out, size_t n)
 /* Whether a ZIP is laid out as app data at all. */
 static bool is_app_data(const tl_zip *z)
 {
-    static const char *const roots[] = { "files/", "shared_prefs/", "databases/", "no_backup/", "sdcard/" };
+    static const char *const roots[] = { "files/", "shared_prefs/", "databases/", "no_backup/", "sdcard/", OBB_ROUTE };
     for (size_t i = 0; i < z->count; i++) {
         char rel[1024];
         if (!safe_name(z->entries[i].name) || !route(z->entries[i].name, rel, sizeof(rel))) continue;
@@ -397,7 +421,7 @@ static enum kind classify(const char *name)
 static bool scan_apk(int index, const tl_zip *apk, char *why, size_t whylen)
 {
     if (!g_pkg[0]) read_package(apk);
-    link_loose_obbs(tl_ld_apk_path_at(index));
+    retire_old_obb_folder();
     for (size_t i = 0; i < apk->count; i++) {
         const tl_zip_entry *e = &apk->entries[i];
         enum kind k = classify(e->name);

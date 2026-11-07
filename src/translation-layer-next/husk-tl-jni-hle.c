@@ -23,6 +23,8 @@
 #include "husk-tl-ld.h"
 #include "husk-tl-dexindex.h"
 
+void tl_obb_folder(const char *data_dir, char *out, size_t n);
+
 /* ------------------------------------------------------------------ state */
 
 void tl_http_install(void);
@@ -1591,7 +1593,7 @@ void tl_hle_configure(const char *pkg, const char *apk, const char *data, int w,
     snprintf(H.cache, sizeof(H.cache), "%s/cache", data);
     snprintf(H.ext_files, sizeof(H.ext_files), "%s/sdcard/Android/data/%s/files", data, pkg);
     snprintf(H.ext_cache, sizeof(H.ext_cache), "%s/sdcard/Android/data/%s/cache", data, pkg);
-    snprintf(H.obb, sizeof(H.obb), "%s/sdcard/Android/obb/%s", data, pkg);
+    tl_obb_folder(data, H.obb, sizeof(H.obb));
     snprintf(H.native_lib, sizeof(H.native_lib), "/data/app/lib/arm64");
     H.width = w; H.height = h; H.density = 3.0f;
     H.version_name[0] = 0; H.version_code = 0;

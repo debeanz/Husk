@@ -145,6 +145,19 @@ int tl_synth_open(const char *path)
     return s ? synth_file(s) : -1;
 }
 
+/* Android/obb/<this game> leads to the game's one OBB folder, which is not under its data (tl_obb_folder). `rest` starts at /Android. */
+void tl_obb_folder(const char *data_dir, char *out, size_t n);
+static bool obb_path(const char *rest, char *buf, size_t n)
+{
+    static const char prefix[] = "/Android/obb/";
+    size_t pl = sizeof(prefix) - 1, kl = strlen(g_package);
+    if (!kl || strncmp(rest, prefix, pl) || strncmp(rest + pl, g_package, kl) || (rest[pl + kl] != '/' && rest[pl + kl] != 0)) return false;
+    char dir[1100];
+    tl_obb_folder(tl_data_dir(), dir, sizeof(dir));
+    snprintf(buf, n, "%s%s", dir, rest + pl + kl);
+    return true;
+}
+
 const char *tl_path_resolve(const char *path, char *buf, size_t n)
 {
     if (!path) return path;
@@ -161,9 +174,14 @@ const char *tl_path_resolve(const char *path, char *buf, size_t n)
     }
     if (!strncmp(path, "/sdcard", 7) || !strncmp(path, "/storage/emulated/0", 19)) {
         const char *rest = !strncmp(path, "/sdcard", 7) ? path + 7 : path + 19;
+        if (obb_path(rest, buf, n)) return buf;
         snprintf(buf, n, "%s/sdcard%s", tl_data_dir(), rest);
         return buf;
     }
+    /* The same, reached from the path of the game's external files. */
+    const char *data = tl_data_dir();
+    size_t dl = strlen(data);
+    if (!strncmp(path, data, dl) && !strncmp(path + dl, "/sdcard/", 8) && obb_path(path + dl + 7, buf, n)) return buf;
     return path;
 }
 

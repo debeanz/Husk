@@ -28,6 +28,7 @@ void tl_hle_configure(const char *pkg, const char *apk, const char *data, int w,
 void tl_hle_set_activity(jobj *a);
 jobj *tl_hle_assets(void);
 void tl_set_data_dir(const char *dir);
+void tl_obb_folder(const char *data_dir, char *out, size_t n);
 void tl_nwindow_configure(int w, int h, void *layer);
 void *tl_nwindow_get(void);
 void tl_ue4_hle_install(const char *pkg, const char *apk, const char *data, const char *ext_files);
@@ -479,7 +480,7 @@ bool tl_na_start(const tl_ga_config *cfg)
 
     snprintf(N.internal_dir, sizeof(N.internal_dir), "%s/files", N.data);
     snprintf(N.ext_dir, sizeof(N.ext_dir), "%s/sdcard/Android/data/%s/files", N.data, N.pkg);
-    snprintf(N.obb_dir, sizeof(N.obb_dir), "%s/sdcard/Android/obb/%s", N.data, N.pkg);
+    tl_obb_folder(N.data, N.obb_dir, sizeof(N.obb_dir));
     snprintf(N.obb_file, sizeof(N.obb_file), "%s/main.%d.%s.obb", N.obb_dir, OBB_VERSION, N.pkg);
     mkdirs(N.internal_dir); mkdirs(N.ext_dir); mkdirs(N.obb_dir);
 

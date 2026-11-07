@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/sysctl.h>
 #include <sys/utsname.h>
 #include <unistd.h>
@@ -697,7 +698,7 @@ const tl_bionic_entry tl_tab_core[] = {
 
 /* ----------------------------------------------------------------- lookup */
 
-static const tl_bionic_entry *const k_tables[] = { tl_tab_core, tl_tab_str, tl_tab_io, tl_tab_io2, tl_tab_str2, tl_tab_net, tl_tab_pthread, tl_tab_ndk, tl_tab_egl, tl_tab_cxx, tl_tab_opensles };
+static const tl_bionic_entry *const k_tables[] = { tl_tab_core, tl_tab_str, tl_tab_io, tl_tab_io2, tl_tab_str2, tl_tab_net, tl_tab_pthread, tl_tab_ndk, tl_tab_egl, tl_tab_cxx, tl_tab_opensles, tl_tab_xinput };
 
 typedef struct { const char *name; void *addr; } slot;
 static slot *g_slots;
@@ -753,5 +754,6 @@ bool tl_bionic_is_system_lib(const char *soname)
         "libGLESv2.so", "libGLESv3.so", "libz.so", "libmediandk.so", "libOpenSLES.so", "libaaudio.so",
         "libvulkan.so", "libnativewindow.so", "libjnigraphics.so", "libcamera2ndk.so", "libstdc++.so", NULL };
     for (int i = 0; sys[i]; i++) if (!strcmp(sys[i], soname)) return true;
-    return false;
+    /* Windows' controller library, under any of the names a port of a PC game tries: husk-tl-gamepad.c answers for it. */
+    return !strncasecmp(!strncmp(soname, "lib", 3) ? soname + 3 : soname, "xinput", 6);
 }
