@@ -144,18 +144,45 @@ static void CL_findClass(tl_jcall *c)
  */
 #include <unistd.h>
 #include "husk-tl-ld.h"
+static void log_engine_text(const char *what, const uint16_t *text)         /* TCHAR is UTF-16 on Android */
+{
+    char msg[1200]; size_t k = 0;
+    for (size_t i = 0; text[i] && i < 16384 && k + 1 < sizeof(msg); i++)
+        msg[k++] = text[i] >= 0x20 && text[i] < 0x7f ? (char)text[i] : text[i] < 0x20 ? ' ' : '?';     /* line breaks as spaces: one log line */
+    msg[k] = 0;
+    tl_log_line("ue4: %s: %s", what, msg);
+}
+/*
+ * An engine stripped of its symbols has no name for GErrorHist. It is still in the library's data, as text: the longest few runs of it are shown, the error among
+ * them. Static settings are short by comparison, and the program is ending, so the time to look through all of it does not matter.
+ */
+static void log_longest_texts(const tl_lib *lib)
+{
+    enum { KEEP = 4, AT_LEAST = 24 };
+    const uint8_t *start; size_t bytes;
+    if (!tl_ld_data_range(lib, &start, &bytes)) return;
+    const uint16_t *w = (const uint16_t *)(start + ((uintptr_t)start & 1));
+    size_t n = bytes / 2, run = 0;
+    const uint16_t *best[KEEP] = { NULL }; size_t len[KEEP] = { 0 };
+    for (size_t i = 0; i < n; i++) {
+        uint16_t ch = w[i];
+        if ((ch >= 0x20 && ch < 0x7f) || ch == '\n' || ch == '\r' || ch == '\t') { run++; continue; }
+        if (!ch && run >= AT_LEAST) {
+            int slot = 0;
+            for (int s = 1; s < KEEP; s++) if (len[s] < len[slot]) slot = s;
+            if (run > len[slot]) { len[slot] = run; best[slot] = w + i - run; }
+        }
+        run = 0;
+    }
+    for (int s = 0; s < KEEP; s++) if (best[s]) log_engine_text("text in the engine's data", best[s]);
+}
 static void GA_forceQuit(tl_jcall *c)
 {
     (void)c;
     tl_lib *ue = tl_ld_find_lib(tl_ue_lib_name());
-    const uint16_t *hist = ue ? (const uint16_t *)tl_ld_sym(ue, "GErrorHist") : NULL;      /* TCHAR is UTF-16 on Android */
-    if (hist && hist[0]) {
-        char msg[1200]; size_t k = 0;
-        for (size_t i = 0; hist[i] && i < 16384 && k + 1 < sizeof(msg); i++)
-            msg[k++] = hist[i] >= 0x20 && hist[i] < 0x7f ? (char)hist[i] : hist[i] < 0x20 ? ' ' : '?';     /* line breaks as spaces: one log line */
-        msg[k] = 0;
-        tl_log_line("ue4: the engine's error: %s", msg);
-    }
+    const uint16_t *hist = ue ? (const uint16_t *)tl_ld_sym(ue, "GErrorHist") : NULL;
+    if (hist && hist[0]) log_engine_text("the engine's error", hist);
+    else if (ue && !hist) log_longest_texts(ue);
     tl_log_line("ue4: the engine asked to quit (AndroidThunkJava_ForceQuit). Called from:");
     void **fp = __builtin_frame_address(0);
     for (int i = 0; fp && i < 28; i++) {

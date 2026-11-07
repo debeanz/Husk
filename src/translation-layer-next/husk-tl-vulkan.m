@@ -406,4 +406,47 @@ void *tl_vk_resolve(const char *name)
     return V.lib ? dlsym(V.lib, name) : NULL;
 }
 
+/*
+ * Google's frame pacer, libswappy, which a game's setting can put between it and vkQueuePresentKHR. The real one is built on Android's Choreographer and display
+ * timing, which are not here: its present reported an error at the first frame, and Unreal Engine 5 quits on an error it does not know. Frames are paced here
+ * already (w_vkQueuePresentKHR), so this one only presents. Everything it has no reason to do answers zero: nothing to do, nothing to report.
+ */
+int tl_frame_hz(void);         /* the frame rate games are held to, 60 or 120 (husk-tl-egl.c) */
+static bool g_own_swappy;
+void tl_vk_stand_in_for_swappy(bool on) { g_own_swappy = on; }
+bool tl_vk_stands_in_for_swappy(void) { return g_own_swappy; }
+
+static void swappy_determineDeviceExtensions(void *physical, uint32_t available_count, void *available, uint32_t *required_count, char **required)
+{
+    (void)physical; (void)available_count; (void)available; (void)required;
+    if (required_count) *required_count = 0;
+}
+static bool swappy_initAndGetRefreshCycleDuration(void *env, void *activity, void *physical, void *device, uint64_t swapchain, uint64_t *duration)
+{
+    (void)env; (void)activity; (void)physical; (void)device; (void)swapchain;
+    if (duration) *duration = 1000000000ull / (uint64_t)tl_frame_hz();
+    return true;
+}
+static uint64_t swappy_getSwapIntervalNS(uint64_t swapchain) { (void)swapchain; return 1000000000ull / (uint64_t)tl_frame_hz(); }
+static bool swappy_isEnabled(uint64_t swapchain, bool *enabled) { (void)swapchain; if (enabled) *enabled = false; return true; }
+static uint32_t swappy_version(void) { return (1u << 16) | 10u; }
+static const char *swappy_versionString(void) { return "Husk"; }
+static long swappy_nothing(void) { return 0; }
+
+void *tl_vk_swappy(const char *name)
+{
+    static const struct { const char *name; void *fn; } own[] = {
+        { "SwappyVk_queuePresent", w_vkQueuePresentKHR },
+        { "SwappyVk_determineDeviceExtensions", swappy_determineDeviceExtensions },
+        { "SwappyVk_initAndGetRefreshCycleDuration", swappy_initAndGetRefreshCycleDuration },
+        { "SwappyVk_getSwapIntervalNS", swappy_getSwapIntervalNS },
+        { "SwappyVk_isEnabled", swappy_isEnabled },
+        { "Swappy_version", swappy_version },
+        { "Swappy_versionString", swappy_versionString },
+    };
+    if (!g_own_swappy || strncmp(name, "Swappy", 6)) return NULL;
+    for (size_t i = 0; i < sizeof(own) / sizeof(own[0]); i++) if (!strcmp(own[i].name, name)) return own[i].fn;
+    return swappy_nothing;
+}
+
 unsigned long tl_vk_frames_presented(void) { return atomic_load(&V.frames); }

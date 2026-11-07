@@ -525,6 +525,8 @@ static void dl_fail(const char *fmt, const char *arg)
     t_dlerr_set = true;
 }
 
+bool tl_vk_stands_in_for_swappy(void);
+void *tl_vk_swappy(const char *name);
 static void *bionic_dlopen(const char *path, int flags)
 {
     if (!path) return &g_sys_handle[0];          /* the global namespace */
@@ -538,7 +540,7 @@ static void *bionic_dlopen(const char *path, int flags)
         return L;
     }
     if (!strcmp(base, "libvulkan.so") && !tl_vk_available()) { dl_fail("dlopen failed: library \"%s\" not found", path); return NULL; }
-    if (tl_bionic_is_system_lib(base)) {
+    if (tl_bionic_is_system_lib(base) || (!strcmp(base, "libswappy.so") && tl_vk_stands_in_for_swappy())) {
         for (int i = 0; i < g_nsys; i++) if (!strcmp(g_sys_names[i], base)) return &g_sys_handle[i + 1];
         if (g_nsys < 15) {
             snprintf(g_sys_names[g_nsys], 48, "%s", base); g_nsys++;
@@ -585,6 +587,7 @@ static void *bionic_dlsym(void *handle, const char *name)
         if (!r && ndk_name(name)) note_unprovided(name, " (looked up everywhere)");
     } else if ((sysh *)handle >= g_sys_handle && (sysh *)handle < g_sys_handle + 16) {
         r = tl_bionic_find(name);
+        if (!r) r = tl_vk_swappy(name);
         if (!r) note_unprovided(name, "");
     } else {
         r = tl_ld_sym_scope((tl_lib *)handle, name);

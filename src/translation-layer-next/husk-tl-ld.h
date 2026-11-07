@@ -80,6 +80,8 @@ tl_lib *tl_ld_lib_of(const void *addr);
 void *tl_ld_lib_base(const tl_lib *lib);
 /* A library's code: where it starts, in the view that runs, and how many bytes. */
 bool tl_ld_code_range(const tl_lib *lib, const uint8_t **start, size_t *bytes);
+/* A library's writable data and zeroed memory, the last such segment: where it starts and how many bytes. */
+bool tl_ld_data_range(const tl_lib *lib, const uint8_t **start, size_t *bytes);
 const char *tl_ld_lib_name(const tl_lib *lib);
 const char *tl_ld_symbol_at(const void *addr, const char **lib_name, const void **sym_addr);
 /* /proc/self/maps lines for the loaded libraries, named as files in `lib_dir`. */

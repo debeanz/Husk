@@ -25,6 +25,11 @@ void tl_vk_configure(const char *path, const char *frame_dir, int frame_every);
 /* The address of a Vulkan function by name (what the guest's dlsym on libvulkan.so, and vkGetInstanceProcAddr, return), or NULL. */
 void *tl_vk_resolve(const char *name);
 
+/* Husk's own libswappy for this game, in place of the one in its APK; and, when it is on, the address of one of its functions by name. */
+void tl_vk_stand_in_for_swappy(bool on);
+bool tl_vk_stands_in_for_swappy(void);
+void *tl_vk_swappy(const char *name);
+
 /* True once tl_vk_configure has named a MoltenVK that loads. Without one the guest is told libvulkan.so does not exist, and games fall back to OpenGL ES. */
 bool tl_vk_available(void);
 

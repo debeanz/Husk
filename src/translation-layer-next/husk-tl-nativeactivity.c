@@ -511,6 +511,7 @@ bool tl_na_start(const tl_ga_config *cfg)
         tl_egl_es31_shim(true);
         choose_api();
         tl_egl_offscreen_windows(N.vulkan);       /* with Vulkan, the layer is Vulkan's and GL draws off-screen */
+        tl_vk_stand_in_for_swappy(N.ue5 && N.vulkan);
     }
     if (cfg->angle_egl && !tl_egl_init(cfg->angle_egl, cfg->angle_gles, cfg->frame_dir, cfg->frame_every)) return false;
     tl_jni_init();
