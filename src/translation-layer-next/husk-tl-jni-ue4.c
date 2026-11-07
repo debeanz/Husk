@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * The Java side of an Unreal Engine 4 game, implemented in C: the methods of com.epicgames.ue4.GameActivity that the engine calls through JNI
+ * The Java side of an Unreal Engine game, implemented in C: the methods of com.epicgames.ue4.GameActivity that the engine calls through JNI
  * (AndroidThunkJava_*), for the facts it asks for at start-up. A method with no implementation here logs once and returns zero, which is
- * what most of them (notifications, purchases, Google sign-in) want.
+ * what most of them (notifications, purchases, Google sign-in) want. Unreal Engine 5 has the same class as com.epicgames.unreal.GameActivity.
  */
 #define _DARWIN_C_SOURCE
 #include "husk-tl-jni.h"
@@ -27,6 +27,26 @@ static const char *S(const jobj *o) { const char *s = tl_jni_string(o); return s
 #define CLS "com/epicgames/ue4/GameActivity"
 
 static struct { char pkg[160], data[512], ext[700], apk[1024]; jobj *activity; } U;
+
+/* Unreal Engine 5: the library is libUnreal.so, and the engine's Java is under com/epicgames/unreal. */
+static bool g_ue5;
+void tl_ue_set_five(bool on) { g_ue5 = on; }
+const char *tl_ue_lib_name(void) { return g_ue5 ? "libUnreal.so" : "libUE4.so"; }
+
+/* A class name or a method's signature as the running engine has it. Kept for good: the tables hold on to them. */
+static const char *java_name(const char *s)
+{
+    static const char ue4[] = "com/epicgames/ue4/", ue5[] = "com/epicgames/unreal/";
+    if (!g_ue5 || !s || !strstr(s, ue4)) return s;
+    char *out = malloc(strlen(s) * 2 + 1);
+    size_t k = 0;
+    for (const char *p = s; *p;) {
+        if (!strncmp(p, ue4, sizeof(ue4) - 1)) { memcpy(out + k, ue5, sizeof(ue5) - 1); k += sizeof(ue5) - 1; p += sizeof(ue4) - 1; }
+        else out[k++] = *p++;
+    }
+    out[k] = 0;
+    return out;
+}
 
 /*
  * <meta-data> of the manifest, which the engine reads through GetMetaData*: the project's settings as the packager recorded them.
@@ -69,7 +89,13 @@ const char *tl_ue4_meta(const char *key)
     }
     const char *m = tl_hle_manifest_meta(key);
     if (m) return m;
-    for (size_t i = 0; i < sizeof(k_meta) / sizeof(k_meta[0]); i++) if (!strcmp(key, k_meta[i].key)) return k_meta[i].value;
+    /* The same setting under the other engine's package: the driver asks by one name, the fallbacks below have one, a manifest has the engine's own. */
+    static const char ue4[] = "com.epicgames.ue4.GameActivity.", ue5[] = "com.epicgames.unreal.GameActivity.";
+    char other[200] = "";
+    if (!strncmp(key, ue4, sizeof(ue4) - 1)) snprintf(other, sizeof(other), "%s%s", ue5, key + sizeof(ue4) - 1);
+    else if (!strncmp(key, ue5, sizeof(ue5) - 1)) snprintf(other, sizeof(other), "%s%s", ue4, key + sizeof(ue5) - 1);
+    if (other[0] && (m = tl_hle_manifest_meta(other))) return m;
+    for (size_t i = 0; i < sizeof(k_meta) / sizeof(k_meta[0]); i++) if (!strcmp(key, k_meta[i].key) || !strcmp(other, k_meta[i].key)) return k_meta[i].value;
     return NULL;
 }
 #define meta tl_ue4_meta
@@ -109,7 +135,7 @@ static void CL_findClass(tl_jcall *c)
 static void GA_forceQuit(tl_jcall *c)
 {
     (void)c;
-    tl_lib *ue = tl_ld_find_lib("libUE4.so");
+    tl_lib *ue = tl_ld_find_lib(tl_ue_lib_name());
     const uint16_t *hist = ue ? (const uint16_t *)tl_ld_sym(ue, "GErrorHist") : NULL;      /* TCHAR is UTF-16 on Android */
     if (hist && hist[0]) {
         char msg[1200]; size_t k = 0;
@@ -140,10 +166,10 @@ static void GA_forceQuit(tl_jcall *c)
 static void GA_initHMDs(tl_jcall *c)
 {
     (void)c;
-    tl_lib *lib = tl_ld_find_lib("libUE4.so");
-    void (*fn)(void *, void *) = lib ? (void (*)(void *, void *))tl_ld_sym(lib, "Java_com_epicgames_ue4_GameActivity_nativeInitHMDs") : NULL;
+    tl_lib *lib = tl_ld_find_lib(tl_ue_lib_name());
+    void (*fn)(void *, void *) = lib ? (void (*)(void *, void *))tl_ld_sym(lib, g_ue5 ? "Java_com_epicgames_unreal_GameActivity_nativeInitHMDs" : "Java_com_epicgames_ue4_GameActivity_nativeInitHMDs") : NULL;
     if (fn) fn(tl_jni_env(), U.activity);
-    else tl_log_line("ue4: nativeInitHMDs is not provided by libUE4");
+    else tl_log_line("ue4: nativeInitHMDs is not provided by %s", tl_ue_lib_name());
 }
 
 /* com.epicgames.mobile.eossdk.EOSSDK: the statics Epic Online Services' native library calls while it starts */
@@ -317,7 +343,9 @@ static void GA_inputDeviceInfo(tl_jcall *c)
 {
     int id = c->args[0].i;
     jobj *dev = tl_input_device_object(id);
-    jobj *info = tl_jni_new_object(tl_jni_class("com/epicgames/ue4/GameActivity$InputDeviceInfo"));
+    static const char *info_class;
+    if (!info_class) info_class = java_name("com/epicgames/ue4/GameActivity$InputDeviceInfo");
+    jobj *info = tl_jni_new_object(tl_jni_class(info_class));
     jvalue vendor = vi(0), product = vi(0), controller = vi(-1), name, descriptor;
     name.j = 0; descriptor.j = 0;
     if (dev) {
@@ -392,7 +420,7 @@ static void ue_fname(const void *fname, char *out, size_t n)
     static void (*to_string)(const void *, void *);
     static void (*mem_free)(void *);
     if (!to_string) {
-        tl_lib *ue = tl_ld_find_lib("libUE4.so");
+        tl_lib *ue = tl_ld_find_lib(tl_ue_lib_name());
         mem_free = ue ? (void (*)(void *))tl_ld_sym(ue, "_ZN7FMemory4FreeEPv") : NULL;
         to_string = ue ? (void (*)(const void *, void *))tl_ld_sym(ue, "_ZNK5FName8ToStringER7FString") : NULL;
     }
@@ -433,7 +461,7 @@ static void watch_hit(unsigned i, uint64_t *regs)
     }
     case TW_TOP: {
         static void *(*top)(void *);
-        if (!top) { tl_lib *ue = tl_ld_find_lib("libUE4.so"); top = ue ? (void *(*)(void *))tl_ld_sym(ue, "_ZNK17UAtlasMenuManager3TopEv") : NULL; }
+        if (!top) { tl_lib *ue = tl_ld_find_lib(tl_ue_lib_name()); top = ue ? (void *(*)(void *))tl_ld_sym(ue, "_ZNK17UAtlasMenuManager3TopEv") : NULL; }
         char cls[120] = "?";
         if (top && regs[0]) ue_class_of(top((void *)(uintptr_t)regs[0]), cls, sizeof(cls));
         snprintf(what, sizeof(what), " (on top: %s)", cls);
@@ -465,7 +493,7 @@ static bool pc_relative(uint32_t i)
 
 void tl_ue4_watch(void)
 {
-    tl_lib *ue = tl_ld_find_lib("libUE4.so");
+    tl_lib *ue = tl_ld_find_lib(tl_ue_lib_name());
     if (!ue) return;
     int n = 0;
     for (unsigned i = 0; i < WATCHED; i++) {
@@ -476,7 +504,46 @@ void tl_ue4_watch(void)
     if (n) tl_log_line("ue4: watching %d of the game's start-up functions", n);
 }
 
+/* What Unreal Engine 5 asks that an older one did not. Its settings in SharedPreferences are not kept: each read gets the default it passes. */
+static void GA_prefString(tl_jcall *c) { c->ret = vl(c->args[2].l ? tl_jni_ref(c->args[2].l) : NULL); }
+static void GA_prefInt(tl_jcall *c) { c->ret = vi(c->args[2].i); }
+static void GA_prefBool(tl_jcall *c) { c->ret = vz(c->args[2].z); }
+static void GA_cacheDir(tl_jcall *c)
+{
+    char path[640];
+    snprintf(path, sizeof(path), "%s/cache", U.data);
+    c->ret = vl(tl_jni_new_string(path));
+}
+
 #define M_(c, n, s, f) { c, n, s, f }
+static const tl_jhle k_hle5[] = {
+    M_(CLS, "AndroidThunkJava_GetCacheDir", "()Ljava/lang/String;", GA_cacheDir),
+    M_(CLS, "AndroidThunkJava_GetSharedPreferenceString", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;", GA_prefString),
+    M_(CLS, "AndroidThunkJava_GetSharedPreferenceInt", "(Ljava/lang/String;Ljava/lang/String;I)I", GA_prefInt),
+    M_(CLS, "AndroidThunkJava_GetSharedPreferenceBoolean", "(Ljava/lang/String;Ljava/lang/String;Z)Z", GA_prefBool),
+    M_(CLS, "AndroidThunkJava_HasSharedPreference", "(Ljava/lang/String;Ljava/lang/String;)Z", GA_false),
+    /* Separate processes that compile shaders ahead of time: there are none, and the engine must not wait for them. */
+    M_(CLS, "AndroidThunkJava_HaveServicesFailed", "()Z", GA_true),
+    M_(CLS, "AndroidThunkJava_AreProgramServicesReady", "()Z", GA_false),
+    M_(CLS, "AndroidThunkJava_SetNativeDisplayRefreshRate", "(I)Z", GA_true),
+    { NULL, NULL, NULL, NULL }
+};
+
+/* A table of methods under the names the running engine has for them. */
+static const tl_jhle *for_this_engine(const tl_jhle *table)
+{
+    if (!g_ue5) return table;
+    size_t n = 0;
+    while (table[n].cls) n++;
+    tl_jhle *t = calloc(n + 1, sizeof(*t));
+    for (size_t i = 0; i < n; i++) {
+        t[i] = table[i];
+        t[i].cls = java_name(table[i].cls);
+        t[i].sig = java_name(table[i].sig);
+    }
+    return t;
+}
+
 static const tl_jhle k_hle[] = {
     M_(CLS, "AndroidThunkJava_HasMetaDataKey", "(Ljava/lang/String;)Z", GA_hasMeta),
     M_(CLS, "AndroidThunkJava_GetMetaDataString", "(Ljava/lang/String;)Ljava/lang/String;", GA_metaString),
@@ -558,11 +625,12 @@ void tl_ue4_hle_install(const char *pkg, const char *apk, const char *data, cons
     snprintf(U.data, sizeof(U.data), "%s", data);
     snprintf(U.ext, sizeof(U.ext), "%s", ext_files);
     tl_jni_declare("android/app/NativeActivity", "android/app/Activity");
-    tl_jni_declare(CLS, "android/app/NativeActivity");
-    tl_jni_declare("com/epicgames/ue4/GameApplication", "android/app/Application");
+    tl_jni_declare(java_name(CLS), "android/app/NativeActivity");
+    tl_jni_declare(java_name("com/epicgames/ue4/GameApplication"), "android/app/Application");
     tl_jni_declare("java/lang/Boolean", "java/lang/Object");
-    tl_jni_declare("com/epicgames/ue4/GameActivity$InputDeviceInfo", "java/lang/Object");
-    tl_jni_register_hle(k_hle);
+    tl_jni_declare(java_name("com/epicgames/ue4/GameActivity$InputDeviceInfo"), "java/lang/Object");
+    tl_jni_register_hle(for_this_engine(k_hle));
+    if (g_ue5) tl_jni_register_hle(for_this_engine(k_hle5));
     /* The enum constants EOS reads off EOSOverlay.BrowserStatus: with no class initialiser to run they would be null, which it takes as a broken SDK. */
     static const char *const status[] = { "BEGIN_LOAD", "CLOSED", "CRASHED", "END_LOAD", "LOAD_ERROR" };
     for (size_t i = 0; i < sizeof(status) / sizeof(status[0]); i++) {

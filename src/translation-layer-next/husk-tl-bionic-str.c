@@ -512,6 +512,12 @@ static int b_strerror_r(int e, char *buf, size_t n)
     int r = strerror_r(tl_errno_from_guest(e), buf, n);
     return r ? tl_errno_to_guest(r) : 0;
 }
+/* The GNU form: a pointer to the text, which is in the buffer. */
+static char *b___gnu_strerror_r(int e, char *buf, size_t n)
+{
+    strerror_r(tl_errno_from_guest(e), buf, n);
+    return buf;
+}
 static const char *b_strsignal(int sig)
 {
     static __thread char buf[32];
@@ -561,7 +567,7 @@ const tl_bionic_entry tl_tab_str[] = {
     TL_DIRECT(strcspn), TL_DIRECT(strdup), TL_DIRECT(strlcpy), TL_DIRECT(strlcat), TL_DIRECT(strlen), TL_DIRECT(strncmp),
     TL_DIRECT(strncpy), TL_DIRECT(strnlen), TL_DIRECT(strpbrk), TL_DIRECT(strrchr), TL_DIRECT(strspn),
     TL_DIRECT(strstr), TL_DIRECT(strtok_r), TL_DIRECT(strxfrm), TL_DIRECT(strxfrm_l),
-    TL_WRAP("strerror", b_strerror), TL_WRAP("strerror_r", b_strerror_r), TL_WRAP("strsignal", b_strsignal),
+    TL_WRAP("strerror", b_strerror), TL_WRAP("strerror_r", b_strerror_r), TL_WRAP("__gnu_strerror_r", b___gnu_strerror_r), TL_WRAP("strsignal", b_strsignal),
     TL_WRAP("basename", b_basename),
     TL_WRAP("__memcpy_chk", b___memcpy_chk), TL_WRAP("__memmove_chk", b___memmove_chk), TL_WRAP("__memset_chk", b___memset_chk),
     TL_WRAP("__strlen_chk", b___strlen_chk), TL_WRAP("__strchr_chk", b___strchr_chk), TL_WRAP("__strncat_chk", b___strncat_chk),

@@ -1874,6 +1874,18 @@ bool tl_ld_init(tl_lib *lib)
     return ok;
 }
 
+bool tl_ld_code_range(const tl_lib *lib, const uint8_t **start, size_t *bytes)
+{
+    for (unsigned i = 0; lib && i < lib->phnum; i++) {
+        const elf_phdr *p = &lib->phdr[i];
+        if (p->p_type != 1 /* PT_LOAD */ || !(p->p_flags & 1 /* PF_X */)) continue;
+        *start = lib->rx + (p->p_vaddr - lib->base_vaddr);
+        *bytes = p->p_filesz;
+        return true;
+    }
+    return false;
+}
+
 /* /proc/self/maps as an Android process would show its libraries: each image's code view and data view, named by its path in
  * the APK's library folder. What runs here never maps files itself, so this is the part a guest looks for.
  *

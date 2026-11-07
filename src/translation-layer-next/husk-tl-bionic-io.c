@@ -1524,6 +1524,8 @@ static int poll_devices_via_select(struct pollfd *fds, unsigned long n, int r)
     }
     return r;
 }
+static int b_poll(struct pollfd *fds, unsigned long n, int timeout);
+static int b___poll_chk(struct pollfd *fds, unsigned long n, int timeout, size_t fds_len) { (void)fds_len; return b_poll(fds, n, timeout); }
 static int b_poll(struct pollfd *fds, unsigned long n, int timeout)
 {
     TL_ERRNO_BEGIN(); int r = poll(fds, (nfds_t)n, timeout); TL_ERRNO_END();
@@ -1591,7 +1593,7 @@ const tl_bionic_entry tl_tab_io[] = {
     TL_WRAP("sigaction", b_sigaction), TL_WRAP("signal", b_signal), TL_WRAP("sigemptyset", b_sigemptyset),
     TL_WRAP("sigfillset", b_sigfillset), TL_WRAP("sigaddset", b_sigaddset), TL_WRAP("sigdelset", b_sigdelset),
     TL_WRAP("sigsuspend", b_sigsuspend), TL_WRAP("sigaltstack", b_sigaltstack), TL_WRAP("raise", b_raise),
-    TL_WRAP("poll", b_poll), TL_WRAP("select", b_select), TL_WRAP("__FD_SET_chk", b___FD_SET_chk),
+    TL_WRAP("poll", b_poll), TL_WRAP("__poll_chk", b___poll_chk), TL_WRAP("select", b_select), TL_WRAP("__FD_SET_chk", b___FD_SET_chk),
     TL_WRAP("__FD_ISSET_chk", b___FD_ISSET_chk), TL_WRAP("__cmsg_nxthdr", b___cmsg_nxthdr),
     TL_WRAP("epoll_create1", b_epoll_create1), TL_WRAP("epoll_ctl", b_epoll_ctl), TL_WRAP("epoll_wait", b_epoll_wait),
     TL_WRAP("eventfd", b_eventfd), TL_WRAP("inotify_init", b_inotify_init), TL_WRAP("inotify_add_watch", b_inotify_add_watch),

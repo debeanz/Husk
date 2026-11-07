@@ -35,8 +35,11 @@ void tl_ue4_hle_install(const char *pkg, const char *apk, const char *data, cons
 void tl_ue4_watch(void);
 void tl_ue4_set_activity(jobj *activity);
 const char *tl_ue4_meta(const char *key);
+void tl_ue_set_five(bool on);
+const char *tl_ue_lib_name(void);
+void tl_ue_fit_allocator(tl_lib *lib);
 
-#define CLS "com/epicgames/ue4/GameActivity"
+#define CLS (N.ue5 ? "com/epicgames/unreal/GameActivity" : "com/epicgames/ue4/GameActivity")
 
 /* android/native_activity.h */
 typedef struct ANativeActivity ANativeActivity;
@@ -71,11 +74,13 @@ struct ANativeActivity {
 static struct {
     tl_ga_config cfg;
     char apk[1024], data[512], pkg[128], frame_dir[512], angle_egl[600], angle_gles[600];
-    char internal_dir[600], ext_dir[700], obb_dir[800], obb_file[900];
+    char internal_dir[600], ext_dir[700], obb_dir[800], obb_file[900], patch_file[900];
     jobj *activity;
     ANativeActivity na;
     ANativeActivityCallbacks callbacks;
-    bool generic;                          /* a NativeActivity game of its own (no libUE4): nothing of Unreal is set up for it */
+    bool generic;                          /* a NativeActivity game of its own (no Unreal library): nothing of Unreal is set up for it */
+    bool ue5;                              /* Unreal Engine 5: libUnreal.so, and its Java under com.epicgames.unreal */
+    bool has_patch;                        /* the APK carries a second OBB, assets/patch.obb.png */
     bool vulkan, gl_only;                  /* Unreal: Vulkan (MoltenVK), or OpenGL ES because the game has shaders for nothing else */
     char main_lib[64];                     /* the library that exports ANativeActivity_onCreate */
     void *window;
@@ -264,7 +269,7 @@ static bool redirect(tl_lib *lib, const char *symbol, void *to)
 
 static void answer_play_core(void)
 {
-    tl_lib *ue = tl_ld_find_lib("libUE4.so");
+    tl_lib *ue = tl_ld_find_lib(tl_ue_lib_name());
     if (!ue || !g_npack_files) return;
     static const struct { const char *sym; void *fn; } k_pad[] = {
         { "AssetPackManager_init", (void *)pad_init }, { "AssetPackManager_destroy", (void *)pad_destroy },
@@ -338,17 +343,19 @@ static void choose_api(void)
 }
 
 /* A native of GameActivity: registered by the library, or found by its JNI name. */
-static void *native_of(const char *name, const char *sig, const char *mangled)
+static void *native_of(const char *name, const char *sig)
 {
     void *fn = tl_jni_native(CLS, name, sig);
     if (!fn) {
-        tl_lib *lib = tl_ld_find_lib("libUE4.so");
+        tl_lib *lib = tl_ld_find_lib(tl_ue_lib_name());
+        char mangled[160];
+        snprintf(mangled, sizeof(mangled), "Java_com_epicgames_%s_GameActivity_%s", N.ue5 ? "unreal" : "ue4", name);
         if (lib) fn = tl_ld_sym(lib, mangled);
     }
-    if (!fn) tl_log_line("ue4: native %s%s is not provided by libUE4", name, sig);
+    if (!fn) tl_log_line("ue4: native %s%s is not provided by %s", name, sig, tl_ue_lib_name());
     return fn;
 }
-#define NATIVE(name, sig) native_of(name, sig, "Java_com_epicgames_ue4_GameActivity_" name)
+#define NATIVE(name, sig) native_of(name, sig)
 
 
 /*
@@ -482,6 +489,7 @@ bool tl_na_start(const tl_ga_config *cfg)
     snprintf(N.ext_dir, sizeof(N.ext_dir), "%s/sdcard/Android/data/%s/files", N.data, N.pkg);
     tl_obb_folder(N.data, N.obb_dir, sizeof(N.obb_dir));
     snprintf(N.obb_file, sizeof(N.obb_file), "%s/main.%d.%s.obb", N.obb_dir, OBB_VERSION, N.pkg);
+    snprintf(N.patch_file, sizeof(N.patch_file), "%s/patch.%d.%s.obb", N.obb_dir, OBB_VERSION, N.pkg);
     mkdirs(N.internal_dir); mkdirs(N.ext_dir); mkdirs(N.obb_dir);
 
     tl_set_data_dir(cfg->data_dir);
@@ -493,8 +501,12 @@ bool tl_na_start(const tl_ga_config *cfg)
         g_hades = true;
         return tl_hades_start(&N.cfg);
     }
-    N.generic = !tl_ld_has_lib("libUE4.so");
+    N.ue5 = !tl_ld_has_lib("libUE4.so") && tl_ld_has_lib("libUnreal.so");
+    tl_ue_set_five(N.ue5);
+    N.generic = !tl_ld_has_lib("libUE4.so") && !N.ue5;
     if (!N.generic) {
+        unsigned long long po = 0, ps = 0;
+        N.has_patch = stored_range(N.apk, "assets/patch.obb.png", &po, &ps);
         tl_egl_es31_shim(true);
         choose_api();
         tl_egl_offscreen_windows(N.vulkan);       /* with Vulkan, the layer is Vulkan's and GL draws off-screen */
@@ -517,16 +529,19 @@ bool tl_na_start(const tl_ga_config *cfg)
     tl_ue4_set_activity(N.activity);
 
     /* GameActivity's static initialiser, and NativeActivity's loading of the library its manifest names. */
-    static const char *const libs[] = { "c++_shared", "EOSSDK", "UE4", NULL };
+    const char *const libs[] = { "c++_shared", "EOSSDK", N.ue5 ? "Unreal" : "UE4", NULL };
+    /* Loaded and not started, so that its allocator can be made to fit before its first constructor asks it for memory. */
+    if (N.ue5) { tl_lib *five = tl_ld_load(tl_ue_lib_name()); if (five) tl_ue_fit_allocator(five); }
     for (int i = 0; libs[i]; i++) {
         if (!strcmp(libs[i], "EOSSDK") && !tl_ld_has_lib("libEOSSDK.so")) continue;      /* Epic Online Services: only the games that use it ship it */
+        if (!strcmp(libs[i], "c++_shared") && N.ue5 && !tl_ld_has_lib("libc++_shared.so")) continue;      /* Unreal Engine 5 builds it in */
         load_library(libs[i]);
         if (tl_jni_pending()) { tl_log_line("ue4: loading lib%s.so failed", libs[i]); return false; }
     }
     /* The API chosen above (choose_api), made the engine's: asked for Vulkan even by a project that defaults to OpenGL ES (bDetectVulkanByDefault off), which
      * Minecraft Dungeons is; kept off it when the game has no Vulkan shaders, or TL_UE4_NO_VULKAN says so. */
     {
-        tl_lib *ue = tl_ld_find_lib("libUE4.so");
+        tl_lib *ue = tl_ld_find_lib(tl_ue_lib_name());
         if (ue && N.vulkan) { patch_return(ue, "_ZN12FAndroidMisc15ShouldUseVulkanEv", 1); patch_return(ue, "_ZN12FAndroidMisc17IsVulkanAvailableEv", 1); }
         if (ue && N.gl_only) { patch_return(ue, "_ZN12FAndroidMisc15ShouldUseVulkanEv", 0); patch_return(ue, "_ZN12FAndroidMisc22ShouldUseDesktopVulkanEv", 0); }
         /* Over OpenGL ES the engine paces its frames itself, sleeping before each swap for its sync interval -- counted in sixtieths of a second
@@ -556,19 +571,27 @@ static void *ui_main(void *arg)
 
     /* GameActivity.onCreate, before it hands over to NativeActivity: the facts the engine wants to know. */
     if (!N.generic) {
-        typedef void (*ver_fn)(void *env, void *self, void *release, int sdk, void *a, void *b, void *c, void *d);
-        ver_fn set_version = (ver_fn)NATIVE("nativeSetAndroidVersionInformation", "(Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
-        if (set_version) set_version(env, activity, tl_jni_new_string("14"), 34, tl_jni_new_string("Google"), tl_jni_new_string("Pixel 8"),
-                                     tl_jni_new_string("shiba"), tl_jni_new_string("google"));
+        if (N.ue5) {
+            /* It has one more than an older engine: the product's name. */
+            typedef void (*ver5_fn)(void *env, void *self, void *release, int sdk, void *make, void *model, void *build, void *language, void *product);
+            ver5_fn set_version = (ver5_fn)NATIVE("nativeSetAndroidVersionInformation", "(Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
+            if (set_version) set_version(env, activity, tl_jni_new_string("14"), 34, tl_jni_new_string("Google"), tl_jni_new_string("Pixel 8"),
+                                         tl_jni_new_string("UD1A.230803.041"), tl_jni_new_string("en-US"), tl_jni_new_string("shiba"));
+        } else {
+            typedef void (*ver_fn)(void *env, void *self, void *release, int sdk, void *a, void *b, void *c, void *d);
+            ver_fn set_version = (ver_fn)NATIVE("nativeSetAndroidVersionInformation", "(Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
+            if (set_version) set_version(env, activity, tl_jni_new_string("14"), 34, tl_jni_new_string("Google"), tl_jni_new_string("Pixel 8"),
+                                         tl_jni_new_string("shiba"), tl_jni_new_string("google"));
+        }
         typedef void (*glob_fn)(void *env, void *self, uint8_t ext, uint8_t pub, void *internal_path, void *external_path, uint8_t obb_in_apk, void *apk);
         glob_fn set_global = (glob_fn)NATIVE("nativeSetGlobalActivity", "(ZZLjava/lang/String;Ljava/lang/String;ZLjava/lang/String;)V");
         if (set_global) set_global(env, activity, 1, 1, tl_jni_new_string(N.internal_dir), tl_jni_new_string(N.ext_dir), 0, tl_jni_new_string(N.apk));
         typedef void (*obb_fn)(void *env, void *self, void *project, void *package, int version, int patch, void *apptype);
         obb_fn set_obb = (obb_fn)NATIVE("nativeSetObbInfo", "(Ljava/lang/String;Ljava/lang/String;IILjava/lang/String;)V");
-        if (set_obb) set_obb(env, activity, tl_jni_new_string(tl_ue4_meta("com.epicgames.ue4.GameActivity.ProjectName") ? tl_ue4_meta("com.epicgames.ue4.GameActivity.ProjectName") : "ShooterGame"), tl_jni_new_string(N.pkg), OBB_VERSION, 0, tl_jni_new_string(""));
+        if (set_obb) set_obb(env, activity, tl_jni_new_string(tl_ue4_meta("com.epicgames.ue4.GameActivity.ProjectName") ? tl_ue4_meta("com.epicgames.ue4.GameActivity.ProjectName") : "ShooterGame"), tl_jni_new_string(N.pkg), OBB_VERSION, N.has_patch ? OBB_VERSION : 0, tl_jni_new_string(""));
         typedef void (*obbp_fn)(void *env, void *self, void *a, void *b, void *c, void *d);
         obbp_fn set_obb_paths = (obbp_fn)NATIVE("nativeSetObbFilePaths", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
-        if (set_obb_paths) set_obb_paths(env, activity, tl_jni_new_string(N.obb_file), tl_jni_new_string(""), tl_jni_new_string(""), tl_jni_new_string(""));
+        if (set_obb_paths) set_obb_paths(env, activity, tl_jni_new_string(N.obb_file), tl_jni_new_string(N.has_patch ? N.patch_file : ""), tl_jni_new_string(""), tl_jni_new_string(""));
         typedef void (*rules_fn)(void *env, void *self, void *vars);
         rules_fn set_rules = (rules_fn)NATIVE("nativeSetConfigRulesVariables", "([Ljava/lang/String;)V");
         if (set_rules) set_rules(env, activity, tl_jni_new_obj_array(tl_jni_class("java/lang/String"), 0));
@@ -576,7 +599,7 @@ static void *ui_main(void *arg)
     }
 
     /* NativeActivity: the system calls the library's entry point with the activity it describes. */
-    tl_lib *lib = tl_ld_find_lib(N.generic ? N.main_lib : "libUE4.so");
+    tl_lib *lib = tl_ld_find_lib(N.generic ? N.main_lib : tl_ue_lib_name());
     void (*on_create)(ANativeActivity *, void *, size_t) = lib ? tl_ld_sym(lib, "ANativeActivity_onCreate") : NULL;
     if (!on_create) { tl_log_line("na: the library has no ANativeActivity_onCreate"); return NULL; }
     jobj *assets = tl_hle_assets();
@@ -597,9 +620,10 @@ static void *ui_main(void *arg)
     if (N.callbacks.onResume) N.callbacks.onResume(&N.na);
     if (N.callbacks.onInputQueueCreated) N.callbacks.onInputQueueCreated(&N.na, (void *)&N);          /* a queue nothing arrives through */
     if (!N.generic) {
-        typedef void (*win_fn)(void *env, void *self, uint8_t portrait, int depth);
-        win_fn set_window_info = (win_fn)NATIVE("nativeSetWindowInfo", "(ZI)V");
-        if (set_window_info) set_window_info(env, activity, N.cfg.width < N.cfg.height, 24);
+        /* Unreal Engine 5 also takes whether the window's alpha is passed on: it is not. An older engine takes no notice of the third. */
+        typedef void (*win_fn)(void *env, void *self, uint8_t portrait, int depth, int propagate_alpha);
+        win_fn set_window_info = (win_fn)NATIVE("nativeSetWindowInfo", N.ue5 ? "(ZII)V" : "(ZI)V");
+        if (set_window_info) set_window_info(env, activity, N.cfg.width < N.cfg.height, 24, 0);
         typedef void (*sv_fn)(void *env, void *self, int w, int h);
         sv_fn set_surface = (sv_fn)NATIVE("nativeSetSurfaceViewInfo", "(II)V");
         if (set_surface) set_surface(env, activity, N.cfg.width, N.cfg.height);
@@ -631,6 +655,9 @@ bool tl_na_run(void)
         char name[200]; snprintf(name, sizeof(name), "main.%d.%s.obb", OBB_VERSION, N.pkg);
         if (stored_range(N.apk, entry, &off, &size)) { tl_vfile_add(name, N.apk, off, size); tl_log_line("ue4: OBB %s is %llu bytes at %llu of the APK", name, size, off); }
         else tl_log_line("ue4: the APK has no stored %s; the engine will find no OBB", entry);
+        /* A second one, for a game too big for one: read the same way. */
+        snprintf(name, sizeof(name), "patch.%d.%s.obb", OBB_VERSION, N.pkg);
+        if (N.has_patch && stored_range(N.apk, "assets/patch.obb.png", &off, &size)) { tl_vfile_add(name, N.apk, off, size); tl_log_line("ue4: OBB %s is %llu bytes at %llu of the APK", name, size, off); }
     }
     pthread_attr_t a;
     pthread_attr_init(&a);
