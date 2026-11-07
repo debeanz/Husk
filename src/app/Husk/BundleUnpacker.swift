@@ -15,11 +15,13 @@ enum BundleUnpacker {
         }
     }
 
-    /// Whether an APK is a split or an asset pack, as the bundle formats name them, rather than the app itself.
+    /// Whether an APK is a split or an asset pack, as the bundle formats name them, rather than the app itself. Some .xapk files number theirs
+    /// (split1.apk, split2.apk beside base.apk).
     static func isSplit(_ name: String) -> Bool {
         let n = name.lowercased()
         if n == "base.apk" || n == "base-master.apk" { return false }
-        return n.hasPrefix("config.") || n.hasPrefix("split_") || n.hasPrefix("asset_pack") || n.hasPrefix("base-") || n.hasPrefix("install_time")
+        let numbered = n.hasPrefix("split") && n.dropFirst(5).first.map(\.isNumber) == true
+        return n.hasPrefix("config.") || n.hasPrefix("split_") || numbered || n.hasPrefix("asset_pack") || n.hasPrefix("base-") || n.hasPrefix("install_time")
     }
 
     /// The order an app's APKs are given to the runtime in, which takes only four: the app itself, then what it cannot run without (its 64-bit libraries, its asset pack),
@@ -41,7 +43,8 @@ enum BundleUnpacker {
         return 3
     }
 
-    /// Copies every APK in `bundle` into `dir`, and any OBBs into `dir`/obb, where the runtime finds them at launch. Returns their names.
+    /// Copies every APK in `bundle` into `dir`, and any OBBs into `dir`/obb, where the runtime finds them at launch. An APK that only carries
+    /// zipped asset packs is not copied: its packs are unpacked into `dir`/assetpacks instead. Returns the names of the APKs and OBBs kept.
     @discardableResult
     static func unpack(_ bundle: URL, into dir: URL) throws -> [String] {
         let scoped = bundle.startAccessingSecurityScopedResource()

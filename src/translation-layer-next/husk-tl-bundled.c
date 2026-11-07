@@ -7,6 +7,8 @@
  *                        Their entries may be laid out as the app's folder (files/, shared_prefs/, data/data/<package>/, <package>/)
  *                        or shared storage (Android/obb/, Android/data/, sdcard/, storage/emulated/0/, obb/, a bare main.1.pkg.obb).
  *   OBBs in the APK      assets/...x.obb, Android/obb/..., obb/...: unpacked into the OBB folder.
+ *   Asset packs          a bundle's split APK that holds only zipped assetpacks/<pack>/...: unpacked into the packs folder as the bundle
+ *                        is added, and the APK not kept (husk_tl_bundle_unpack, below).
  *
  * The OBB folder is <the game's folder>/obb, the one place a game's OBBs are: where those out of an .xapk, added with the APK or added
  * by hand go, what the game is told (getObbDir), and where Android's path for it leads (tl_path_resolve). It is not in the data
@@ -97,12 +99,17 @@ static bool safe_name(const char *name)
     }
 }
 
+/* The free space where `folder` is, or as much as there could be when it cannot be told. */
+static unsigned long long free_bytes(const char *folder)
+{
+    struct statfs sf;
+    return statfs(folder, &sf) == 0 ? (unsigned long long)sf.f_bavail * sf.f_bsize : ~0ull - SLACK;
+}
+
 /* Whether `need` bytes fit, and the reason for the player if they do not. */
 static bool has_room(unsigned long long need, char *why, size_t whylen)
 {
-    struct statfs sf;
-    if (statfs(tl_data_dir(), &sf) != 0) return true;
-    unsigned long long have = (unsigned long long)sf.f_bavail * sf.f_bsize;
+    unsigned long long have = free_bytes(tl_data_dir());
     if (have >= need + SLACK) return true;
     snprintf(why, whylen, "The game's data needs %.2f GB of free space and the phone has %.2f GB. Free some space and start it again.", (need + SLACK) / 1e9, have / 1e9);
     return false;
@@ -180,6 +187,14 @@ void tl_obb_folder(const char *data_dir, char *out, size_t n)
 {
     const char *slash = strrchr(data_dir, '/');
     snprintf(out, n, "%.*s/obb", slash ? (int)(slash - data_dir) : 0, data_dir);
+}
+
+/* Its asset packs' folder, in its own folder too: where a bundle's packs are put as it is added (husk_tl_bundle_unpack). */
+#define PACKS_FOLDER "assetpacks"
+void tl_packs_folder(const char *data_dir, char *out, size_t n)
+{
+    const char *slash = strrchr(data_dir, '/');
+    snprintf(out, n, "%.*s/" PACKS_FOLDER, slash ? (int)(slash - data_dir) : 0, data_dir);
 }
 
 /*
@@ -451,6 +466,93 @@ bool tl_bundled_data_unpack(void)
     return true;
 }
 
+/* ----------------------------------------------------------- asset packs, at import */
+
+/*
+ * Play Asset Delivery's packs, in a bundle. Google Play delivers a big game's data as asset packs, which Play Core installs under the app's files folder
+ * (assetpacks/<pack>/<version>/<version>/assets/) and tells the game where. A bundle made without Google Play carries them itself, each pack zipped in that
+ * layout and stored in a split APK that holds nothing else: Sifu's split1.apk..split4.apk hold assets/cache534/pakchunk1.zip..pakchunk39.zip, 4.3 GB that
+ * its own Java unzips on the first start, into 8.5 GB. No Java runs here, so it is done as the bundle is added: every pack goes into the game's packs folder,
+ * beside its OBB folder and, like that, not in the data folder, so that clearing the data or backing it up leaves them alone. The APK that carried them is
+ * not kept, as all it holds is a second, zipped copy. The runtime answers Play Core from that folder (husk-tl-nativeactivity.c).
+ */
+
+/* What an APK holds besides its contents: its manifest, signature and resource table. */
+static bool apk_frame(const char *name)
+{
+    return !strncmp(name, "META-INF/", 9) || !strcmp(name, "AndroidManifest.xml") || !strcmp(name, "resources.arsc")
+        || !strcmp(name, "stamp-cert-sha256") || ends_with(name, "/");
+}
+
+/* An entry of the APK that is a stored ZIP of assetpacks/... and nothing else, opened where it lies. */
+static bool open_pack_zip(const tl_zip *apk, const tl_zip_entry *e, tl_zip *out)
+{
+    char err[160];
+    const uint8_t *raw = e->method == 0 && ends_with(e->name, ".zip") ? tl_zip_raw(apk, e) : NULL;
+    if (!raw || !tl_zip_open_mem(out, raw, e->csize, err, sizeof(err))) return false;
+    size_t files = 0;
+    for (size_t i = 0; i < out->count; i++) {
+        const char *n = out->entries[i].name;
+        if (strncmp(n, "assetpacks/", 11) || !safe_name(n)) { files = 0; break; }
+        if (!ends_with(n, "/")) files++;
+    }
+    if (!files) tl_zip_close(out);
+    return files > 0;
+}
+
+/* The bytes of the packs an APK carries when packs are all it carries; 0 when it holds anything else, and is kept as it is. */
+static unsigned long long carried_packs(const tl_zip *apk)
+{
+    unsigned long long bytes = 0;
+    for (size_t i = 0; i < apk->count; i++) {
+        const tl_zip_entry *e = &apk->entries[i];
+        if (apk_frame(e->name)) continue;
+        tl_zip z;
+        if (!open_pack_zip(apk, e, &z)) return 0;
+        for (size_t k = 0; k < z.count; k++) bytes += z.entries[k].usize;
+        tl_zip_close(&z);
+    }
+    return bytes;
+}
+
+/* An APK of the bundle, read where it lies when the bundle stores it. */
+static bool open_stored_apk(const tl_zip *bundle, const tl_zip_entry *e, tl_zip *out)
+{
+    char err[160];
+    const uint8_t *raw = e->method == 0 ? tl_zip_raw(bundle, e) : NULL;
+    return raw && tl_zip_open_mem(out, raw, e->csize, err, sizeof(err));
+}
+
+/* The packs of an APK that carries only packs, into the packs folder of the game's folder `dir`. 1 if it was one and they are out, 0 if it is not
+ * one, -1 if they could not be unpacked (`err` says why). */
+static int take_packs(const tl_zip *apk, const char *apk_name, const char *dir, char *err, size_t errlen)
+{
+    if (!carried_packs(apk)) return 0;
+    size_t packs = 0;
+    unsigned long long bytes = 0;
+    for (size_t i = 0; i < apk->count; i++) {
+        const tl_zip_entry *e = &apk->entries[i];
+        tl_zip z;
+        if (apk_frame(e->name) || !open_pack_zip(apk, e, &z)) continue;
+        bool ok = true;
+        for (size_t k = 0; k < z.count && ok; k++) {
+            const tl_zip_entry *f = &z.entries[k];
+            char to[1200], fail[300] = "";
+            if (ends_with(f->name, "/")) continue;
+            /* The entry's name starts assetpacks/, which is PACKS_FOLDER. */
+            if ((size_t)snprintf(to, sizeof(to), "%s/%s", dir, f->name) >= sizeof(to)) { snprintf(err, errlen, "The path of %s is too long.", f->name); ok = false; break; }
+            make_dirs(to, false);
+            if (!tl_zip_extract(&z, f, to, fail, sizeof(fail))) { snprintf(err, errlen, "Could not unpack %s: %s", base_name(f->name), fail); ok = false; break; }
+            bytes += f->usize;
+        }
+        tl_zip_close(&z);
+        if (!ok) return -1;
+        packs++;
+    }
+    tl_log_line("bundle: %zu asset packs (%.2f GB) out of %s, into the game's " PACKS_FOLDER " folder; the APK is not kept", packs, bytes / 1e9, apk_name);
+    return 1;
+}
+
 /* ------------------------------------------------------------------- at import */
 
 char *husk_tl_bundle_unpack(const char *bundle, const char *dir, char *err, size_t errlen)
@@ -458,6 +560,25 @@ char *husk_tl_bundle_unpack(const char *bundle, const char *dir, char *err, size
     tl_zip z;
     char why[200];
     if (!tl_zip_open(&z, bundle, why, sizeof(why))) { snprintf(err, errlen, "That file is not a bundle Husk can read: %s", why); return NULL; }
+    /* The room it all takes, first, so that a bundle too big for the phone stops before minutes of unpacking rather than after: the APKs and OBBs kept,
+     * and the packs unzipped. */
+    unsigned long long need = 0;
+    for (size_t i = 0; i < z.count; i++) {
+        const tl_zip_entry *e = &z.entries[i];
+        const char *base = base_name(e->name);
+        bool apk = ends_with(base, ".apk"), obb = ends_with(base, ".obb");
+        if (!(apk || obb) || !strncmp(e->name, "__MACOSX/", 9) || !safe_name(base)) continue;
+        tl_zip a;
+        unsigned long long packs = 0;
+        if (apk && open_stored_apk(&z, e, &a)) { packs = carried_packs(&a); tl_zip_close(&a); }
+        need += packs ? packs : e->usize;
+    }
+    unsigned long long have = free_bytes(dir);
+    if (have < need + SLACK) {
+        snprintf(err, errlen, "This game needs %.2f GB of free space to be added, and the phone has %.2f GB. Free some space and add it again.", (need + SLACK) / 1e9, have / 1e9);
+        tl_zip_close(&z);
+        return NULL;
+    }
     size_t cap = 256, len = 0;
     char *names = malloc(cap);
     bool ok = names != NULL, any = false;
@@ -468,9 +589,25 @@ char *husk_tl_bundle_unpack(const char *bundle, const char *dir, char *err, size
         bool apk = ends_with(base, ".apk"), obb = ends_with(base, ".obb");
         if (!(apk || obb) || !strncmp(e->name, "__MACOSX/", 9) || !safe_name(base)) continue;
         char to[1200], fail[300] = "";
+        /* An APK that only carries asset packs: the packs come out, and the APK is not kept. Read in place when the bundle stores it. */
+        tl_zip a;
+        if (apk && open_stored_apk(&z, e, &a)) {
+            int took = take_packs(&a, base, dir, err, errlen);
+            tl_zip_close(&a);
+            if (took < 0) { ok = false; break; }
+            if (took > 0) continue;
+        }
         if ((size_t)snprintf(to, sizeof(to), obb ? "%s/obb/%s" : "%s/%s", dir, base) >= sizeof(to)) { snprintf(err, errlen, "The path of %s is too long.", base); ok = false; break; }
         make_dirs(to, false);
         if (!tl_zip_extract(&z, e, to, fail, sizeof(fail))) { snprintf(err, errlen, "%s", fail); ok = false; break; }
+        /* A compressed one is looked at once it is out. */
+        if (apk && e->method != 0 && tl_zip_open(&a, to, fail, sizeof(fail))) {
+            int took = take_packs(&a, base, dir, err, errlen);
+            tl_zip_close(&a);
+            if (took != 0) unlink(to);
+            if (took < 0) { ok = false; break; }
+            if (took > 0) continue;
+        }
         any = any || apk;
         size_t add = strlen(base) + 2;
         if (len + add > cap) {

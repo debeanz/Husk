@@ -29,6 +29,7 @@ void tl_hle_set_activity(jobj *a);
 jobj *tl_hle_assets(void);
 void tl_set_data_dir(const char *dir);
 void tl_obb_folder(const char *data_dir, char *out, size_t n);
+void tl_packs_folder(const char *data_dir, char *out, size_t n);
 void tl_nwindow_configure(int w, int h, void *layer);
 void *tl_nwindow_get(void);
 void tl_ue4_hle_install(const char *pkg, const char *apk, const char *data, const char *ext_files);
@@ -128,13 +129,21 @@ static bool stored_range(const char *apk, const char *entry, unsigned long long 
  *
  * Here the packs are found in the APK and shown where Play Core would put them, each file read in place from the APK (a virtual file), and Play Core's
  * native API (play/asset_pack.h), which the engine's GooglePAD plugin calls, is answered from them: every pack the APK carries is installed.
+ *
+ * A bundle can carry packs in APKs of their own, zipped, which are unpacked as it is added into the game's packs folder, beside its OBB folder
+ * (husk-tl-bundled.c). Those are installed too, read from there: Sifu's 39 packs, pakchunk1 to pakchunk39, are the whole game but its menus, and
+ * without them it stops at its own "Download failed" screen.
  */
 #define PACK_FILES 8
 static struct { char pack[64], file[160]; unsigned long long off, size; } g_pack_file[PACK_FILES];
 static int g_npack_files;
 static char g_pack_root[700];
 
-bool tl_ue4_has_asset_packs(void) { return g_npack_files > 0; }
+#define DISK_PACKS 128
+static struct { char name[64], path[900]; unsigned long long bytes; } g_disk_pack[DISK_PACKS];
+static int g_ndisk_packs;
+
+bool tl_ue4_has_asset_packs(void) { return g_npack_files > 0 || g_ndisk_packs > 0; }
 
 static uint16_t rd16(const uint8_t *p) { uint16_t v; memcpy(&v, p, 2); return v; }
 static uint32_t rd32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
@@ -170,9 +179,70 @@ static void packs_in_zip(const uint8_t *z, uint64_t len, uint64_t base, const ch
     }
 }
 
-/* The packs the APK carries, each file made visible where Play Core would have installed it. */
+static bool is_dir(const char *path) { struct stat st; return stat(path, &st) == 0 && S_ISDIR(st.st_mode); }
+
+/* A pack's assets folder: <pack>/assets, or a folder or two further down, as Play Core lays it out (<pack>/<version>/<version>/assets). */
+static bool pack_assets(const char *dir, int depth, char *out, size_t n)
+{
+    char p[1000];
+    snprintf(p, sizeof(p), "%s/assets", dir);
+    if (is_dir(p)) { snprintf(out, n, "%s", p); return true; }
+    DIR *d = depth < 3 ? opendir(dir) : NULL;
+    if (!d) return false;
+    bool found = false;
+    for (struct dirent *e; !found && (e = readdir(d)); ) {
+        if (e->d_name[0] == '.') continue;
+        snprintf(p, sizeof(p), "%s/%s", dir, e->d_name);
+        found = is_dir(p) && pack_assets(p, depth + 1, out, n);
+    }
+    closedir(d);
+    return found;
+}
+
+static unsigned long long folder_bytes(const char *dir, int depth)
+{
+    unsigned long long total = 0;
+    DIR *d = depth < 8 ? opendir(dir) : NULL;
+    if (!d) return 0;
+    for (struct dirent *e; (e = readdir(d)); ) {
+        if (e->d_name[0] == '.') continue;
+        char p[1100]; struct stat st;
+        snprintf(p, sizeof(p), "%s/%s", dir, e->d_name);
+        if (stat(p, &st) == 0) total += S_ISDIR(st.st_mode) ? folder_bytes(p, depth + 1) : (unsigned long long)st.st_size;
+    }
+    closedir(d);
+    return total;
+}
+
+/* The packs in the game's packs folder, each <pack>/.../assets/ with something in it. */
+static void find_disk_packs(void)
+{
+    char root[800];
+    tl_packs_folder(N.data, root, sizeof(root));
+    DIR *d = opendir(root);
+    if (!d) return;
+    unsigned long long total = 0;
+    for (struct dirent *e; g_ndisk_packs < DISK_PACKS && (e = readdir(d)); ) {
+        if (e->d_name[0] == '.' || strlen(e->d_name) >= sizeof(g_disk_pack[0].name)) continue;
+        char dir[900], assets[900];
+        snprintf(dir, sizeof(dir), "%s/%s", root, e->d_name);
+        if (!is_dir(dir) || !pack_assets(dir, 0, assets, sizeof(assets))) continue;
+        unsigned long long bytes = folder_bytes(assets, 0);
+        if (!bytes) continue;
+        snprintf(g_disk_pack[g_ndisk_packs].name, sizeof(g_disk_pack[0].name), "%s", e->d_name);
+        snprintf(g_disk_pack[g_ndisk_packs].path, sizeof(g_disk_pack[0].path), "%s", assets);
+        g_disk_pack[g_ndisk_packs].bytes = bytes;
+        g_ndisk_packs++;
+        total += bytes;
+    }
+    closedir(d);
+    if (g_ndisk_packs) tl_log_line("ue4: %d asset packs installed in the game's packs folder (%.2f GB), as its bundle carried them", g_ndisk_packs, total / 1e9);
+}
+
+/* The packs the APK carries, each file made visible where Play Core would have installed it, and those in the game's packs folder. */
 static void find_asset_packs(void)
 {
+    find_disk_packs();
     tl_zip z; char err[160];
     if (!tl_zip_open(&z, N.apk, err, sizeof(err))) return;
     for (size_t i = 0; i < z.count; i++) {
@@ -205,18 +275,24 @@ enum { PAD_CONFIRM_APPROVED = 2 };
 typedef struct { int status; uint64_t bytes; } pad_state;
 typedef struct { char path[900]; } pad_location;
 
+static int disk_pack(const char *name)
+{
+    for (int i = 0; i < g_ndisk_packs && name; i++) if (!strcmp(g_disk_pack[i].name, name)) return i;
+    return -1;
+}
 static uint64_t pack_bytes(const char *name)
 {
     uint64_t total = 0;
     for (int i = 0; i < g_npack_files && name; i++) if (!strcmp(g_pack_file[i].pack, name)) total += g_pack_file[i].size;
-    return total;
+    int d = total ? -1 : disk_pack(name);
+    return d >= 0 ? g_disk_pack[d].bytes : total;
 }
 static int pad_init(void *vm, void *context) { (void)vm; (void)context; return PAD_NO_ERROR; }
 static void pad_destroy(void) {}
 static int pad_ok(void) { return PAD_NO_ERROR; }
 static int pad_request(const char **packs, size_t n)
 {
-    for (size_t i = 0; i < n && packs; i++) if (packs[i]) tl_log_line("ue4: Play Asset Delivery: the game asks for \"%s\" (%s)", packs[i], pack_bytes(packs[i]) ? "installed" : "not in the APK");
+    for (size_t i = 0; i < n && packs; i++) if (packs[i]) tl_log_line("ue4: Play Asset Delivery: the game asks for \"%s\" (%s)", packs[i], pack_bytes(packs[i]) ? "installed" : "not in the APK or the packs folder");
     return PAD_NO_ERROR;
 }
 static int pad_removal(const char *name) { (void)name; return PAD_NO_ERROR; }
@@ -242,7 +318,11 @@ static int pad_get_location(const char *name, pad_location **out)
     if (!pack_bytes(name) || !out) return PAD_INVALID_REQUEST;
     pad_location *l = calloc(1, sizeof(*l));
     if (!l) return PAD_INVALID_REQUEST;
-    snprintf(l->path, sizeof(l->path), "%s/%s/assets", g_pack_root, name);
+    int d = disk_pack(name);
+    bool in_apk = false;
+    for (int i = 0; i < g_npack_files && !in_apk; i++) in_apk = !strcmp(g_pack_file[i].pack, name);
+    if (!in_apk && d >= 0) snprintf(l->path, sizeof(l->path), "%s", g_disk_pack[d].path);
+    else snprintf(l->path, sizeof(l->path), "%s/%s/assets", g_pack_root, name);
     tl_log_line("ue4: Play Asset Delivery: pack \"%s\" is at %s", name, l->path);
     *out = l;
     return PAD_NO_ERROR;
@@ -286,7 +366,7 @@ static void no_compute_dispatch_indirect(void *rhi, void *arguments, unsigned of
 static void answer_play_core(void)
 {
     tl_lib *ue = tl_ld_find_lib(tl_ue_lib_name());
-    if (!ue || !g_npack_files) return;
+    if (!ue || (!g_npack_files && !g_ndisk_packs)) return;
     static const struct { const char *sym; void *fn; } k_pad[] = {
         { "AssetPackManager_init", (void *)pad_init }, { "AssetPackManager_destroy", (void *)pad_destroy },
         { "AssetPackManager_onResume", (void *)pad_ok }, { "AssetPackManager_onPause", (void *)pad_ok },
@@ -302,7 +382,7 @@ static void answer_play_core(void)
     };
     int n = 0;
     for (size_t i = 0; i < sizeof(k_pad) / sizeof(k_pad[0]); i++) n += redirect(ue, k_pad[i].sym, k_pad[i].fn);
-    if (n) tl_log_line("ue4: Play Asset Delivery answered here (%d of Play Core's functions): the APK's packs are installed", n);
+    if (n) tl_log_line("ue4: Play Asset Delivery answered here (%d of Play Core's functions): the packs the game came with are installed", n);
 }
 
 /*

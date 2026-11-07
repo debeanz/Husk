@@ -35,6 +35,7 @@
 #include <xlocale.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
+#include <sys/resource.h>
 #include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -69,8 +70,29 @@ static void drop_unfinished(const char *dir, int depth)
     }
     closedir(d);
 }
+/*
+ * iOS starts an app with room for 256 open files, and a game on Android is used to far more. An Unreal game keeps every pak it mounts open, and more
+ * than once (Sifu mounts 40), beside its sound banks and the rest. As many as the system allows, then. Every engine starts by setting its data folder.
+ */
+static void raise_open_file_limit(void)
+{
+    static bool done;
+    struct rlimit rl;
+    if (done || getrlimit(RLIMIT_NOFILE, &rl) != 0) return;
+    done = true;
+    rlim_t was = rl.rlim_cur, most = rl.rlim_max < (rlim_t)OPEN_MAX ? rl.rlim_max : (rlim_t)OPEN_MAX;
+    /* The kernel's own cap per process can be lower than OPEN_MAX: the most it takes. */
+    const rlim_t tries[] = { most, 4096, 2048, 1024 };
+    for (size_t i = 0; i < sizeof(tries) / sizeof(tries[0]); i++) {
+        if (tries[i] <= was || tries[i] > most) continue;
+        rl.rlim_cur = tries[i];
+        if (setrlimit(RLIMIT_NOFILE, &rl) == 0) { tl_log_line("file: up to %llu files may be open at once (was %llu)", (unsigned long long)tries[i], (unsigned long long)was); return; }
+    }
+}
+
 void tl_set_data_dir(const char *dir)
 {
+    raise_open_file_limit();
     snprintf(g_data_dir, sizeof(g_data_dir), "%s", dir ? dir : "");
     if (g_data_dir[0]) drop_unfinished(g_data_dir, 0);
 }
