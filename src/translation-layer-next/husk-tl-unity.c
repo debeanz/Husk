@@ -2,6 +2,8 @@
 #define _DARWIN_C_SOURCE
 #include "husk-tl-unity.h"
 
+#include <dlfcn.h>
+#include <mach/mach.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdarg.h>
@@ -99,6 +101,48 @@ static bool newer_unity(void)
 
 bool tl_unity_ui_looper(void) { return U.ui_looper; }
 
+static void say_address(const char *what, uint64_t a)
+{
+    const char *lib = NULL; const void *sa = NULL;
+    const char *sym = tl_ld_symbol_at((void *)(uintptr_t)a, &lib, &sa);
+    Dl_info di;
+    if (lib) tl_log_line("unity:   %s %s+%#llx %s", what, lib, (unsigned long long)(a - (uintptr_t)tl_ld_lib_base(tl_ld_lib_of((void *)(uintptr_t)a))), sym ? sym : "");
+    else if (dladdr((void *)(uintptr_t)a, &di) && di.dli_fname) tl_log_line("unity:   %s %s %s", what, strrchr(di.dli_fname, '/') ? strrchr(di.dli_fname, '/') + 1 : di.dli_fname, di.dli_sname ? di.dli_sname : "");
+    else tl_log_line("unity:   %s %#llx", what, (unsigned long long)a);
+}
+
+/*
+ * Frames have stopped with the game not paused: where its main thread is, and the calls that led there. The engine is built without
+ * frame pointers in places, so the callers are found by looking up its stack for addresses in the game's code that follow a call.
+ */
+void tl_unity_report_stall(int seconds)
+{
+    if (!U.thread_started || atomic_load(&U.paused)) return;
+    mach_port_t t = pthread_mach_thread_np(U.thread);
+    arm_thread_state64_t st;
+    mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
+    if (thread_suspend(t) != KERN_SUCCESS) return;
+    kern_return_t got = thread_get_state(t, ARM_THREAD_STATE64, (thread_state_t)&st, &count);
+    thread_resume(t);       /* before anything that may take a lock it holds */
+    if (got != KERN_SUCCESS) return;
+    tl_log_line("unity: no frame for %d s; the main thread is in:", seconds);
+    say_address("at", arm_thread_state64_get_pc(st));
+    say_address("called from", arm_thread_state64_get_lr(st));
+    uint64_t sp = arm_thread_state64_get_sp(st);
+    uint64_t top = (uint64_t)(uintptr_t)pthread_get_stackaddr_np(U.thread);
+    int said = 0;
+    for (uint64_t p = sp & ~7ull; p + 8 <= top && p < sp + (256u << 10) && said < 24; p += 8) {
+        uint64_t v = 0;
+        vm_size_t n = 0;
+        if (vm_read_overwrite(mach_task_self(), (vm_address_t)p, sizeof(v), (vm_address_t)&v, &n) != KERN_SUCCESS || n != sizeof(v)) break;
+        if ((v & 3) || !tl_ld_lib_of((void *)(uintptr_t)v)) continue;
+        uint32_t before = 0;
+        if (vm_read_overwrite(mach_task_self(), (vm_address_t)(v - 4), sizeof(before), (vm_address_t)&before, &n) != KERN_SUCCESS) continue;
+        bool call = (before & 0xFC000000u) == 0x94000000u || (before & 0xFFFFFC1Fu) == 0xD63F0000u;     /* bl, blr */
+        if (call) { say_address("called from", v); said++; }
+    }
+}
+
 static void kb_install(void);
 
 bool tl_unity_start(const tl_unity_config *cfg)
@@ -118,6 +162,7 @@ bool tl_unity_start(const tl_unity_config *cfg)
     }
     if (!tl_ld_add_apk(cfg->apk_path)) return false;
     if (cfg->angle_egl && !tl_egl_init(cfg->angle_egl, cfg->angle_gles, cfg->frame_dir, cfg->frame_every)) return false;
+    tl_egl_no_apple_name(true);
     tl_jni_init();
     tl_hle_configure(cfg->package_name, cfg->apk_path, cfg->data_dir, cfg->width, cfg->height);
     tl_jni_hle_install();

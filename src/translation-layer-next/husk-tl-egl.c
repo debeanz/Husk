@@ -480,11 +480,32 @@ static bool ext_hidden(const char *name, size_t n)
 
 #include "husk-tl-egl-es31.inc"
 
+/*
+ * Unity's Android player looks for "Apple" in the GPU's name, and takes one for an old GLES GPU that cannot draw to half-float textures
+ * whatever its extensions say, with a few more workarounds to match. ANGLE names the GPU "ANGLE (Apple, ANGLE Metal Renderer: Apple A17 Pro
+ * GPU, ...)". So a Unity game gets the name without that word, and with it what any Android phone's GPU gets. A game that wants an HDR
+ * render target otherwise gets none at all, and throws (Ori and the Blind Forest, at its title screen).
+ */
+static bool g_no_apple_name;
+void tl_egl_no_apple_name(bool on) { g_no_apple_name = on; }
+static const char *without_apple(const char *s)
+{
+    static char out[256];
+    size_t k = 0;
+    for (const char *p = s; *p && k + 1 < sizeof(out);) {
+        if (!strncmp(p, "Apple", 5)) { p += 5; while (*p == ',' || *p == ' ') p++; continue; }
+        out[k++] = *p++;
+    }
+    out[k] = 0;
+    return out;
+}
+
 static const unsigned char *(*r_glGetString)(unsigned);
 static const unsigned char *w_glGetString(unsigned name)
 {
     if (!r_glGetString && a_eglGetProcAddress) r_glGetString = a_eglGetProcAddress("glGetString");
     const unsigned char *s = r_glGetString ? r_glGetString(name) : NULL;
+    if (g_no_apple_name && s && name == 0x1F01 /* GL_RENDERER */) s = (const unsigned char *)without_apple((const char *)s);
     if (g_es31_shim && s && (name == 0x1F02 || name == 0x8B8C)) s = (const unsigned char *)es31_fix((const char *)s, name == 0x8B8C);
     if (s && (name == 0x1F02 || name == 0x8B8C || name == 0x1F01 || name == 0x1F00)) {
         static atomic_int said[4];

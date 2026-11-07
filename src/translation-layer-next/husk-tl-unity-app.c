@@ -155,9 +155,21 @@ static void *heartbeat_thread(void *arg)
     (void)arg;
     pthread_setname_np("husk-unity-hb");
     unsigned long last = 0;
+    time_t still_since = 0;
+    int stall_reports = 0;
     for (int tick = 0;; tick++) {
         if (tick < 40) usleep(500000); else sleep(3);          /* twice a second for the first twenty seconds */
         unsigned long f = engine_frames();
+        /* Frames stopped: where the game is, a little after and a good while after, to tell a long job from a wait. */
+        if (f == last && f && A.engine == ENGINE_UNITY) {
+            time_t now = time(NULL);
+            if (!still_since) still_since = now;
+            int still = (int)(now - still_since);
+            if ((stall_reports == 0 && still >= 5) || (stall_reports == 1 && still >= 20)) { stall_reports++; tl_unity_report_stall(still); }
+        } else {
+            still_since = 0;
+            stall_reports = 0;
+        }
 #if TARGET_OS_IPHONE
         tl_log_line("unity: alive: %lu frames (+%lu), %zu MiB left before jetsam", f, f - last, os_proc_available_memory() >> 20);
 #else
