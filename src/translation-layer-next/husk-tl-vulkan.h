@@ -25,6 +25,9 @@ void tl_vk_configure(const char *path, const char *frame_dir, int frame_every);
 /* The address of a Vulkan function by name (what the guest's dlsym on libvulkan.so, and vkGetInstanceProcAddr, return), or NULL. */
 void *tl_vk_resolve(const char *name);
 
+/* Pipelines made without a VkPipelineCache, and a saved one not loaded: shaders compile side by side, and nothing is compiled again at the start. */
+void tl_vk_no_pipeline_cache(bool on);
+
 /* Husk's own libswappy for this game, in place of the one in its APK; and, when it is on, the address of one of its functions by name. */
 void tl_vk_stand_in_for_swappy(bool on);
 bool tl_vk_stands_in_for_swappy(void);

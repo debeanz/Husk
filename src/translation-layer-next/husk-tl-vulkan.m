@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "husk-tl-bionic.h"
 #include "husk-tl-egl.h"
@@ -356,6 +357,63 @@ static int w_vkGetAndroidHardwareBufferPropertiesANDROID(void *device, const voi
     return -1000072003;     /* VK_ERROR_INVALID_EXTERNAL_HANDLE */
 }
 
+/*
+ * Making pipelines. MoltenVK holds one lock on a VkPipelineCache while it translates a shader and Metal compiles it, so an engine with several threads making
+ * pipelines from one cache, as Unreal Engine 5 does on purpose, compiles one shader at a time. With no cache the lock is the shader's own, and different shaders
+ * compile side by side. A saved cache is no gain either: MoltenVK compiles everything in it again, one by one, as it is loaded, where Android's driver only reads
+ * it back. Metal keeps compiled shaders on disk by itself, so nothing already compiled is compiled again from nothing.
+ */
+#define VK_PIPELINE_COMPILE_REQUIRED 1000297000
+static bool g_no_pipeline_cache;
+void tl_vk_no_pipeline_cache(bool on) { g_no_pipeline_cache = on; }
+
+typedef int (*pfn_make_pipelines)(void *, uint64_t, uint32_t, const void *, const void *, uint64_t *);
+static int make_pipelines(pfn_make_pipelines real, void *device, uint64_t cache, uint32_t count, const void *infos, const void *alloc, uint64_t *out)
+{
+    static atomic_ulong made, nanoseconds;
+    static atomic_int building, most;
+    if (!real) return -3;
+    int now = atomic_fetch_add(&building, 1) + 1;
+    int was = atomic_load(&most);
+    while (now > was && !atomic_compare_exchange_weak(&most, &was, now)) {}
+    uint64_t start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    int r = real(device, g_no_pipeline_cache ? 0 : cache, count, infos, alloc, out);
+    uint64_t took = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - start;
+    atomic_fetch_sub(&building, 1);
+    if (r != VK_PIPELINE_COMPILE_REQUIRED) {       /* the engine asking whether one is ready, not making it */
+        unsigned long n = atomic_fetch_add(&made, count) + count;
+        unsigned long total = atomic_fetch_add(&nanoseconds, took) + took;
+        if (n / 500 != (n - count) / 500) tl_log_line("vulkan: %lu pipelines made, %.1f ms each, up to %d at a time", n, (double)total / (double)n / 1e6, atomic_load(&most));
+    }
+    return r;
+}
+static int w_vkCreateGraphicsPipelines(void *device, uint64_t cache, uint32_t count, const void *infos, const void *alloc, uint64_t *out)
+{
+    static pfn_make_pipelines real;
+    if (!real && V.lib) real = (pfn_make_pipelines)dlsym(V.lib, "vkCreateGraphicsPipelines");
+    return make_pipelines(real, device, cache, count, infos, alloc, out);
+}
+static int w_vkCreateComputePipelines(void *device, uint64_t cache, uint32_t count, const void *infos, const void *alloc, uint64_t *out)
+{
+    static pfn_make_pipelines real;
+    if (!real && V.lib) real = (pfn_make_pipelines)dlsym(V.lib, "vkCreateComputePipelines");
+    return make_pipelines(real, device, cache, count, infos, alloc, out);
+}
+typedef struct { uint32_t sType; const void *pNext; uint32_t flags; size_t initialDataSize; const void *pInitialData; } vk_pipeline_cache_ci;
+static int w_vkCreatePipelineCache(void *device, const vk_pipeline_cache_ci *info, const void *alloc, uint64_t *cache)
+{
+    typedef int (*pfn)(void *, const vk_pipeline_cache_ci *, const void *, uint64_t *);
+    static pfn real;
+    if (!real && V.lib) real = (pfn)dlsym(V.lib, "vkCreatePipelineCache");
+    if (!real) return -3;
+    if (!g_no_pipeline_cache || !info || !info->initialDataSize) return real(device, info, alloc, cache);
+    tl_log_line("vulkan: a saved pipeline cache of %zu KiB is left unread", info->initialDataSize >> 10);
+    vk_pipeline_cache_ci empty = *info;
+    empty.initialDataSize = 0;
+    empty.pInitialData = NULL;
+    return real(device, &empty, alloc, cache);
+}
+
 static void *w_vkGetInstanceProcAddr(void *instance, const char *name);
 static void *w_vkGetDeviceProcAddr(void *device, const char *name);
 
@@ -365,6 +423,9 @@ static const struct { const char *name; void *fn; } k_over[] = {
     { "vkCreateInstance", w_vkCreateInstance },
     { "vkEnumerateInstanceExtensionProperties", w_vkEnumerateInstanceExtensionProperties },
     { "vkCreateAndroidSurfaceKHR", w_vkCreateAndroidSurfaceKHR },
+    { "vkCreateGraphicsPipelines", w_vkCreateGraphicsPipelines },
+    { "vkCreateComputePipelines", w_vkCreateComputePipelines },
+    { "vkCreatePipelineCache", w_vkCreatePipelineCache },
     { "vkGetAndroidHardwareBufferPropertiesANDROID", w_vkGetAndroidHardwareBufferPropertiesANDROID },
     { "vkQueuePresentKHR", w_vkQueuePresentKHR },
     { "vkCreateSwapchainKHR", w_vkCreateSwapchainKHR },
