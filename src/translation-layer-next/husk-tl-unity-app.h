@@ -102,6 +102,8 @@ void husk_gamepad_update(int slot, unsigned buttons, float lx, float ly, float r
 const char *husk_native_loaded_apk(void);
 /* Why the game could not start, in words for the player, when its driver knows; NULL otherwise. */
 const char *husk_native_failure_reason(void);
+/* A console command for an Unreal game ("r.Fog 0"), from any thread. It reaches the engine within a fifth of a second; before the engine is up it is lost. */
+void husk_native_console_command(const char *command);
 
 int  husk_unity_state(void);
 unsigned long husk_unity_frames(void);

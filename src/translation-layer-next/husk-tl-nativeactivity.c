@@ -664,6 +664,44 @@ bool tl_na_start(const tl_ga_config *cfg)
     return true;
 }
 
+/*
+ * A console command for an Unreal game ("r.Fog 0"), asked for on any thread. GameActivity.nativeConsoleCommand takes it, and hands it to the game thread. The game's
+ * code runs only on the threads set up for it, so the activity's message loop makes the call (ui_main). A graphics menu's choices come this way (ModGraphics.swift).
+ */
+enum { CONSOLE_QUEUE = 128 };
+static pthread_mutex_t g_console_mu = PTHREAD_MUTEX_INITIALIZER;
+static char *g_console[CONSOLE_QUEUE];
+static int g_nconsole;
+
+void husk_native_console_command(const char *command)
+{
+    if (!command || !command[0]) return;
+    char *copy = strdup(command);
+    if (!copy) return;
+    pthread_mutex_lock(&g_console_mu);
+    if (g_nconsole < CONSOLE_QUEUE) { g_console[g_nconsole++] = copy; copy = NULL; }
+    pthread_mutex_unlock(&g_console_mu);
+    if (copy) { tl_log_line("ue4: too many console commands waiting: \"%s\" is dropped", copy); free(copy); }
+}
+
+static void run_console_commands(void *env, jobj *activity)
+{
+    char *batch[CONSOLE_QUEUE];
+    pthread_mutex_lock(&g_console_mu);
+    int n = g_nconsole;
+    memcpy(batch, g_console, sizeof(char *) * (size_t)n);
+    g_nconsole = 0;
+    pthread_mutex_unlock(&g_console_mu);
+    if (!n) return;
+    typedef void (*command_fn)(void *env, void *self, void *command);
+    command_fn run = (command_fn)NATIVE("nativeConsoleCommand", "(Ljava/lang/String;)V");
+    for (int i = 0; i < n; i++) {
+        tl_log_line("ue4: console command: %s%s", batch[i], run ? "" : " (this engine does not take them)");
+        if (run) run(env, activity, tl_jni_new_string(batch[i]));
+        free(batch[i]);
+    }
+}
+
 static void *ui_main(void *arg)
 {
     (void)arg;
@@ -741,9 +779,13 @@ static void *ui_main(void *arg)
     }
     tl_log_line("ue4: lifecycle delivered");
 
-    /* The activity's message loop: nothing to serve beyond keeping the thread (and its looper) alive. */
+    /* The activity's message loop: console commands asked for, and otherwise nothing to serve beyond keeping the thread (and its looper) alive. */
     int (*poll_once)(int, int *, int *, void **) = tl_bionic_find("ALooper_pollOnce");
-    for (;;) { poll_once(200, NULL, NULL, NULL); if (tl_jni_pending()) tl_jni_clear(); }
+    for (;;) {
+        poll_once(200, NULL, NULL, NULL);
+        if (!N.generic) run_console_commands(env, activity);
+        if (tl_jni_pending()) tl_jni_clear();
+    }
     return NULL;
 }
 

@@ -52,6 +52,8 @@ struct TLAppSettings: Codable, Equatable {
     var haptics = true
     /// Geometry Dash only: load Geode, its mod loader (Geode.swift).
     var geode = false
+    /// What is chosen in the graphics menu the game's bundle comes with (ModGraphics.swift): an option's name, and the place of its choice.
+    var modGraphics: [String: Int] = [:]
 
     init() {}
 
@@ -75,6 +77,7 @@ struct TLAppSettings: Codable, Equatable {
         padOpacity = try c.decodeIfPresent(Double.self, forKey: .padOpacity) ?? 1.0
         haptics = try c.decodeIfPresent(Bool.self, forKey: .haptics) ?? true
         geode = try c.decodeIfPresent(Bool.self, forKey: .geode) ?? false
+        modGraphics = try c.decodeIfPresent([String: Int].self, forKey: .modGraphics) ?? [:]
     }
 
     private static func url(_ id: String) -> URL {

@@ -671,6 +671,10 @@ struct TLCocosAttemptView: View {
     @StateObject private var monitor = PerformanceMonitor()
     /// The run log over the game, opened from the toolbar.
     @State private var showLog = false
+    /// The graphics menu the game's bundle comes with, when it does (ModGraphics.swift): its words, whether it is open, and how many times the choices have been sent.
+    @State private var modStrings: ModGraphics.Strings?
+    @State private var showGraphics = false
+    @State private var modSends = 0
     @ObservedObject private var pads = HuskGamepads.shared
     @StateObject private var virtualPad = VirtualPad()
     /// Where the player has put the pad's controls in this game, and whether they are moving them now.
@@ -824,6 +828,21 @@ struct TLCocosAttemptView: View {
                 .allowsHitTesting(false)
             }
 
+            if showGraphics, let strings = modStrings {
+                ModGraphicsPanel(strings: strings, selected: settings.modGraphics, onApply: { chosen in
+                    settings.modGraphics = chosen
+                    settings.save(app.id)
+                    ModGraphics.send(chosen, older: strings.older)
+                    withAnimation(.snappy(duration: 0.25)) { showGraphics = false }
+                }, onClose: {
+                    withAnimation(.snappy(duration: 0.25)) { showGraphics = false }
+                })
+                .frame(maxWidth: 380)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+                .padding(.top, 64).padding(.trailing, 10).padding(.bottom, 10)
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+
             if showLog {
                 GameLogPanel(text: model.logText) { withAnimation(.snappy(duration: 0.25)) { showLog = false } }
                     .frame(maxWidth: 360)
@@ -833,7 +852,12 @@ struct TLCocosAttemptView: View {
             }
 
             GameOverlay(title: app.label, status: statusLine, statusColor: model.statusColor, shown: $chrome,
-                        pinned: editingPad || showLog || stopped, monitor: monitor, onClose: { dismiss() }) {
+                        pinned: editingPad || showLog || showGraphics || stopped, monitor: monitor, onClose: { dismiss() }) {
+                if modStrings != nil {
+                    OverlayButton(systemImage: "slider.horizontal.3", label: "Graphics", active: showGraphics) {
+                        withAnimation(.snappy(duration: 0.25)) { showLog = false; showGraphics.toggle() }
+                    }
+                }
                 if padOffered {
                     OverlayButton(systemImage: "gamecontroller", label: settings.padShown ? "Hide Controller" : "Show Controller",
                                   active: settings.padShown) {
@@ -849,7 +873,7 @@ struct TLCocosAttemptView: View {
                 PerfOverlayButton()
                 OverlayButton(systemImage: "doc.text.magnifyingglass", label: showLog ? "Hide Log" : "Show Log",
                               active: showLog) {
-                    withAnimation(.snappy(duration: 0.25)) { showLog.toggle() }
+                    withAnimation(.snappy(duration: 0.25)) { showGraphics = false; showLog.toggle() }
                 }
             }
         }
@@ -866,9 +890,18 @@ struct TLCocosAttemptView: View {
             model.start()
             monitor.start(.native)
         }
+        .task {
+            guard engine == .ue4, let apk = app.apks.first else { return }
+            modStrings = await Task.detached(priority: .utility) { ModGraphics.strings(apk: apk) }.value
+        }
         // What happened, for the library: ten seconds of frames is a game that plays; a refusal is one that did not start.
         .onChange(of: model.frames) { f in
             if f > 600, model.state == Int32(HUSK_UNITY_RUNNING) { GameStatusStore.shared.record(app.id, .plays) }
+            // The bundle's graphics settings, as its Java sends them at each launch. Sent before the engine is up they would be lost, so twice.
+            if let strings = modStrings, (modSends == 0 && f > 120) || (modSends == 1 && f > 900) {
+                modSends += 1
+                ModGraphics.send(settings.modGraphics, older: strings.older)
+            }
         }
         .onChange(of: model.state) { st in
             if st == Int32(HUSK_UNITY_FAILED) { GameStatusStore.shared.record(app.id, .failed) }
